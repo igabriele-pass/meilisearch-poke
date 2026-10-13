@@ -100,7 +100,7 @@ jobs:
         run: |
           npm install -g "firebase-tools@$FIREBASE_CLI_VERSION"
 
-      - uses: pass-culture/common-workflows/actions/setup-safe-chain@a67aba1f7a63bcb20f5b722557a4bdcba2511ab5
+      - uses: pass-culture/common-workflows/actions/setup-safe-chain@a0f32ad10278941536ca6c5a17828a48196a2f2d
 
       - name: "OpenID Connect Authentication"
         id: "openid-auth"
