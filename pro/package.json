@@ -76,7 +76,7 @@
     "react-instantsearch": "7.50.1",
     "react-redux": "9.3.0",
     "react-router": "8.4.0",
-    "swr": "2.5.0",
+    "swr": "2.5.1",
     "use-debounce": "10.1.1",
     "uuid": "14.0.1",
     "yup": "1.7.1"
