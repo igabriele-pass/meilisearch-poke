@@ -1,0 +1,113 @@
+@mixin select-field {
+  min-height: 100%;
+  overflow: hidden;
+  border-radius: 1rem;
+}
+
+select {
+  &.pc-select-field {
+    @include select-field;
+  }
+  &.pc-tom-select-field {
+    @include select-field;
+
+    &:not(.tomselected):not(.pc-tom-select-autocomplete-field) > option {
+      display: none;
+    }
+  }
+
+  &.dropdown-menu {
+    & > option.dropdown-item {
+      &:checked {
+        background-color: $primary;
+        color: white;
+      }
+    }
+  }
+}
+
+
+input {
+  &[data-toggle="postal-address-autocomplete"] {
+    & + label {
+      z-index: map-get($zindex-levels, 5);
+    }
+  }
+
+  &[aria-describedby="search-icon"] {
+    flex-grow: 3 !important;
+  }
+
+  &[type="checkbox"] {
+    &[role="switch"] {
+      height: 1.7rem;
+      width: 3rem;
+      margin-right: .5rem;
+    }
+  }
+
+  &[type=file]::file-selector-button {
+    background: $primary;
+    color: white;
+  }
+}
+
+.pc-search-inline{
+  min-height: 3.6em;
+  .form-select {
+    height:100%;
+  }
+}
+
+.daterangepicker {
+  td.in-range {
+    color: $white !important;
+    @extend .bg-secondary
+  }
+  td.active {
+    @extend .bg-dark;
+  }
+}
+
+form[name="public_accounts_search"] .pc-field-filter {
+  min-width: 190px !important
+}
+
+form[name="pro_search"] .pc-field-departments {
+  min-width: 40% !important
+}
+
+.form-check-input.pc-full-opacity:disabled,
+.form-check-input.pc-full-opacity[disabled] ~ .form-check-label,
+.form-check-input.pc-full-opacity:disabled ~ .form-check-label {
+  opacity: 1;
+}
+
+.form-floating {
+  > label {
+    z-index: auto !important;
+  }
+}
+
+.pc-limit-field {
+  display: inline-block;
+  padding: 0.375rem 2.25rem 0.375rem 0.75rem;
+  font-size: 1rem;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--bs-body-color);
+  appearance: none;
+  background-color: $gray-100;
+  background-image: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path fill='none' stroke='%23343a40' stroke-linecap='round' stroke-linejoin='round' stroke-width='2' d='m2 5 6 6 6-6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 16px 12px;
+  border: 0;
+  transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+  transform: translate(-0.75rem, 0px);
+
+  &:active, &:focus{
+    border:0;
+    outline: none;
+  }
+}

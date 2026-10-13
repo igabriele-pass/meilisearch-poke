@@ -1,0 +1,238 @@
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import * as router from 'react-router'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { ApiError } from '@/apiClient/compat'
+import { CollectiveOfferAllowedAction } from '@/apiClient/v1'
+import { getCollectiveOfferFactory } from '@/commons/utils/factories/collectiveApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import {
+  managedVenueFactory,
+  userOffererFactory,
+} from '@/commons/utils/factories/userOfferersFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import type { CollectiveOfferFromParamsProps } from '@/pages/CollectiveOffer/CollectiveOffer/components/OfferEducational/useCollectiveOfferFromParams'
+
+import { CollectiveOfferStockForm } from '../components/CollectiveOfferStockForm/CollectiveOfferStockForm'
+import { CollectiveOfferStockEdition } from './CollectiveOfferStockEdition'
+
+const mockSyncVenue = vi.fn()
+const mockSnackBarSuccess = vi.fn()
+const mockSnackBarError = vi.fn()
+
+vi.mock('@/commons/hooks/useSyncVenueCache', () => ({
+  useSyncVenueCache: () => ({ syncVenue: mockSyncVenue }),
+}))
+
+vi.mock('@/commons/hooks/useSnackBar', () => ({
+  useSnackBar: () => ({
+    success: mockSnackBarSuccess,
+    error: mockSnackBarError,
+  }),
+}))
+
+vi.mock(
+  '../components/CollectiveOfferStockForm/CollectiveOfferStockForm',
+  () => ({
+    CollectiveOfferStockForm: vi.fn(),
+  })
+)
+
+const defaultUseLocationValue = {
+  state: { offer: '', queryId: '' },
+  hash: '',
+  key: '',
+  pathname: '/accueil',
+  search: '',
+}
+
+vi.mock('react-router', async () => {
+  const actual = await vi.importActual('react-router')
+  return {
+    ...actual,
+    useLocation: vi.fn(() => defaultUseLocationValue),
+  }
+})
+
+const renderCollectiveStockEdition = (
+  path: string,
+  props: CollectiveOfferFromParamsProps,
+  features: string[] = []
+) => {
+  return renderWithProviders(<CollectiveOfferStockEdition {...props} />, {
+    initialRouterEntries: [path],
+    features,
+    storeOverrides: {
+      user: {
+        currentUser: sharedCurrentUserFactory(),
+        selectedPartnerVenue: makeGetVenueResponseModel({
+          id: 1,
+          allowedOnAdage: true,
+        }),
+      },
+    },
+  })
+}
+
+describe('CollectiveOfferStockEdition', () => {
+  const mockNavigate = vi.fn()
+
+  beforeEach(async () => {
+    vi.spyOn(router, 'useNavigate').mockReturnValue(mockNavigate)
+
+    const actualNew = await vi.importActual<
+      typeof import('../components/CollectiveOfferStockForm/CollectiveOfferStockForm')
+    >('../components/CollectiveOfferStockForm/CollectiveOfferStockForm')
+    vi.mocked(CollectiveOfferStockForm).mockImplementation(
+      actualNew.CollectiveOfferStockForm
+    )
+  })
+
+  const venue = managedVenueFactory({ id: 1 })
+  const offerer = userOffererFactory({
+    id: 1,
+    name: 'Ma super structure',
+    managedVenues: [venue],
+  })
+  const defaultOffer = getCollectiveOfferFactory({
+    venue: {
+      ...venue,
+      managingOfferer: { ...offerer, siren: '123456789' },
+      departementCode: '33',
+      imgUrl: null,
+      imgAlternativeText: null,
+    },
+    allowedActions: [
+      CollectiveOfferAllowedAction.CAN_EDIT_DATES,
+      CollectiveOfferAllowedAction.CAN_EDIT_DISCOUNT,
+    ],
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderCollectiveStockEdition(
+      '/offre/A1/collectif/stocks/edition',
+      {
+        offer: defaultOffer,
+      }
+    )
+
+    await screen.findByRole('button', {
+      name: /Enregistrer et continuer/,
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should render in EDITION mode when stock is editable', async () => {
+    renderCollectiveStockEdition('/offre/A1/collectif/stocks/edition', {
+      offer: defaultOffer,
+    })
+
+    const submitButton = await screen.findByRole('button', {
+      name: /Enregistrer et continuer/,
+    })
+    expect(submitButton).toBeEnabled()
+  })
+
+  it('should render in READ_ONLY mode when stock is not editable', async () => {
+    renderCollectiveStockEdition('/offre/A1/collectif/stocks/edition', {
+      offer: getCollectiveOfferFactory({
+        ...defaultOffer,
+        allowedActions: [],
+      }),
+    })
+
+    const submitButton = await screen.findByRole('button', {
+      name: /Enregistrer et continuer/,
+    })
+    expect(submitButton).toBeDisabled()
+  })
+
+  it('should call editCollectiveStock and show success on submit', async () => {
+    vi.spyOn(api, 'editCollectiveStock').mockResolvedValueOnce({} as any)
+
+    renderCollectiveStockEdition('/offre/A1/collectif/stocks/edition', {
+      offer: defaultOffer,
+    })
+
+    const submitButton = await screen.findByRole('button', {
+      name: /Enregistrer et continuer/,
+    })
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(api.editCollectiveStock).toHaveBeenCalledTimes(1)
+    })
+
+    await waitFor(() => {
+      expect(mockSnackBarSuccess).toHaveBeenCalledWith(
+        'Vos modifications ont bien été enregistrées'
+      )
+    })
+    expect(mockNavigate).toHaveBeenCalled()
+    expect(mockSyncVenue).toHaveBeenCalledWith(defaultOffer.venue.id)
+  })
+
+  it('should display field errors on API error with status 400', async () => {
+    const error = new ApiError('', 400, 'Bad Request', {
+      price: ['Le prix est invalide'],
+    })
+    vi.spyOn(api, 'editCollectiveStock').mockRejectedValueOnce(error)
+
+    renderCollectiveStockEdition('/offre/A1/collectif/stocks/edition', {
+      offer: defaultOffer,
+    })
+
+    const submitButton = await screen.findByRole('button', {
+      name: /Enregistrer et continuer/,
+    })
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(screen.getByText('Le prix est invalide')).toBeInTheDocument()
+    })
+
+    expect(mockSnackBarSuccess).not.toHaveBeenCalled()
+    expect(mockSnackBarError).not.toHaveBeenCalled()
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('should show generic error on API error with status 500', async () => {
+    vi.spyOn(api, 'editCollectiveStock').mockRejectedValueOnce(
+      new ApiError('', 500, 'Internal Server Error', {})
+    )
+
+    renderCollectiveStockEdition('/offre/A1/collectif/stocks/edition', {
+      offer: defaultOffer,
+    })
+
+    const submitButton = await screen.findByRole('button', {
+      name: /Enregistrer et continuer/,
+    })
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(mockSnackBarError).toHaveBeenCalledWith(
+        'Une erreur est survenue lors de la mise à jour de votre stock.'
+      )
+    })
+
+    expect(mockSnackBarSuccess).not.toHaveBeenCalled()
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+
+  it('should render for offer imported with a public api', async () => {
+    renderCollectiveStockEdition('/offre/A1/collectif/stocks/edition', {
+      offer: { ...defaultOffer, isPublicApi: true },
+    })
+
+    expect(
+      await screen.findByText(
+        'Cette offre a été importée automatiquement depuis votre système de billetterie.'
+      )
+    ).toBeVisible()
+  })
+})

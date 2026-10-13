@@ -1,0 +1,35 @@
+from flask import Response
+from flask import current_app
+from flask import redirect
+from flask import request
+from flask import url_for
+
+from pcapi.routes.backoffice.home import REDIRECT_AFTER_LOGIN_COOKIE_NAME
+from pcapi.routes.backoffice.utils import access_control
+from pcapi.routes.backoffice.utils import request as request_utils
+from pcapi.routes.backoffice.utils import response as response_utils
+
+
+@current_app.errorhandler(access_control.UnauthenticatedUserError)
+def unauthenticated_user_handler(error: access_control.UnauthenticatedUserError) -> response_utils.BackofficeResponse:
+    query_path = request.path
+    if request.query_string:
+        query_path += f"?{request.query_string.decode()}"
+
+    if request_utils.is_request_from_htmx():
+        return Response(
+            response="redirecting",
+            status=200,
+            headers={"HX-Redirect": url_for("backoffice.home"), "Location": url_for("backoffice.home")},
+        )
+
+    response = redirect(url_for("backoffice.home"))
+    response.set_cookie(
+        key=REDIRECT_AFTER_LOGIN_COOKIE_NAME,
+        value=query_path,
+        max_age=600,
+        path=url_for("backoffice.home"),
+        httponly=True,
+        secure=True,
+    )
+    return response

@@ -1,0 +1,379 @@
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import React, { forwardRef } from 'react'
+import { FormProvider, useForm } from 'react-hook-form'
+import { describe, expect } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import { CollectiveOfferTemplateAllowedAction } from '@/apiClient/v1'
+import * as useAnalytics from '@/app/App/analytics/firebase'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import { getDefaultEducationalValues } from '@/commons/core/OfferEducational/constants'
+import {
+  Mode,
+  type OfferEducationalFormValues,
+} from '@/commons/core/OfferEducational/types'
+import {
+  defaultGetVenue,
+  getCollectiveOfferTemplateFactory,
+} from '@/commons/utils/factories/collectiveApiFactories'
+import { imageFileFactory } from '@/commons/utils/factories/imageUploadArgsFactories'
+import {
+  managedVenueFactory,
+  userOffererFactory,
+} from '@/commons/utils/factories/userOfferersFactories'
+import { UploaderModeEnum } from '@/commons/utils/imageUploadTypes'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import {
+  OfferEducationalForm,
+  type OfferEducationalFormProps,
+} from '../OfferEducationalForm'
+
+vi.mock('@/components/ImageDragAndDrop/getImageDimensions', () => ({
+  getImageDimensions: vi.fn((file) => {
+    return Promise.resolve({
+      width: (file as any).width || 0,
+      height: (file as any).height || 0,
+    })
+  }),
+}))
+
+vi.mock('react-avatar-editor', () => {
+  const MockAvatarEditor = forwardRef((_props, ref) => {
+    if (ref && typeof ref === 'object' && 'current' in ref) {
+      ref.current = {
+        getImage: vi.fn(() => ({ toDataURL: vi.fn(() => 'my img') })),
+        getCroppingRect: vi.fn(() => ({
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+        })),
+      }
+    }
+    return React.createElement('div', { 'aria-label': "Editeur d'image" })
+  })
+
+  MockAvatarEditor.displayName = 'MockAvatarEditor'
+
+  return {
+    __esModule: true,
+    default: MockAvatarEditor,
+  }
+})
+
+vi.mock('../FormImageUploader/FormImageUploader', () => ({
+  FormImageUploader: ({
+    onImageUpload,
+    onImageDelete,
+    onImageDropOrSelected,
+  }: {
+    onImageUpload: (values: {
+      imageFile: File
+      imageCroppedDataUrl?: string
+      credit: string | null
+    }) => void
+    onImageDelete: () => void
+    onImageDropOrSelected?: () => void
+  }) => (
+    <div>
+      <input
+        aria-label="Importez une image"
+        type="file"
+        onChange={() => onImageDropOrSelected?.()}
+      />
+      <button
+        type="button"
+        onClick={() =>
+          onImageUpload({
+            imageFile: new File(['fake image'], 'fake-image.jpg', {
+              type: 'image/jpeg',
+            }),
+            imageCroppedDataUrl: 'data:image/jpeg;base64,fake-image',
+            credit: 'Fake credit',
+          })
+        }
+      >
+        Mock image upload
+      </button>
+      <button type="button" onClick={onImageDelete}>
+        Mock image delete
+      </button>
+    </div>
+  ),
+}))
+
+function renderOfferEducationalForm(
+  props: OfferEducationalFormProps,
+  initialValues?: Partial<OfferEducationalFormValues>
+) {
+  function OfferEducationalFormWrapper() {
+    const form = useForm({
+      defaultValues: {
+        ...getDefaultEducationalValues(),
+        venueId: '1',
+        offererId: '1',
+        ...initialValues,
+      },
+      mode: 'onTouched',
+    })
+
+    return (
+      <FormProvider {...form}>
+        <OfferEducationalForm {...props} />
+      </FormProvider>
+    )
+  }
+
+  return renderWithProviders(<OfferEducationalFormWrapper />, {
+    storeOverrides: {
+      user: {
+        selectedPartnerVenue: defaultGetVenue,
+      },
+    },
+  })
+}
+
+const mockLogEvent = vi.fn()
+
+const defaultProps: OfferEducationalFormProps = {
+  userOfferer: userOffererFactory({
+    managedVenues: [managedVenueFactory(), managedVenueFactory()],
+  }),
+  mode: Mode.CREATION,
+  domainsOptions: [],
+  isTemplate: false,
+  imageOffer: null,
+  onImageUpload: vi.fn(),
+  onImageDelete: vi.fn(),
+  isSubmitting: false,
+}
+
+describe('OfferEducationalForm', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderOfferEducationalForm({
+      ...defaultProps,
+      isTemplate: true,
+    })
+
+    await screen.findByText('Indiquez le tarif de votre offre')
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should render price details if offer is template', async () => {
+    renderOfferEducationalForm({ ...defaultProps, isTemplate: true })
+
+    expect(
+      await screen.findByText('Indiquez le tarif de votre offre')
+    ).toBeInTheDocument()
+  })
+
+  it('should not render price details if offer is not template', async () => {
+    renderOfferEducationalForm({ ...defaultProps, isTemplate: false })
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText('Indiquez le tarif de votre offre')
+      ).not.toBeInTheDocument()
+    })
+  })
+
+  it('should show the dates section if the offer is a template', async () => {
+    renderOfferEducationalForm({ ...defaultProps, isTemplate: true })
+    expect(
+      await screen.findByRole('heading', {
+        name: /Quand votre offre peut-elle avoir lieu ?/,
+      })
+    ).toBeInTheDocument()
+  })
+
+  it('should not show the dates section if the offer is not a template', async () => {
+    renderOfferEducationalForm({ ...defaultProps, isTemplate: false })
+
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('heading', {
+          name: 'Quand votre offre peut-elle avoir lieu ?',
+        })
+      ).not.toBeInTheDocument()
+    })
+  })
+
+  it('should show the custom form section', async () => {
+    renderOfferEducationalForm({
+      ...defaultProps,
+      isTemplate: true,
+    })
+
+    expect(
+      await screen.findByRole('checkbox', { name: 'Par email' })
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByRole('checkbox', { name: 'Par téléphone' })
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByRole('checkbox', { name: 'Via un formulaire' })
+    ).toBeInTheDocument()
+  })
+
+  it('should have no custom contact checked initially', async () => {
+    renderOfferEducationalForm({ ...defaultProps, isTemplate: true })
+
+    expect(
+      await screen.findByRole('checkbox', { name: 'Par email' })
+    ).not.toBeChecked()
+    expect(
+      await screen.findByRole('checkbox', { name: 'Par téléphone' })
+    ).not.toBeChecked()
+    expect(
+      await screen.findByRole('checkbox', { name: 'Via un formulaire' })
+    ).not.toBeChecked()
+  })
+
+  it('should disable save button when CAN_EDIT_DETAILS is not allowed', async () => {
+    renderOfferEducationalForm({
+      ...defaultProps,
+      offer: {
+        ...getCollectiveOfferTemplateFactory(),
+        allowedActions: [],
+      },
+    })
+
+    const saveButton = await screen.findByRole('button', {
+      name: /Enregistrer et continuer/,
+    })
+    expect(saveButton).toBeDisabled()
+  })
+
+  it('should not disable form fields when CAN_EDIT_DETAILS is allowed', async () => {
+    renderOfferEducationalForm({
+      ...defaultProps,
+      isTemplate: true,
+      offer: {
+        ...getCollectiveOfferTemplateFactory(),
+        allowedActions: [CollectiveOfferTemplateAllowedAction.CAN_EDIT_DETAILS],
+      },
+    })
+
+    expect(
+      await screen.findByRole('checkbox', { name: 'Par email' })
+    ).not.toBeDisabled()
+  })
+
+  it('should display unsaved information in the action bar when the value is not the default value', async () => {
+    renderOfferEducationalForm(defaultProps)
+
+    expect(screen.getByText('Brouillon non enregistré')).toBeInTheDocument()
+
+    expect(
+      await screen.findByRole('button', { name: 'Enregistrer et continuer' })
+    ).toBeInTheDocument()
+  })
+
+  it('should render FormLocation', async () => {
+    renderOfferEducationalForm(defaultProps)
+    expect(
+      await screen.findByRole('radio', { name: 'À une adresse précise' })
+    ).toBeInTheDocument()
+  })
+
+  it('should log an event when an image is uploaded (drag or selected)', async () => {
+    vi.spyOn(useAnalytics, 'useAnalytics').mockImplementation(() => ({
+      logEvent: mockLogEvent,
+    }))
+
+    renderOfferEducationalForm(defaultProps)
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Importez une image')).toBeInTheDocument()
+    })
+
+    const imageInput = screen.getByLabelText('Importez une image')
+    await userEvent.upload(
+      imageInput,
+      Object.assign(imageFileFactory('fake_img.jpg'), {
+        width: 500,
+        height: 900,
+      })
+    )
+
+    await waitFor(() => {
+      expect(mockLogEvent).toHaveBeenCalledWith(Events.DRAG_OR_SELECTED_IMAGE, {
+        imageType: UploaderModeEnum.OFFER_COLLECTIVE,
+        imageCreationStage: 'add image',
+      })
+    })
+  })
+
+  it('should enable save button in edition mode when an image is uploaded', async () => {
+    const onImageUpload = vi.fn()
+
+    renderOfferEducationalForm({
+      ...defaultProps,
+      mode: Mode.EDITION,
+      isTemplate: true,
+      onImageUpload,
+      offer: {
+        ...getCollectiveOfferTemplateFactory(),
+        allowedActions: [CollectiveOfferTemplateAllowedAction.CAN_EDIT_DETAILS],
+      },
+    })
+
+    const saveButton = await screen.findByRole('button', {
+      name: 'Enregistrer et continuer',
+    })
+    expect(saveButton).toBeDisabled()
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Mock image upload' })
+    )
+
+    await waitFor(() => {
+      expect(onImageUpload).toHaveBeenCalledTimes(1)
+      expect(saveButton).toBeEnabled()
+    })
+  })
+
+  it('should enable save button in edition mode when an image is deleted', async () => {
+    const onImageDelete = vi.fn()
+
+    renderOfferEducationalForm(
+      {
+        ...defaultProps,
+        mode: Mode.EDITION,
+        isTemplate: true,
+        imageOffer: {
+          url: 'https://example.com/image.jpg',
+          credit: 'Initial credit',
+        },
+        onImageDelete,
+        offer: {
+          ...getCollectiveOfferTemplateFactory(),
+          allowedActions: [
+            CollectiveOfferTemplateAllowedAction.CAN_EDIT_DETAILS,
+          ],
+        },
+      },
+      {
+        imageUrl: 'https://example.com/image.jpg',
+        imageCredit: 'Initial credit',
+      }
+    )
+
+    const saveButton = await screen.findByRole('button', {
+      name: 'Enregistrer et continuer',
+    })
+    expect(saveButton).toBeDisabled()
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Mock image delete' })
+    )
+
+    await waitFor(() => {
+      expect(onImageDelete).toHaveBeenCalledTimes(1)
+      expect(saveButton).toBeEnabled()
+    })
+  })
+})

@@ -1,0 +1,174 @@
+/** biome-ignore-all lint/correctness/useUniqueElementIds: Header is used once per page. There cannot be id duplications. */
+
+import cn from 'classnames'
+import { type ForwardedRef, forwardRef } from 'react'
+import { NavLink } from 'react-router'
+
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import {
+  TABLET_MEDIA_QUERY,
+  useMediaQuery,
+} from '@/commons/hooks/useMediaQuery'
+import { Button } from '@/design-system/Button/Button'
+import {
+  ButtonColor,
+  type ButtonProps,
+  ButtonSize,
+  ButtonVariant,
+  IconPositionEnum,
+} from '@/design-system/Button/types'
+import fullBackIcon from '@/icons/full-back.svg'
+import fullBurgerIcon from '@/icons/full-burger.svg'
+import fullHelpIcon from '@/icons/full-help.svg'
+import logoPassCultureProIcon from '@/icons/logo-pass-culture-pro.svg'
+import strokeRepaymentIcon from '@/icons/stroke-repayment.svg'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import { HeaderDropdown } from './components/HeaderDropdown/HeaderDropdown'
+import styles from './Header.module.scss'
+
+export interface HeaderProps {
+  isLateralPanelOpen?: boolean
+  onToggleLateralPanel?: (state: boolean) => void
+  focusCloseButton?: () => void
+  hideAdminButton?: boolean
+  disableBurgerMenu?: boolean
+  disableHomeLink?: boolean
+  isUnauthenticated?: boolean
+  isAdminArea?: boolean
+  forceShowHelpCenter?: boolean
+}
+
+type LabelType = Required<
+  Pick<ButtonProps, 'label'> | Pick<ButtonProps, 'aria-label'>
+>
+
+export const Header = forwardRef(
+  (
+    {
+      isLateralPanelOpen = false,
+      onToggleLateralPanel,
+      focusCloseButton,
+      hideAdminButton = false,
+      disableBurgerMenu = false,
+      disableHomeLink = false,
+      isUnauthenticated = false,
+      isAdminArea = false,
+      forceShowHelpCenter = false,
+    }: Readonly<HeaderProps>,
+    openButtonRef: ForwardedRef<HTMLButtonElement>
+  ) => {
+    const { logEvent } = useAnalytics()
+
+    const showBurgerMenu = !disableBurgerMenu && !disableHomeLink
+
+    const isTablet = useMediaQuery(TABLET_MEDIA_QUERY)
+
+    const adminButtonLabel = isAdminArea
+      ? 'Revenir à l’Espace partenaire'
+      : 'Espace administration'
+
+    // In mobile mode, we don't use a button label, BUT we must have an aria-label in backup for assistive technologies
+    const adminButtonLabelProps: LabelType = isTablet
+      ? { 'aria-label': adminButtonLabel }
+      : { label: adminButtonLabel }
+
+    const helpButtonLabelProps: LabelType = isTablet
+      ? { 'aria-label': 'Centre d’aide' }
+      : { label: 'Centre d’aide' }
+
+    return (
+      <header className={styles['top-menu']}>
+        <div className={styles['top-menu-content']}>
+          {showBurgerMenu && (
+            <div className={styles['burger-icon']}>
+              <Button
+                id="header-nav-toggle"
+                ref={openButtonRef}
+                aria-expanded={isLateralPanelOpen}
+                color={ButtonColor.NEUTRAL}
+                aria-controls="lateral-panel"
+                onClick={() => {
+                  onToggleLateralPanel?.(!isLateralPanelOpen)
+                  focusCloseButton?.()
+                }}
+                variant={ButtonVariant.TERTIARY}
+                icon={fullBurgerIcon}
+                iconAlt="Menu"
+              />
+            </div>
+          )}
+          <div className={styles['nav-brand']}>
+            {disableHomeLink ? (
+              <div className={cn(styles.logo, styles['logo-link-disabled'])}>
+                <SvgIcon
+                  alt="Pass Culture pro, l’espace des acteurs culturels"
+                  src={logoPassCultureProIcon}
+                  viewBox="0 0 119 40"
+                  width="119"
+                />
+              </div>
+            ) : (
+              <NavLink
+                className={styles.logo}
+                to="/accueil"
+                onClick={() => {
+                  logEvent(Events.CLICKED_PRO)
+                }}
+              >
+                <SvgIcon
+                  alt="Pass Culture pro, l’espace des acteurs culturels"
+                  src={logoPassCultureProIcon}
+                  viewBox="0 0 119 40"
+                  width="119"
+                />
+              </NavLink>
+            )}
+          </div>
+          <div className={styles['top-right-menu']}>
+            {(isUnauthenticated || forceShowHelpCenter) && (
+              <Button
+                as="a"
+                to="https://aide.passculture.app/hc/fr"
+                opensInNewTab={!isTablet}
+                icon={isTablet ? fullHelpIcon : undefined}
+                color={ButtonColor.NEUTRAL}
+                variant={ButtonVariant.SECONDARY}
+                size={ButtonSize.SMALL}
+                {...helpButtonLabelProps}
+              />
+            )}
+            {!isUnauthenticated && (
+              <>
+                {!hideAdminButton && (
+                  <Button
+                    as="router-link"
+                    variant={ButtonVariant.SECONDARY}
+                    color={ButtonColor.BRAND}
+                    size={ButtonSize.SMALL}
+                    to={
+                      isAdminArea
+                        ? '/accueil'
+                        : '/administration/remboursements'
+                    }
+                    iconPosition={IconPositionEnum.LEFT}
+                    icon={isAdminArea ? fullBackIcon : strokeRepaymentIcon}
+                    onClick={() => {
+                      if (!isAdminArea) {
+                        logEvent(Events.CLICKED_HEADER_ADMIN_BUTTON)
+                      }
+                    }}
+                    {...adminButtonLabelProps}
+                  />
+                )}
+                <HeaderDropdown />
+              </>
+            )}
+          </div>
+        </div>
+      </header>
+    )
+  }
+)
+Header.displayName = 'Header'

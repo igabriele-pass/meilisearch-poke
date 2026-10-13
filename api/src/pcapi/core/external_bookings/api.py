@@ -1,0 +1,420 @@
+import functools
+import logging
+
+import pydantic.v1 as pydantic_v1
+import sentry_sdk
+
+import pcapi.core.bookings.models as bookings_models
+import pcapi.core.offers.models as offers_models
+import pcapi.core.providers.exceptions as providers_exceptions
+import pcapi.core.providers.models as providers_models
+import pcapi.core.providers.repository as providers_repository
+import pcapi.core.users.models as users_models
+import pcapi.utils.cinema_providers as cinema_providers_utils
+from pcapi import settings
+from pcapi.core.bookings.constants import REDIS_EXTERNAL_BOOKINGS_NAME
+from pcapi.core.bookings.constants import RedisExternalBookingType
+from pcapi.core.bookings.utils import generate_ed25519_signature
+from pcapi.core.bookings.utils import generate_hmac_signature
+from pcapi.core.providers import tasks as providers_tasks
+from pcapi.core.providers.clients import cinema_client
+from pcapi.core.providers.clients.boost_client import BoostAPIClient
+from pcapi.core.providers.clients.cgr_client import CGRAPIClient
+from pcapi.core.providers.clients.cine_office_client import CineOfficeAPIClient
+from pcapi.core.providers.clients.ems_client import EMSAPIClient
+from pcapi.models import db
+from pcapi.models import feature
+from pcapi.models.feature import FeatureToggle
+from pcapi.utils import date as date_utils
+from pcapi.utils import requests
+from pcapi.utils.queue import add_to_queue
+from pcapi.utils.transaction_manager import on_commit
+
+from . import exceptions
+from . import serialize
+from . import validation
+
+
+logger = logging.getLogger(__name__)
+
+EXTERNAL_BOOKINGS_FF = (
+    feature.FeatureToggle.DISABLE_BOOST_EXTERNAL_BOOKINGS,
+    feature.FeatureToggle.DISABLE_CDS_EXTERNAL_BOOKINGS,
+    feature.FeatureToggle.DISABLE_CGR_EXTERNAL_BOOKINGS,
+    feature.FeatureToggle.DISABLE_EMS_EXTERNAL_BOOKINGS,
+)
+
+EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS = settings.EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS
+
+
+def cancel_tickets(barcodes: list[str], *, provider: providers_models.Provider, stock: offers_models.Stock) -> None:
+    # Cinema ticket
+    if provider.isCinemaProvider:
+        return cancel_cinema_ticket(stock.offer.venueId, barcodes)
+
+    # Event with ticketing service ticket
+    venue_provider = providers_repository.get_venue_provider_by_venue_and_provider_ids(stock.offer.venueId, provider.id)
+
+    return cancel_event_ticket(
+        provider,
+        stock,
+        barcodes,
+        is_booking_saved=True,
+        venue_provider=venue_provider,
+    )
+
+
+def cancel_cinema_ticket(venue_id: int, barcodes: list[str]) -> None:
+    client = _instantiate_cinema_api_client(venue_id)
+    client.cancel_booking(barcodes)
+
+
+def book_cinema_ticket(
+    venue_id: int, stock_id_at_providers: str | None, booking: bookings_models.Booking, beneficiary: users_models.User
+) -> list[cinema_client.Ticket]:
+    local_class, _ = _get_cinema_local_class_and_id(venue_id)
+    _check_cinema_booking_is_enabled(local_class)
+
+    client = _instantiate_cinema_api_client(venue_id)
+
+    show_id = cinema_providers_utils.get_showtime_id_from_uuid(stock_id_at_providers, local_class)
+    if not show_id:
+        raise exceptions.ConfigurationException("Could not retrieve show_id")
+
+    return client.book_ticket(show_id, booking, beneficiary)
+
+
+def disable_external_bookings() -> None:
+    db.session.query(feature.Feature).filter(feature.Feature.name.in_([ff.name for ff in EXTERNAL_BOOKINGS_FF])).update(
+        {"isActive": True}, synchronize_session=False
+    )
+    db.session.commit()
+
+
+def _check_cinema_integration_is_enabled(local_class: str) -> None:
+    try:
+        integration_is_enabled_ff = {
+            "CDSStocks": FeatureToggle.ENABLE_CDS_IMPLEMENTATION,
+            "BoostStocks": FeatureToggle.ENABLE_BOOST_API_INTEGRATION,
+            "CGRStocks": FeatureToggle.ENABLE_CGR_INTEGRATION,
+            "EMSStocks": FeatureToggle.ENABLE_EMS_INTEGRATION,
+        }[local_class]
+        if not integration_is_enabled_ff.is_active():
+            raise feature.DisabledFeatureError(f"{integration_is_enabled_ff.name} is inactive")
+    except KeyError:
+        raise ValueError(f"Unknown cinema provider: {local_class}")
+
+
+def _check_cinema_booking_is_enabled(local_class: str) -> None:
+    try:
+        booking_is_disabled_ff = {
+            "CDSStocks": FeatureToggle.DISABLE_CDS_EXTERNAL_BOOKINGS,
+            "BoostStocks": FeatureToggle.DISABLE_BOOST_EXTERNAL_BOOKINGS,
+            "CGRStocks": FeatureToggle.DISABLE_CGR_EXTERNAL_BOOKINGS,
+            "EMSStocks": FeatureToggle.DISABLE_EMS_EXTERNAL_BOOKINGS,
+        }[local_class]
+        if booking_is_disabled_ff.is_active():
+            raise feature.DisabledFeatureError(f"{booking_is_disabled_ff.name} is active")
+    except KeyError:
+        raise ValueError(f"Unknown cinema provider: {local_class}")
+
+
+def _instantiate_cinema_api_client(
+    venue_id: int,
+) -> CineOfficeAPIClient | BoostAPIClient | CGRAPIClient | EMSAPIClient:
+    local_class, cinema_id = _get_cinema_local_class_and_id(venue_id)
+    sentry_sdk.set_tag("cinema-provider-local-class", local_class)
+
+    _check_cinema_integration_is_enabled(local_class)
+
+    match local_class:
+        case "CDSStocks":
+            cds_cinema_details = providers_repository.get_cds_cinema_details(cinema_id)
+            cinema_api_token = cds_cinema_details.cinemaApiToken
+            account_id = cds_cinema_details.accountId
+            return CineOfficeAPIClient(
+                cinema_id, account_id, cinema_api_token, request_timeout=EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS
+            )
+        case "BoostStocks":
+            return BoostAPIClient(cinema_id, request_timeout=EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS)
+        case "CGRStocks":
+            return CGRAPIClient(cinema_id, request_timeout=EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS)
+        case "EMSStocks":
+            return EMSAPIClient(cinema_id, request_timeout=EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS)
+        case _:
+            raise ValueError(f"Unknown cinema provider: {local_class}")
+
+
+def get_active_cinema_venue_provider(venue_id: int) -> providers_models.VenueProvider:
+    cinema_venue_provider = (
+        providers_repository.get_cinema_venue_provider_query(venue_id)
+        .filter(providers_models.VenueProvider.isActive)
+        .one_or_none()
+    )
+    if not cinema_venue_provider:
+        raise providers_exceptions.InactiveProvider()
+    return cinema_venue_provider
+
+
+def _get_cinema_local_class_and_id(venue_id: int) -> tuple[str, str]:
+    cinema_venue_provider = (
+        providers_repository.get_cinema_venue_provider_query(venue_id)
+        .filter(providers_models.VenueProvider.isActive)
+        .one_or_none()
+    )
+    if not cinema_venue_provider:
+        raise providers_exceptions.InactiveProvider()
+    return cinema_venue_provider.provider.localClass, cinema_venue_provider.venueIdAtOfferProvider
+
+
+def book_event_ticket(
+    booking: bookings_models.Booking,
+    stock: offers_models.Stock,
+    beneficiary: users_models.User,
+) -> tuple[list[cinema_client.Ticket], int | None]:
+    assert stock.offer.lastProviderId  # helps mypy
+    provider = providers_repository.get_active_provider_by_id(stock.offer.lastProviderId)
+
+    if not provider:
+        raise providers_exceptions.InactiveProvider()
+    if not provider.hmacKey:
+        raise Exception("Provider should have a hmackey")
+
+    sentry_sdk.set_tag("external-provider", provider.name)
+
+    venue_provider = providers_repository.get_venue_provider_by_venue_and_provider_ids(
+        stock.offer.venueId, provider_id=provider.id
+    )
+
+    validation.check_ticketing_service_is_correctly_set(provider=provider, venue_provider=venue_provider)
+
+    payload = serialize.ExternalEventBookingRequest.build_external_booking(stock, booking, beneficiary)
+    json_payload = payload.json()
+
+    # Booking Url (Venue booking url > provider booking url)
+    booking_url = provider.bookingExternalUrl
+
+    if venue_provider and venue_provider.externalUrls and venue_provider.externalUrls.bookingExternalUrl:
+        booking_url = venue_provider.externalUrls.bookingExternalUrl
+
+    if not booking_url:
+        raise Exception("no booking url found for this provider")
+
+    headers = {"Content-Type": "application/json"}
+    if signature := generate_hmac_signature(provider.hmacKey, json_payload):
+        headers["PassCulture-Signature"] = signature
+    if signature := generate_ed25519_signature(private_key=settings.WEBHOOK_AUTH_KEY, data=json_payload):
+        headers["PassCulture-ed25519-Signature"] = signature
+
+    response = requests.post(
+        booking_url,
+        json=json_payload,
+        headers=headers,
+        timeout=EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS,
+        record_metrics=True,
+        metric_name_suffix="external_booking_create",
+    )
+    _check_external_booking_response_is_ok(response)
+
+    try:
+        parsed_response = pydantic_v1.parse_obj_as(serialize.ExternalEventBookingResponse, response.json())
+    except (pydantic_v1.ValidationError, requests.exceptions.JSONDecodeError) as err:
+        logger.exception(
+            "Could not parse external booking response",
+            extra={"status_code": response.status_code, "response": response.text, "error": err},
+        )
+        raise exceptions.ExternalBookingException("External booking failed.")
+    parsed_response.tickets = _verify_and_return_tickets_with_same_quantity_as_booking(
+        parsed_response.tickets, booking, stock, venue_provider
+    )
+
+    for ticket in parsed_response.tickets:
+        add_to_queue(
+            REDIS_EXTERNAL_BOOKINGS_NAME,
+            {
+                "barcode": ticket.barcode,
+                "timestamp": date_utils.get_naive_utc_now().timestamp(),
+                "booking_type": RedisExternalBookingType.EVENT,
+                "cancel_event_info": {
+                    "provider_id": provider.id,
+                    "stock_id": stock.id,
+                },
+            },
+        )
+
+    return [
+        cinema_client.Ticket(barcode=ticket.barcode, seat_number=ticket.seat) for ticket in parsed_response.tickets
+    ], parsed_response.remainingQuantity
+
+
+def _verify_and_return_tickets_with_same_quantity_as_booking(
+    tickets: list[serialize.ExternalEventTicket],
+    booking: bookings_models.Booking,
+    stock: offers_models.Stock,
+    venue_provider: providers_models.VenueProvider | None,
+) -> list[serialize.ExternalEventTicket]:
+    assert stock.offer.lastProvider  # helps mypy
+    if len(tickets) == booking.quantity:
+        return tickets
+    if len(tickets) == 2 and booking.quantity == 1:
+        add_to_queue(
+            REDIS_EXTERNAL_BOOKINGS_NAME,
+            {
+                "barcode": tickets[0].barcode,
+                "timestamp": date_utils.get_naive_utc_now().timestamp(),
+                "booking_type": RedisExternalBookingType.EVENT,
+                "cancel_event_info": {
+                    "provider_id": stock.offer.lastProvider.id,
+                    "stock_id": stock.id,
+                },
+            },
+        )
+        return [tickets[1]]
+    if len(tickets) == 1 and booking.quantity == 2:
+        cancel_event_ticket(stock.offer.lastProvider, stock, [tickets[0].barcode], False, venue_provider)
+        raise exceptions.ExternalBookingException(
+            "External booking failed with status code 201 but only one ticket was returned for duo reservation"
+        )
+    raise exceptions.ExternalBookingException(
+        f"External booking failed with status code 201 but {len(tickets)} tickets were returned instead of {booking.quantity}"
+    )
+
+
+def cancel_event_ticket(
+    provider: providers_models.Provider,
+    stock: offers_models.Stock,
+    barcodes: list[str],
+    is_booking_saved: bool,
+    venue_provider: providers_models.VenueProvider | None,
+) -> None:
+    sentry_sdk.set_tag("external-provider", provider.name)
+    if not provider.hmacKey:
+        raise Exception("Provider should have a hmackey")
+
+    validation.check_ticketing_service_is_correctly_set(provider=provider, venue_provider=venue_provider)
+
+    payload = serialize.ExternalEventCancelBookingRequest.build_external_cancel_booking(barcodes)
+    json_payload = payload.json()
+
+    # Cancel Url (Venue cancel url > provider cancel url)
+    cancel_url = provider.cancelExternalUrl
+
+    if venue_provider and venue_provider.externalUrls and venue_provider.externalUrls.cancelExternalUrl:
+        cancel_url = venue_provider.externalUrls.cancelExternalUrl
+
+    if not cancel_url:
+        raise Exception("no cancel url found for this provider")
+
+    headers = {"Content-Type": "application/json"}
+    if signature := generate_hmac_signature(provider.hmacKey, json_payload):
+        headers["PassCulture-Signature"] = signature
+    if signature := generate_ed25519_signature(private_key=settings.WEBHOOK_AUTH_KEY, data=json_payload):
+        headers["PassCulture-ed25519-Signature"] = signature
+
+    response = requests.post(
+        cancel_url,
+        json=json_payload,
+        headers=headers,
+        timeout=EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS,
+        record_metrics=True,
+        metric_name_suffix="external_booking_cancel",
+    )
+    _check_external_booking_response_is_ok(response)
+
+    try:
+        parsed_response = pydantic_v1.parse_obj_as(serialize.ExternalEventCancelBookingResponse, response.json())
+        if parsed_response.remainingQuantity is None:
+            stock.quantity = None
+        else:
+            new_quantity = parsed_response.remainingQuantity + stock.dnBookedQuantity
+            if is_booking_saved:
+                new_quantity -= len(barcodes)
+            stock.quantity = new_quantity
+    except (ValueError, requests.exceptions.JSONDecodeError, pydantic_v1.ValidationError):
+        logger.exception(
+            "Could not parse external booking cancel response",
+            extra={"status_code": response.status_code, "response": response.text},
+        )
+
+
+def send_booking_notification_to_external_service(
+    booking: bookings_models.Booking, action: providers_tasks.BookingAction
+) -> None:
+    """
+    Send booking notification (cancel or booking) to provider external service.
+
+    Do not send notification when:
+        - notification params are not properly set (missing `hmacKey` or/and `notificationExternalUrl`)
+        - booking is linked to an external ticketing system
+    """
+    hmacKey, notification_url = _get_notification_params(booking)
+    if not hmacKey or not notification_url:  # notification system not set
+        return
+
+    # booking is linked to ticketing system
+    if booking.stock.offer.withdrawalType == offers_models.WithdrawalTypeEnum.IN_APP:
+        return
+
+    try:
+        external_api_notification_request = providers_tasks.ExternalApiBookingNotificationRequest.build(booking, action)
+        signature = generate_hmac_signature(hmacKey, external_api_notification_request.model_dump_json())
+        ed25519_signature = generate_ed25519_signature(
+            data=external_api_notification_request.model_dump_json(), private_key=settings.WEBHOOK_AUTH_KEY
+        )
+        payload = providers_tasks.ExternalApiBookingNotificationTaskPayload(
+            data=external_api_notification_request,
+            notificationUrl=notification_url,
+            signature=signature,
+            ed25519_signature=ed25519_signature,
+        )
+        on_commit(functools.partial(providers_tasks.external_api_booking_notification_task.delay, payload.model_dump()))
+
+    except Exception as err:
+        logger.exception(
+            "Error: %s. Could not send external booking notification for: booking: %s, action %s",
+            err,
+            action.value,
+            booking.id,
+        )
+
+
+def _get_notification_params(booking: bookings_models.Booking) -> tuple[str | None, str | None]:
+    """
+    Return (`hmacKey`, `notificationExternalUrl`) necessary to notify provider
+    """
+    provider = providers_repository.get_provider_enabled_for_pro_by_id(booking.stock.offer.lastProviderId)
+
+    if not provider:  # provider not enabled
+        return None, None
+
+    notification_url = provider.notificationExternalUrl
+    venue_provider = providers_repository.get_venue_provider_by_venue_and_provider_ids(
+        booking.stock.offer.venueId,
+        provider.id,
+    )
+
+    # `notificationExternalUrl` defined at venue level has priority over `notificationExternalUrl` defined at provider level
+    if venue_provider and venue_provider.externalUrls and venue_provider.externalUrls.notificationExternalUrl:
+        notification_url = venue_provider.externalUrls.notificationExternalUrl
+
+    return provider.hmacKey, notification_url
+
+
+def _check_external_booking_response_is_ok(response: requests.Response) -> None:
+    if response.status_code == 409:
+        try:
+            error_response = pydantic_v1.parse_obj_as(serialize.ExternalEventBookingErrorResponse, response.json())
+        except (ValueError, pydantic_v1.ValidationError):
+            raise exceptions.ExternalBookingException(
+                f"External booking failed with status code {response.status_code} and message {response.text}"
+            )
+        if error_response.error == "sold_out":
+            raise exceptions.ShowSoldOutException(remainingQuantity=0)
+        if error_response.error == "not_enough_seats" and isinstance(error_response.remainingQuantity, int):
+            raise exceptions.ShowSoldOutException(remainingQuantity=error_response.remainingQuantity)
+        if error_response.error == "already_cancelled":
+            raise exceptions.ExternalBookingAlreadyCancelledError(remainingQuantity=error_response.remainingQuantity)
+    if not response.ok:
+        raise exceptions.ExternalBookingException(
+            f"External booking failed with status code {response.status_code} and message {response.text}"
+        )

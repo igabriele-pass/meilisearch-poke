@@ -1,0 +1,71 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_rem.scss" as rem;
+
+.offerer-authentication-container {
+  max-width: rem.torem(640px);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.signup-offerer-authentication-form {
+  margin-bottom: var(--size-spacing-l);
+}
+
+.warning-callout {
+  margin-bottom: var(--size-spacing-xxl);
+
+  &-text {
+    @include fonts.body;
+  }
+}
+
+.displaying-data {
+  margin-bottom: var(--size-spacing-l);
+
+  &-title-wrapper {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  &-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+}
+
+.subheading-description {
+  @include fonts.body-xs;
+
+  color: var(--color-text-subtle);
+  margin-bottom: var(--size-spacing-xxl);
+}
+
+.next-actions {
+  margin-top: var(--size-spacing-xxl);
+  display: flex;
+  justify-content: center;
+}
+
+.title {
+  @include fonts.title1;
+
+  margin-top: var(--size-spacing-xxl);
+  margin-bottom: var(--size-spacing-s);
+  overflow-wrap: anywhere;
+}
+
+.subtitle {
+  @include fonts.title2;
+
+  margin-bottom: var(--size-spacing-l);
+  overflow-wrap: anywhere;
+}
+
+.subtitle-2 {
+  @include fonts.title2;
+
+  overflow-wrap: anywhere;
+}

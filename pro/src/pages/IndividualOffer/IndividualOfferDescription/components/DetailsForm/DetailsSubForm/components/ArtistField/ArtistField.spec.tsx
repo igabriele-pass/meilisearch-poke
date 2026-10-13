@@ -1,0 +1,365 @@
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { forwardRef } from 'react'
+import {
+  FormProvider,
+  type UseFormGetValues,
+  useFieldArray,
+  useForm,
+} from 'react-hook-form'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { type ArtistOfferLinkResponseModel, ArtistType } from '@/apiClient/v1'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { resizeImageURL } from '@/commons/utils/resizeImageURL'
+
+import type { DetailsFormValues } from '../../../validationSchema'
+import { ArtistField } from './ArtistField'
+
+vi.mock('@/apiClient/api', () => ({
+  api: { getArtists: vi.fn() },
+}))
+
+vi.mock('@/commons/utils/resizeImageURL', () => ({
+  resizeImageURL: vi.fn((args) => `resized-${args.imageURL}`),
+}))
+
+const apiSelectSpy = vi.fn()
+
+vi.mock('@/ui-kit/form/ApiSelect/ApiSelect', () => ({
+  ApiSelect: forwardRef((props, _ref) => {
+    apiSelectSpy(props)
+    return <span data-testid="mock-api-select" />
+  }),
+}))
+
+const renderArtistField = ({
+  artistType = ArtistType.AUTHOR,
+  readOnly = false,
+  defaultArtistOfferLinks = [
+    {
+      artistId: 'any-id',
+      artistName: 'any-name',
+      artistType: ArtistType.AUTHOR,
+    },
+  ],
+}: {
+  artistType?: ArtistType
+  readOnly?: boolean
+  defaultArtistOfferLinks?: ArtistOfferLinkResponseModel[]
+} = {}) => {
+  let getValues: UseFormGetValues<{
+    artistOfferLinks: ArtistOfferLinkResponseModel[]
+  }>
+
+  const ArtistFieldParentMock = () => {
+    const fieldArray = useFieldArray<DetailsFormValues, 'artistOfferLinks'>({
+      name: 'artistOfferLinks',
+    })
+
+    return (
+      <ArtistField
+        artistType={artistType}
+        readOnly={readOnly}
+        fieldArray={fieldArray}
+      />
+    )
+  }
+
+  const Wrapper = () => {
+    const form = useForm({
+      defaultValues: { artistOfferLinks: defaultArtistOfferLinks },
+    })
+    getValues = form.getValues
+
+    return (
+      <FormProvider {...form}>
+        <ArtistFieldParentMock />
+      </FormProvider>
+    )
+  }
+
+  return {
+    ...renderWithProviders(<Wrapper />),
+    getValues: () => getValues(),
+  }
+}
+
+describe('ArtistField', () => {
+  beforeEach(() => {
+    apiSelectSpy.mockClear()
+    vi.mocked(api.getArtists).mockResolvedValue([
+      {
+        id: '1',
+        name: 'Alice',
+        description: 'Auteurice de romans et de nouvelles fantastiques',
+        thumbUrl: 'any-url',
+      },
+      { id: '2', name: 'Bob', description: null, thumbUrl: 'any-url' },
+    ])
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderArtistField()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should pass label "Auteur" to ApiSelect', () => {
+    renderArtistField()
+
+    const props = apiSelectSpy.mock.calls[0][0]
+
+    expect(screen.getByTestId('mock-api-select')).toBeInTheDocument()
+    expect(props.label).toBe('Auteur')
+    expect(props.name).toBe('artistOfferLinks.0')
+    expect(props.minSearchLength).toBe(2)
+    expect(props.disabled).toBe(false)
+    expect(props.required).toBe(false)
+    expect(props.thumbPlaceholder).toBeDefined()
+    expect(props.value).toBe('any-name')
+  })
+
+  it('should not render ApiSelect', () => {
+    renderArtistField({ artistType: ArtistType.PERFORMER })
+    expect(screen.queryByTestId('mock-api-select')).not.toBeInTheDocument()
+  })
+
+  it('should pass label "Interprète" to ApiSelect', () => {
+    const performerLink = [
+      {
+        artistId: 'any-id',
+        artistName: 'any-name',
+        artistType: ArtistType.PERFORMER,
+      },
+    ]
+    renderArtistField({
+      artistType: ArtistType.PERFORMER,
+      defaultArtistOfferLinks: performerLink,
+    })
+    expect(apiSelectSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'Interprète' })
+    )
+  })
+
+  it('should pass label "Metteur en scène" to ApiSelect', () => {
+    const stageDirectorLink = [
+      {
+        artistId: 'any-id',
+        artistName: 'any-name',
+        artistType: ArtistType.STAGE_DIRECTOR,
+      },
+    ]
+    renderArtistField({
+      artistType: ArtistType.STAGE_DIRECTOR,
+      defaultArtistOfferLinks: stageDirectorLink,
+    })
+    expect(apiSelectSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'Metteur en scène' })
+    )
+  })
+
+  it('should disable ApiSelect', () => {
+    renderArtistField({ readOnly: true })
+    const props = apiSelectSpy.mock.calls[0][0]
+    expect(props.disabled).toBe(true)
+  })
+
+  it('searchApi should call api.getArtists and map results', async () => {
+    renderArtistField()
+    const props = apiSelectSpy.mock.calls[0][0]
+
+    const result = await props.searchApi('Al')
+    expect(api.getArtists).toHaveBeenCalledWith({
+      query: { search: 'Al' },
+    })
+    expect(result).toEqual([
+      expect.objectContaining({ value: '1', label: 'Alice' }),
+      expect.objectContaining({ value: '2', label: 'Bob' }),
+    ])
+  })
+
+  it('searchApi should call image resize function for artist thumbnails', async () => {
+    renderArtistField()
+    const props = apiSelectSpy.mock.calls[0][0]
+
+    await props.searchApi('Al')
+
+    expect(resizeImageURL).toHaveBeenCalledTimes(2)
+    expect(resizeImageURL).toHaveBeenCalledWith({
+      imageURL: 'any-url',
+      width: 44,
+      shouldUseRequestImgproxyFormat: false,
+    })
+  })
+
+  it('searchApi should truncate artist descriptions at word boundary', async () => {
+    renderArtistField()
+    const props = apiSelectSpy.mock.calls[0][0]
+
+    const result = await props.searchApi('Al')
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        label: 'Alice',
+        description: 'Auteurice de romans et de...',
+      }),
+      expect.objectContaining({ label: 'Bob', description: null }),
+    ])
+  })
+
+  it('onCreate should update form value with search text', async () => {
+    const { getValues } = renderArtistField()
+    const props = apiSelectSpy.mock.calls[0][0]
+
+    props.onCreate('John')
+
+    await waitFor(() => {
+      const artistOfferLinks = getValues().artistOfferLinks
+      expect(artistOfferLinks[0]).toEqual({
+        artistId: null,
+        artistName: 'John',
+        artistType: ArtistType.AUTHOR,
+      })
+    })
+  })
+
+  it('onSelect should update form value with selected artist object', async () => {
+    const { getValues } = renderArtistField()
+    const props = apiSelectSpy.mock.calls[0][0]
+
+    props.onSelect({ id: '42', name: 'John Doe' })
+
+    await waitFor(() => {
+      const artistOfferLinks = getValues().artistOfferLinks
+      expect(artistOfferLinks[0]).toEqual({
+        artistId: '42',
+        artistName: 'John Doe',
+        artistType: ArtistType.AUTHOR,
+      })
+    })
+  })
+
+  it('onReset should update form value with empty string', async () => {
+    const { getValues } = renderArtistField()
+    const props = apiSelectSpy.mock.calls[0][0]
+
+    props.onReset?.()
+
+    await waitFor(() => {
+      const artistOfferLinks = getValues().artistOfferLinks
+      expect(artistOfferLinks[0]).toEqual({
+        artistId: null,
+        artistName: '',
+        artistType: ArtistType.AUTHOR,
+      })
+    })
+  })
+
+  it('should render button to add artist', () => {
+    renderArtistField({ readOnly: false })
+
+    expect(
+      screen.getByRole('button', { name: /Ajouter un auteur/i })
+    ).toBeInTheDocument()
+  })
+
+  it('should not render button to add artist when readOnly', () => {
+    renderArtistField({ readOnly: true })
+
+    expect(
+      screen.queryByRole('button', { name: /Ajouter un auteur/i })
+    ).not.toBeInTheDocument()
+  })
+
+  it('should add new artist field when clicking add button', async () => {
+    const { getValues } = renderArtistField({ readOnly: false })
+
+    const addButton = screen.getByRole('button', { name: /Ajouter un auteur/i })
+    await userEvent.click(addButton)
+
+    const artistOfferLinks = getValues().artistOfferLinks
+    expect(artistOfferLinks).toHaveLength(2)
+    expect(artistOfferLinks[1]).toEqual({
+      artistId: null,
+      artistName: '',
+      artistType: ArtistType.AUTHOR,
+    })
+  })
+
+  it('should not show trash button when there is only one artist field and it is empty', () => {
+    renderArtistField({
+      defaultArtistOfferLinks: [
+        {
+          // TODO(rchaffal): remove the @ts-expect-error once ArtistOfferLinkResponseModel is migrated
+          // to pydantic v2 and artistId can be null in generated types
+          // @ts-expect-error: waiting for backend to migrate to pydantic v2
+          artistId: null,
+          artistName: '',
+          artistType: ArtistType.AUTHOR,
+        },
+      ],
+    })
+
+    const trashButton = screen.queryByRole('button', {
+      name: /Réinitialiser les valeurs de ce champ/i,
+    })
+    expect(trashButton).not.toBeInTheDocument()
+  })
+
+  it('should remove artist field when trashing one of multiple artist links', async () => {
+    const { getValues } = renderArtistField({
+      defaultArtistOfferLinks: [
+        {
+          artistId: '1',
+          artistName: 'Author 1',
+          artistType: ArtistType.AUTHOR,
+        },
+        {
+          artistId: '2',
+          artistName: 'Author 2',
+          artistType: ArtistType.AUTHOR,
+        },
+        {
+          artistId: '3',
+          artistName: 'Author 3',
+          artistType: ArtistType.AUTHOR,
+        },
+      ],
+    })
+
+    const trashButtons = screen.getAllByRole('button', {
+      name: /Supprimer ce champ/i,
+    })
+    await userEvent.click(trashButtons[2])
+    await userEvent.click(trashButtons[0])
+
+    const artistOfferLinks = getValues().artistOfferLinks
+    expect(artistOfferLinks).toHaveLength(1)
+    expect(artistOfferLinks[0].artistName).toBe('Author 2')
+  })
+
+  it('should not show trash button when readOnly is true', () => {
+    renderArtistField({
+      readOnly: true,
+      defaultArtistOfferLinks: [
+        {
+          artistId: '1',
+          artistName: 'Author 1',
+          artistType: ArtistType.AUTHOR,
+        },
+      ],
+    })
+
+    expect(
+      screen.queryByRole('button', {
+        name: /Réinitialiser les valeurs de ce champ/i,
+      })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: /Supprimer ce champ/i })
+    ).not.toBeInTheDocument()
+  })
+})

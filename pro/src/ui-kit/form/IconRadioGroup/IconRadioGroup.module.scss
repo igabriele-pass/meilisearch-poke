@@ -1,0 +1,35 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_a11y.scss" as a11y;
+
+.icon-radio-group {
+  &-legend {
+    margin-bottom: var(--size-spacing-s);
+  }
+
+  &-items {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--size-spacing-xl);
+  }
+
+  &-items-container {
+    display: flex;
+    flex-direction: column;
+    width: fit-content;
+  }
+
+  &-scale {
+    @include fonts.body-accent-xs;
+
+    margin: var(--size-spacing-s) 0 0;
+    display: flex;
+    align-items: center;
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+.visually-hidden {
+  @include a11y.visually-hidden;
+}

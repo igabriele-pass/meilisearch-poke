@@ -1,0 +1,77 @@
+query getDemarche($demarcheNumber: Int!, $state: DossierState, $order: Order, $first: Int, $after: String, $archived: Boolean, $revision: ID, $since: ISO8601DateTime) {
+  demarche(number: $demarcheNumber) {
+    dossiers(
+      state: $state
+      order: $order
+      first: $first
+      after: $after
+      archived: $archived
+      updatedSince: $since
+      revision: $revision
+    ) {
+      pageInfo {
+        hasPreviousPage
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        id
+        number
+        state
+        dateDerniereModification
+        dateDerniereModificationChamps
+        dateDerniereCorrectionEnAttente
+        usager {
+          email
+        }
+        demandeur {
+          ... on PersonneMorale {
+	       siret
+	      }
+	    }
+        champs {
+          ...ChampFragment
+        }
+        annotations {
+          id
+          label
+          updatedAt
+          stringValue
+          ... on TextChamp {
+            value
+          }
+          ... on CheckboxChamp {
+            checked: value
+          }
+        }
+        messages {
+          email
+          createdAt
+        }
+      }
+    }
+  }
+}
+
+fragment ChampFragment on Champ {
+  id
+  label
+  stringValue
+  updatedAt
+  ... on TextChamp {
+    value
+  }
+  ... on PieceJustificativeChamp {
+    file {
+      url
+      checksum
+      contentType
+      filename
+    }
+  }
+  ... on SiretChamp {
+    etablissement {
+      siret
+    }
+  }
+}

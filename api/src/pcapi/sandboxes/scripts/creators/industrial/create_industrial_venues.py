@@ -1,0 +1,158 @@
+import logging
+import pathlib
+import random
+import re
+
+import pcapi.core.finance.factories as finance_factories
+import pcapi.core.offerers.api as offerers_api
+import pcapi.core.offerers.factories as offerers_factories
+import pcapi.core.offerers.models as offerers_models
+from pcapi.core.offerers.models import Offerer
+from pcapi.core.offerers.models import Venue
+from pcapi.core.providers import factories as providers_factories
+from pcapi.models.validation_status_mixin import ValidationStatus
+from pcapi.sandboxes.scripts.mocks.accessibility_mocks import ACCESSIBILITY_MOCK
+from pcapi.sandboxes.scripts.mocks.venue_mocks import MOCK_NAMES
+from pcapi.sandboxes.scripts.mocks.venue_mocks import MOCK_NAME_TO_PUBLIC_NAME
+from pcapi.sandboxes.scripts.utils.helpers import log_func_duration
+from pcapi.sandboxes.thumbs import generic_pictures
+from pcapi.utils import siren as siren_utils
+
+
+logger = logging.getLogger(__name__)
+
+
+OFFERERS_WITH_PHYSICAL_VENUE_REMOVE_MODULO = 3
+OFFERERS_WITH_PHYSICAL_VENUE_WITH_SIRET_REMOVE_MODULO = OFFERERS_WITH_PHYSICAL_VENUE_REMOVE_MODULO * 2
+OFFERERS_WITH_A_SECOND_VENUE_WITH_SIRET_MODULO = 4
+
+
+def add_default_image_to_venue(image_path: pathlib.Path, offerer: Offerer, venue: Venue) -> None:
+    offerers_api.save_venue_banner(
+        user=offerer.UserOfferers[0].user,
+        venue=venue,
+        content=image_path.read_bytes(),
+        image_credit="industrial sandbox picture provider",
+    )
+
+
+@log_func_duration
+def create_industrial_venues(offerers_by_name: dict) -> dict[str, Venue]:
+    logger.info("create_industrial_venues")
+
+    venue_by_name = {}
+    mock_accessibility_index = 0
+
+    application_id_prefix = "12"
+
+    landscape_image_paths = iter(sorted(pathlib.Path(generic_pictures.__path__[0]).glob("landscape_*.jpg")))
+
+    for offerer_index, (offerer_name, offerer) in enumerate(offerers_by_name.items()):
+        geoloc_match = re.match(r"(.*)lat\:(.*) lon\:(.*)", offerer_name)
+        latitude = float(geoloc_match.group(2)) if geoloc_match else None
+        longitude = float(geoloc_match.group(3)) if geoloc_match else None
+
+        venue_name = MOCK_NAMES[offerer_index % len(MOCK_NAMES)]
+        venue_public_name = MOCK_NAME_TO_PUBLIC_NAME.get(venue_name, venue_name)
+        venue_accessibility = ACCESSIBILITY_MOCK[mock_accessibility_index % len(ACCESSIBILITY_MOCK)]
+
+        if offerer_index % OFFERERS_WITH_PHYSICAL_VENUE_REMOVE_MODULO == 0:
+            # This used to be a virtual only venue offerer.
+            # Not sure how to deal with it now that there are no more virtual venues but
+            # we still need at least one venue with the offerer.
+            virtual_venue_name = "{} (Offre numérique)"
+            venue_by_name[virtual_venue_name] = offerers_factories.VenueWithoutSiretFactory.create(
+                managingOfferer=offerer,
+                name=virtual_venue_name.format(venue_name),
+                publicName=venue_public_name,
+            )
+
+        else:
+            if offerer_index % OFFERERS_WITH_PHYSICAL_VENUE_WITH_SIRET_REMOVE_MODULO:
+                comment = None
+                siret = siren_utils.complete_siren_or_siret(f"{offerer.siren}0001")
+            else:
+                comment = "Pas de siret car c'est comme cela."
+                siret = None
+
+            bank_account = None
+            if siret:
+                bank_account = finance_factories.BankAccountFactory.create(
+                    offerer=offerer, dsApplicationId=application_id_prefix + str(offerer_index)
+                )
+
+            venue = offerers_factories.VenueFactory.create(
+                managingOfferer=offerer,
+                bookingEmail=f"booking-email@offerer{offerer.id}.example.com",
+                offererAddress__address__latitude=latitude,
+                offererAddress__address__longitude=longitude,
+                comment=comment,
+                name=venue_name,
+                publicName=venue_public_name,
+                siret=siret,
+                venueTypeCode=random.choice(offerers_models.PERMENANT_VENUE_TYPES),
+                pricing_point="self" if siret else None,
+                bank_account=bank_account,
+            )
+            offerers_factories.AccessibilityProviderFactory.create(
+                venue=venue, externalAccessibilityData=venue_accessibility
+            )
+
+            if offerer.validationStatus == ValidationStatus.NEW:
+                offerers_factories.VenueRegistrationFactory.create(venue=venue)
+
+            image_path = next(landscape_image_paths, None)
+            if image_path is not None:
+                add_default_image_to_venue(image_path, offerer, venue)
+
+            venue_by_name[venue_name] = venue
+
+            # Create a second physical venue to enable removing SIRET on the first one
+            if offerer_index % OFFERERS_WITH_A_SECOND_VENUE_WITH_SIRET_MODULO == 0:
+                second_venue_name = f"{venue_name} Bis"
+                second_venue = offerers_factories.VenueFactory.create(
+                    managingOfferer=offerer,
+                    bookingEmail=f"booking-email@offerer{offerer.id}.example.com",
+                    offererAddress__address__latitude=latitude,
+                    offererAddress__address__longitude=longitude,
+                    comment=None,
+                    name=second_venue_name,
+                    siret=siren_utils.complete_siren_or_siret(f"{offerer.siren}0002"),
+                    venueTypeCode=random.choice(offerers_models.PERMENANT_VENUE_TYPES),
+                    pricing_point="self",
+                )
+                second_bank_account = finance_factories.BankAccountFactory.create(offerer=venue.managingOfferer)
+                offerers_factories.VenueBankAccountLinkFactory.create(
+                    bankAccount=second_bank_account, venue=second_venue
+                )
+                venue_by_name[second_venue_name] = second_venue
+            mock_accessibility_index += 1
+
+    # Venue Allocine
+
+    allocine_offerer = offerers_factories.OffererFactory.create(name="Structure du lieu synchro allociné")
+    offerers_factories.UserOffererFactory.create(offerer=allocine_offerer, user__email="api@example.com")
+    venue_synchronized_with_allocine = offerers_factories.VenueFactory.create(
+        name="Lieu synchro allociné",
+        siret="21070034000016",
+        pricing_point="self",
+        managingOfferer=allocine_offerer,
+        venueTypeCode=offerers_models.VenueTypeCode.MOVIE,
+    )
+    bank_account = finance_factories.BankAccountFactory.create(offerer=venue_synchronized_with_allocine.managingOfferer)
+    offerers_factories.VenueBankAccountLinkFactory.create(
+        bankAccount=bank_account, venue=venue_synchronized_with_allocine
+    )
+    allocine_provider = providers_factories.AllocineProviderFactory.create(isActive=True)
+    theater = providers_factories.AllocineTheaterFactory.create(siret=venue_synchronized_with_allocine.siret)
+    pivot = providers_factories.AllocinePivotFactory.create(
+        venue=venue_synchronized_with_allocine, theaterId=theater.theaterId, internalId=theater.internalId
+    )
+    providers_factories.AllocineVenueProviderFactory.create(
+        venue=venue_synchronized_with_allocine, provider=allocine_provider, venueIdAtOfferProvider=pivot.theaterId
+    )
+    venue_by_name[venue_synchronized_with_allocine.name] = venue_synchronized_with_allocine
+
+    logger.info("created %d venues", len(venue_by_name))
+
+    return venue_by_name

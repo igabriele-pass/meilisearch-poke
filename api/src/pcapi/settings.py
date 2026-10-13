@@ -1,0 +1,695 @@
+"""config"""
+
+import base64
+import json
+import os
+from datetime import datetime
+from datetime import timedelta
+from logging import INFO as LOG_LEVEL_INFO
+from pathlib import Path
+
+import semver
+from dotenv import load_dotenv
+
+from .utils import secrets as secrets_utils
+from .utils import settings as utils
+from .utils.example_certificate import PRIVATE_KEY_EXAMPLE
+from .utils.example_certificate import PUBLIC_CERTIFICATE_EXAMPLE
+from .utils.example_passwordless_token_keys import PASSWORDLESS_PRIVATE_KEY_EXAMPLE
+from .utils.example_passwordless_token_keys import PASSWORDLESS_PUBLIC_KEY_EXAMPLE
+
+
+ENV = os.environ.get("ENV", "development")
+IS_DEV = ENV == "development"
+IS_INTEGRATION = ENV == "integration"
+IS_STAGING = ENV == "staging"
+IS_PROD = ENV == "production"
+IS_TESTING = ENV == "testing"
+IS_OPS = ENV == "ops"
+
+if ENV not in ("development", "integration", "staging", "production", "testing", "ops"):
+    raise RuntimeError("Unknown environment")
+
+IS_RUNNING_TESTS = os.environ.get("RUN_ENV") == "tests"
+IS_REBUILD_STAGING = bool(int(os.environ.get("IS_REBUILD_STAGING", "0")))
+IS_PERFORMANCE_TESTS = bool(int(os.environ.get("IS_PERFORMANCE_TESTS", "0")))
+IS_E2E_TESTS = bool(int(os.environ.get("IS_E2E_TESTS", "0")))
+assert not (IS_PROD and IS_PERFORMANCE_TESTS)
+
+RUNS_ON_KUBERNETES = IS_TESTING or IS_STAGING or IS_PROD or IS_INTEGRATION or IS_OPS
+
+# Load configuration files
+env_path = Path(f"./.env.{ENV}")
+load_dotenv(dotenv_path=env_path)
+
+if IS_DEV:
+    load_dotenv(dotenv_path=".env.local.secret", override=True)
+if IS_RUNNING_TESTS and not IS_E2E_TESTS:
+    load_dotenv(dotenv_path=".env.testauto", override=True)
+if IS_REBUILD_STAGING:
+    load_dotenv(dotenv_path=".env.rebuild_staging", override=True)
+
+LOG_LEVEL = int(os.environ.get("LOG_LEVEL", LOG_LEVEL_INFO))
+
+
+# API config
+API_URL = os.environ.get("API_URL", "")
+PRO_API_URL = os.environ.get("PRO_API_URL", API_URL)
+
+
+# Applications urls
+WEBAPP_V2_URL = os.environ.get("WEBAPP_V2_URL")
+WEBAPP_V2_REDIRECT_URL = os.environ.get("WEBAPP_V2_REDIRECT_URL")
+LOCAL_WEBAPP_URL = os.environ.get("LOCAL_WEBAPP_URL")
+PRO_URL = os.environ.get("PRO_URL", "").rstrip("/")
+FIREBASE_DYNAMIC_LINKS_URL = os.environ.get("FIREBASE_DYNAMIC_LINKS_URL")
+
+
+# DATABASE
+DB_MIGRATION_LOCK_TIMEOUT = int(os.environ.get("DB_MIGRATION_LOCK_TIMEOUT", "5000"))
+DB_MIGRATION_MAX_ATTEMPTS = int(os.environ.get("DB_MIGRATION_MAX_ATTEMPTS", "30"))
+DB_MIGRATION_RETRY_DELAY = int(os.environ.get("DB_MIGRATION_RETRY_DELAY", "10"))
+DB_MIGRATION_STATEMENT_TIMEOUT = int(os.environ.get("DB_MIGRATION_STATEMENT_TIMEOUT", "60000"))
+DATABASE_URL = (
+    secrets_utils.get("DATABASE_URL") if not (IS_RUNNING_TESTS or IS_E2E_TESTS) else os.environ.get("DATABASE_URL_TEST")
+)
+DATABASE_POOL_SIZE = int(os.environ.get("DATABASE_POOL_SIZE", "20"))
+DATABASE_STATEMENT_TIMEOUT = int(os.environ.get("DATABASE_STATEMENT_TIMEOUT", "0"))
+DATABASE_LOCK_TIMEOUT = int(os.environ.get("DATABASE_LOCK_TIMEOUT", "0"))
+DATABASE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT = int(os.environ.get("DATABASE_IDLE_IN_TRANSACTION_SESSION_TIMEOUT", "0"))
+# Managed databases have specific postgresql users and roles for pcapi, cron, backoffice or console.
+# Pull requests and local envs only have one user.
+DATABASE_HAS_SPECIFIC_ROLES = bool(int(os.environ.get("DATABASE_HAS_SPECIFIC_ROLES", "1")))
+SQLALCHEMY_ECHO = bool(int(os.environ.get("SQLALCHEMY_ECHO", "0")))
+
+
+# FLASK
+PROFILE_REQUESTS = bool(int(os.environ.get("PROFILE_REQUESTS", "0")))
+PROFILE_REQUESTS_LINES_LIMIT = int(os.environ.get("PROFILE_REQUESTS_LINES_LIMIT", "100"))
+FLASK_IP = os.environ.get("FLASK_IP", "0.0.0.0")
+FLASK_PORT = int(os.environ.get("PORT", "5001"))
+FLASK_BACKOFFICE_PORT = int(os.environ.get("FLASK_BACKOFFICE_PORT", "5001"))
+FLASK_USE_RELOADER = bool(int(os.environ.get("FLASK_USE_RELOADER", "1")))
+FLASK_SECRET = secrets_utils.get("FLASK_SECRET", "+%+3Q23!zbc+!Dd@")
+FLASK_SECRET_NAME = os.environ.get("FLASK_SECRET_NAME", "")
+CORS_ALLOWED_ORIGINS = os.environ["CORS_ALLOWED_ORIGINS"].split(",")
+CORS_ALLOWED_ORIGINS_NATIVE = os.environ["CORS_ALLOWED_ORIGINS_NATIVE"].split(",")
+CORS_ALLOWED_ORIGINS_AUTH = os.environ["CORS_ALLOWED_ORIGINS_AUTH"].split(",")
+CORS_ALLOWED_ORIGINS_ADAGE_IFRAME = os.environ["CORS_ALLOWED_ORIGINS_ADAGE_IFRAME"].split(",")
+REMOVE_LOGGER_HANDLER = bool(int(os.environ.get("REMOVE_LOGGER_HANDLER", "1")))
+SESSION_COOKIE_SAMESITE = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
+SESSION_COOKIE_SECURE = bool(int(os.environ.get("SESSION_COOKIE_SECURE", "1")))
+LOG_PLAIN_TEXT = bool(int(os.environ.get("LOG_PLAIN_TEXT", "0")))
+
+# NATIVE APP SPECIFIC SETTINGS
+NATIVE_APP_MINIMAL_CLIENT_VERSION = semver.VersionInfo.parse(
+    os.environ.get("NATIVE_APP_MINIMAL_CLIENT_VERSION", "1.132.1")
+)
+
+
+# REDIS
+REDIS_URL = secrets_utils.get("REDIS_URL", "redis://localhost:6379")
+REDIS_OFFER_IDS_CHUNK_SIZE = int(os.environ.get("REDIS_OFFER_IDS_CHUNK_SIZE", "1000"))
+REDIS_COLLECTIVE_OFFER_TEMPLATE_IDS_CHUNK_SIZE = int(
+    os.environ.get("REDIS_COLLECTIVE_OFFER_TEMPLATE_IDS_CHUNK_SIZE", "1000")
+)
+REDIS_ARTIST_IDS_FOR_OFFERS_CHUNK_SIZE = int(os.environ.get("REDIS_ARTIST_IDS_FOR_OFFERS_CHUNK_SIZE", "10"))
+REDIS_ARTIST_IDS_CHUNK_SIZE = int(os.environ.get("REDIS_ARTIST_IDS_CHUNK_SIZE", "10"))
+REDIS_VENUE_IDS_FOR_OFFERS_CHUNK_SIZE = int(os.environ.get("REDIS_VENUE_IDS_FOR_OFFERS_CHUNK_SIZE", "1000"))
+REDIS_VENUE_IDS_CHUNK_SIZE = int(os.environ.get("REDIS_VENUE_IDS_CHUNK_SIZE", "1000"))
+
+
+# SENTRY
+ENABLE_SENTRY = bool(int(os.environ.get("ENABLE_SENTRY", "0")))
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+SENTRY_DEFAULT_TRACES_SAMPLE_RATE = float(os.environ.get("SENTRY_DEFAULT_TRACES_SAMPLE_RATE", "0"))
+SENTRY_CSP_REPORT_ONLY_URI = os.environ.get("SENTRY_CSP_REPORT_ONLY_URI", "")
+SENTRY_FINE_SAMPLING = bool(int(os.environ.get("SENTRY_FINE_SAMPLING", "0")))
+
+
+# USERS
+MAX_FAVORITES = int(os.environ.get("MAX_FAVORITES", "100"))  # 0 is unlimited
+USE_FAST_AND_INSECURE_PASSWORD_HASHING_ALGORITHM = bool(
+    int(os.environ.get("USE_FAST_AND_INSECURE_PASSWORD_HASHING_ALGORITHM", "0"))
+)
+ENABLE_IMPORT_TEST_USERS = bool(int(os.environ.get("ENABLE_IMPORT_TEST_USERS", "1")))
+# Time (in seconds) before we suggest to a user to react to an offer. Default is 24 hours.
+SUGGEST_REACTION_SHORT_COOLDOWN_IN_SECONDS = int(
+    os.environ.get("SUGGEST_REACTION_SHORT_COOLDOWN_IN_SECONDS", "86400")  # 24 * 3600
+)
+SUGGEST_REACTION_LONG_COOLDOWN_IN_SECONDS = int(
+    os.environ.get("SUGGEST_REACTION_LONG_COOLDOWN_IN_SECONDS", "2678400")  # 31 * 24 * 3600
+)
+
+# USERS SESSION TIME
+PRO_SESSION_GRACE_TIME_IN_HOURS = timedelta(hours=int(os.environ.get("PRO_SESSION_GRACE_TIME_IN_HOURS", "1")))
+PRO_SESSION_LOGIN_TIMEOUT_IN_DAYS = timedelta(days=int(os.environ.get("PRO_SESSION_LOGIN_TIMEOUT_IN_DAYS", "14")))
+PRO_SESSION_FORCE_TIMEOUT_IN_DAYS = timedelta(days=int(os.environ.get("PRO_SESSION_FORCE_TIMEOUT_IN_DAYS", "15")))
+
+# MAIL
+FRAUD_EMAIL_ADDRESS = os.environ.get("FRAUD_EMAIL_ADDRESS", "")
+DEV_EMAIL_ADDRESS = os.environ.get("DEV_EMAIL_ADDRESS", "")
+END_TO_END_TESTS_EMAIL_ADDRESS = os.environ.get("END_TO_END_TESTS_EMAIL_ADDRESS", "")
+
+# When load testing, override `EMAIL_BACKEND` to avoid going over Brevo quota:
+# EMAIL_BACKEND="pcapi.core.mails.backends.logger.LoggerBackend"
+EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND")
+
+SUPPORT_EMAIL_ADDRESS = os.environ.get("SUPPORT_EMAIL_ADDRESS", "")
+SUPPORT_PRO_EMAIL_ADDRESS = os.environ.get("SUPPORT_PRO_EMAIL_ADDRESS", "")
+WHITELISTED_EMAIL_RECIPIENTS = utils.parse_str_to_list(os.environ.get("WHITELISTED_EMAIL_RECIPIENTS"))
+WHITELISTED_SMS_RECIPIENTS = utils.parse_phone_numbers(secrets_utils.get("WHITELISTED_SMS_RECIPIENTS"))
+
+
+NOTIFY_NEWLY_ELIGIBLE_USERS = bool(int(os.environ.get("NOTIFY_NEWLY_ELIGIBLE_USERS", "0")))
+ENABLE_EMAIL_CONFIRMATION_BYPASS = bool(int(os.environ.get("ENABLE_EMAIL_CONFIRMATION_BYPASS", "0")))
+
+# ALGOLIA
+ALGOLIA_API_KEY = secrets_utils.get("ALGOLIA_API_KEY", "dummy-key")
+ALGOLIA_APPLICATION_ID = secrets_utils.get("ALGOLIA_APPLICATION_ID", "dummy-app-id")
+ALGOLIA_ARTISTS_INDEX_NAME = os.environ.get("ALGOLIA_ARTISTS_INDEX_NAME", "artists")
+ALGOLIA_OFFERS_INDEX_NAME = os.environ.get("ALGOLIA_OFFERS_INDEX_NAME")
+ALGOLIA_COLLECTIVE_OFFER_TEMPLATES_INDEX_NAME = os.environ.get("ALGOLIA_COLLECTIVE_OFFER_TEMPLATES_INDEX_NAME")
+ALGOLIA_VENUES_INDEX_NAME = os.environ.get("ALGOLIA_VENUES_INDEX_NAME")
+ALGOLIA_TRIGGER_INDEXATION = bool(int(os.environ.get("ALGOLIA_TRIGGER_INDEXATION", "0")))
+ALGOLIA_DELETING_OFFERS_CHUNK_SIZE = int(os.environ.get("ALGOLIA_DELETING_OFFERS_CHUNK_SIZE", "10000"))
+ALGOLIA_DELETING_COLLECTIVE_OFFERS_CHUNK_SIZE = int(
+    os.environ.get("ALGOLIA_DELETING_COLLECTIVE_OFFERS_CHUNK_SIZE", "10000")
+)
+ALGOLIA_OFFERS_INDEX_MAX_SIZE = int(os.environ.get("ALGOLIA_OFFERS_INDEX_MAX_SIZE", "-1"))
+
+ALGOLIA_ARTIST_MIN_APP_SEARCH_SCORE = int(os.environ.get("ALGOLIA_ARTIST_MIN_APP_SEARCH_SCORE", "2"))
+ALGOLIA_OFFERS_BY_ARTIST_CHUNK_SIZE = int(os.environ.get("ALGOLIA_OFFERS_BY_ARTIST_CHUNK_SIZE", "10000"))
+ALGOLIA_OFFERS_BY_VENUE_CHUNK_SIZE = int(os.environ.get("ALGOLIA_OFFERS_BY_VENUE_CHUNK_SIZE", "10000"))
+ALGOLIA_LAST_30_DAYS_BOOKINGS_RANGE_THRESHOLDS = utils.env_get_list(
+    "ALGOLIA_LAST_30_DAYS_BOOKINGS_RANGE_THRESHOLDS", type_=int
+)
+CATCH_INDEXATION_EXCEPTIONS = bool(int(os.environ.get("CATCH_INDEXATION_EXCEPTIONS", "1")))
+ENABLE_UNINDEXING_ALL = bool(int(os.environ.get("ENABLE_UNINDEXING_ALL", "0")))
+ENABLE_INDEXATION_CHERRY_PICK_FOR_STAGING = bool(int(os.environ.get("ENABLE_INDEXATION_CHERRY_PICK_FOR_STAGING", "0")))
+
+# BATCH
+BATCH_ANDROID_API_KEY = os.environ.get("BATCH_ANDROID_API_KEY", "")
+BATCH_IOS_API_KEY = os.environ.get("BATCH_IOS_API_KEY", "")
+BATCH_SECRET_API_KEY = secrets_utils.get("BATCH_SECRET_API_KEY", "")
+BATCH_MAX_USERS_PER_TRANSACTIONAL_NOTIFICATION = int(
+    os.environ.get("BATCH_MAX_USERS_PER_TRANSACTIONAL_NOTIFICATION", "1000")
+)
+PUSH_NOTIFICATION_BACKEND = os.environ.get("PUSH_NOTIFICATION_BACKEND", "LoggerBackend")
+
+# BEAMER
+BEAMER_API_KEY = secrets_utils.get("BEAMER_API_KEY", "")
+BEAMER_BACKEND = os.environ.get("BEAMER_BACKEND", "LoggerBackend")
+
+# BREVO
+BREVO_EMAILS_REQUEST_TIMEOUT = int(os.environ.get("BREVO_EMAILS_REQUEST_TIMEOUT", "10"))
+BREVO_CONTACTS_REQUEST_TIMEOUT = int(os.environ.get("BREVO_CONTACTS_REQUEST_TIMEOUT", "30"))
+BREVO_WEBHOOK_SECRET = secrets_utils.get("BREVO_WEBHOOK_SECRET", "")
+BREVO_WEBHOOK_SECRET_QUERY_PARAM = secrets_utils.get("BREVO_WEBHOOK_SECRET_QUERY_PARAM", "")
+BREVO_NUMBER_OF_OFFERS_IN_EXTERNAL_FEED = int(os.environ.get("BREVO_NUMBER_OF_OFFERS_IN_EXTERNAL_FEED", "5"))
+SENDINBLUE_API_KEY = secrets_utils.get("SENDINBLUE_API_KEY", "")
+SENDINBLUE_PRO_API_KEY = secrets_utils.get("SENDINBLUE_PRO_API_KEY", "")
+SENDINBLUE_YOUNG_CONTACT_LIST_ID = int(os.environ.get("SENDINBLUE_YOUNG_CONTACT_LIST_ID", "4"))
+SENDINBLUE_AUTOMATION_YOUNG_EX_BENEFICIARY_ID = int(
+    os.environ.get("SENDINBLUE_AUTOMATION_YOUNG_EX_BENEFICIARY_ID", "24")
+)
+
+# RECAPTCHA
+RECAPTCHA_MINIMAL_SCORE = float(os.environ.get("RECAPTCHA_RESET_PASSWORD_MINIMAL_SCORE", "0.7"))
+RECAPTCHA_API_URL = "https://www.google.com/recaptcha/api/siteverify"
+RECAPTCHA_SECRET = secrets_utils.get("RECAPTCHA_SECRET")
+NATIVE_RECAPTCHA_SECRET = secrets_utils.get("NATIVE_RECAPTCHA_SECRET")
+RECAPTCHA_IGNORE_VALIDATION = bool(int(os.environ.get("RECAPTCHA_IGNORE_VALIDATION", "0")))
+
+# JWT
+JWT_BACKEND = os.environ.get("JWT_BACKEND", "JwtSimpleBackend")
+JWT_SECRET_KEY = secrets_utils.get("JWT_SECRET_KEY", "")
+JWT_KEY_SECRET_NAME = secrets_utils.get("JWT_KEY_SECRET_NAME", "")
+DISCORD_JWT_PRIVATE_KEY = secrets_utils.get("DISCORD_JWT_PRIVATE_KEY").encode("ascii")
+DISCORD_JWT_PUBLIC_KEY = secrets_utils.get("DISCORD_JWT_PUBLIC_KEY").encode("ascii")
+DISCORD_RECAPTCHA_SECRET_KEY = secrets_utils.get("DISCORD_RECAPTCHA_SECRET_KEY", "")
+DISCORD_RECAPTCHA_SITE_KEY = secrets_utils.get("DISCORD_RECAPTCHA_SITE_KEY", "")
+# default is 15 minutes
+# https://flask-jwt-extended.readthedocs.io/en/stable/options/#JWT_ACCESS_TOKEN_EXPIRES
+JWT_ACCESS_TOKEN_EXPIRES = int(os.environ.get("JWT_ACCESS_TOKEN_EXPIRES", str(60 * 15)))
+# default is 1 month
+JWT_REFRESH_TOKEN_EXPIRES = int(os.environ.get("JWT_REFRESH_TOKEN_EXPIRES", str(31 * 24 * 60 * 60)))
+# default is 1 year
+JWT_REFRESH_TOKEN_EXTENDED_EXPIRES = int(os.environ.get("JWT_REFRESH_TOKEN_EXTENDED_EXPIRES", str(366 * 24 * 60 * 60)))
+
+
+# TITELIVE
+TITELIVE_FTP_URI = os.environ.get("FTP_TITELIVE_URI")
+TITELIVE_FTP_USER = secrets_utils.get("FTP_TITELIVE_USER")
+TITELIVE_FTP_PWD = secrets_utils.get("FTP_TITELIVE_PWD")
+TITELIVE_EPAGINE_API_AUTH_URL = os.environ.get("TITELIVE_EPAGINE_API_AUTH_URL")
+TITELIVE_EPAGINE_API_URL = os.environ.get("TITELIVE_EPAGINE_API_URL")
+TITELIVE_EPAGINE_API_USERNAME = os.environ.get("TITELIVE_EPAGINE_API_USERNAME", "")
+TITELIVE_EPAGINE_API_PASSWORD = secrets_utils.get("TITELIVE_EPAGINE_API_PASSWORD", "")
+TITELIVE_GENERATE_FROM_FILE_IN_DEV = bool(int(os.environ.get("TITELIVE_GENERATE_FROM_FILE_IN_DEV", "0")))
+
+# EXTERNAL TICKETING SERVICE URLS
+EXTERNAL_TICKETING_SERVICE_BOOKING_URL = os.environ.get(
+    "EXTERNAL_TICKETING_SERVICE_BOOKING_URL",
+    "http://mock-api-billeterie.mock-api-billeterie.svc.cluster.local:5003/tickets/create",
+)
+EXTERNAL_TICKETING_SERVICE_CANCEL_BOOKING_URL = os.environ.get(
+    "EXTERNAL_TICKETING_SERVICE_CANCEL_BOOKING_URL",
+    "http://mock-api-billeterie.mock-api-billeterie.svc.cluster.local:5003/tickets/cancel",
+)
+
+EXTERNAL_NOTIFICATION_URL = os.environ.get(
+    "EXTERNAL_NOTIFICATION_URL", "http://mock-api-billeterie.mock-api-billeterie.svc.cluster.local:5003/notify"
+)
+
+# UBBLE
+UBBLE_API_URL = os.environ.get("UBBLE_API_URL", "https://api.ubble.ai")
+UBBLE_CLIENT_ID = secrets_utils.get("UBBLE_CLIENT_ID", "")
+UBBLE_CLIENT_SECRET = secrets_utils.get("UBBLE_CLIENT_SECRET", "")
+UBBLE_WEBHOOK_SECRET = secrets_utils.get("UBBLE_WEBHOOK_SECRET")
+UBBLE_CLIENT_CERTIFICATE_PATH = os.environ.get("UBBLE_CLIENT_CERTIFICATE_PATH", "ubble.crt")
+UBBLE_CLIENT_KEY_PATH = os.environ.get("UBBLE_CLIENT_KEY_PATH", "ubble.key")
+UBBLE_SIGNATURE_KEY_PATH = os.environ.get("UBBLE_SIGNATURE_KEY_PATH", "ubble_signature_key.pub")
+UBBLE_SUBSCRIPTION_LIMITATION_DAYS = int(os.environ.get("UBBLE_SUBSCRIPTION_LIMITATION_DAYS", "90"))
+UBBLE_MOCK_API_URL = os.environ.get("UBBLE_MOCK_API_URL", None)
+ENABLE_UBBLE_TEST_EMAIL = bool(int(os.environ.get("ENABLE_UBBLE_TEST_EMAIL", "1")))
+UBBLE_MOCK_CONFIG_URL = os.environ.get("UBBLE_MOCK_CONFIG_URL", None)
+DAYS_BEFORE_UBBLE_QUICK_ACTION_REMINDER = 7 if IS_PROD else 0
+DAYS_BEFORE_UBBLE_LONG_ACTION_REMINDER = 21 if IS_PROD else 0
+UBBLE_RATE_LIMIT = int(os.environ.get("UBBLE_RATE_LIMIT", "200"))  # calls per minute
+UBBLE_TIME_WINDOW_SIZE = int(os.environ.get("UBBLE_TIME_WINDOW_SIZE", "60"))  # seconds
+UBBLE_USER_JOURNEY_ID_DN = os.environ.get("UBBLE_USER_JOURNEY_ID_DN")
+
+
+# EHP SANDBOX
+CAN_RUN_SANDBOX = bool(int(os.environ.get("CAN_RUN_SANDBOX", "0")))
+# Sandbox users and unit tests default password - overridden by a secret password on cloud environments
+TEST_DEFAULT_PASSWORD = secrets_utils.get("TEST_DEFAULT_PASSWORD", "user@AZERTY123")
+ENABLE_LOCAL_DEV_MODE_FOR_STORAGE = bool(int(os.environ.get("ENABLE_LOCAL_DEV_MODE_FOR_STORAGE", "0")))
+ENABLE_UBBLE_E2E_TESTING = bool(int(os.environ.get("ENABLE_UBBLE_E2E_TESTING", "0")))
+E2E_API_KEY = secrets_utils.get("E2E_API_KEY", "")
+
+# Test users on staging
+IMPORT_USERS_GOOGLE_DOCUMENT_ID = secrets_utils.get("IMPORT_USERS_GOOGLE_DOCUMENT_ID", "")
+
+
+# PROVIDERS
+ALLOCINE_API_KEY = secrets_utils.get("ALLOCINE_API_KEY")
+BOOST_API_PASSWORD = secrets_utils.get("BOOST_API_PASSWORD")
+BOOST_API_USERNAME = secrets_utils.get("BOOST_API_USERNAME")
+CDS_API_URL = os.environ.get("CDS_API_URL", "")
+CGR_API_USER = os.environ.get("CGR_API_USER")
+EMS_API_URL = os.environ.get("EMS_API_URL", "")
+EMS_API_USER = os.environ.get("EMS_API_USER", "")
+EMS_API_PASSWORD = secrets_utils.get("EMS_API_PASSWORD")
+EMS_API_BOOKING_URL = os.environ.get("EMS_API_BOOKING_URL", "")
+EMS_API_BOOKING_SECRET_KEY = secrets_utils.get("EMS_API_BOOKING_SECRET_KEY", "")
+EMS_API_BOOKING_HEADER = os.environ.get("EMS_API_BOOKING_HEADER", "")
+EMS_SITES_API_URL = os.environ.get("EMS_SITES_API_URL", "")
+EMS_GOOGLE_DRIVE_FOLDER = os.environ.get("EMS_GOOGLE_DRIVE_FOLDER", "")
+CDS_SUPPORT_EMAIL_ADDRESS = os.environ.get("CDS_SUPPORT_EMAIL_ADDRESS", "")
+CGR_SUPPORT_EMAIL_ADDRESS = os.environ.get("CGR_SUPPORT_EMAIL_ADDRESS", "")
+EMS_SUPPORT_EMAIL_ADDRESS = os.environ.get("EMS_SUPPORT_EMAIL_ADDRESS", "")
+
+# DÉMARCHE NUMÉRIQUE
+DEMARCHE_NUMERIQUE_CREATE_UBBLE_MIN_DATETIME = datetime.fromisoformat(
+    os.environ.get("DEMARCHE_NUMERIQUE_CREATE_UBBLE_MIN_DATE", "2026-08-17")
+)
+DEMARCHE_NUMERIQUE_LABEL_IDS = json.loads(os.environ.get("DEMARCHE_NUMERIQUE_LABEL_IDS", "{}"))
+DMS_VENUE_PROCEDURE_ID_V4 = os.environ.get("DEMARCHES_SIMPLIFIEES_RIB_VENUE_PROCEDURE_ID_V4", "0")
+DMS_TOKEN = secrets_utils.get("DEMARCHES_SIMPLIFIEES_TOKEN")
+DMS_EAC_PROCEDURE_INDEPENDANTS_CANDIDATE_ID = int(
+    os.environ.get("DEMARCHES_SIMPLIFIEES_EAC_PROCEDURE_INDEPENDANTS_CANDIDATE_ID", "0")
+)
+DMS_EAC_PROCEDURE_MENJS_CANDIDATE_ID = int(
+    os.environ.get("DEMARCHES_SIMPLIFIEES_EAC_PROCEDURE_MENJS_CANDIDATE_ID", "0")
+)
+DMS_EAC_PROCEDURE_STRUCTURE_CANDIDATE_ID = int(
+    os.environ.get("DEMARCHES_SIMPLIFIEES_EAC_PROCEDURE_STRUCTURE_CANDIDATE_ID", "0")
+)
+DMS_EAC_PROCEDURE_MENJS_CANDIDATE_ID_V2 = int(
+    os.environ.get("DEMARCHES_SIMPLIFIEES_EAC_PROCEDURE_MENJS_CANDIDATE_ID_V2", "0")
+)
+DMS_ENROLLMENT_INSTRUCTOR = os.environ.get("DEMARCHES_SIMPLIFIEES_ENROLLMENT_INSTRUCTOR", "")
+DMS_ENROLLMENT_PROCEDURE_ID_FR = int(os.environ.get("DEMARCHES_SIMPLIFIEES_ENROLLMENT_PROCEDURE_ID_FR", "1"))
+DMS_ENROLLMENT_PROCEDURE_ID_ET = int(os.environ.get("DEMARCHES_SIMPLIFIEES_ENROLLMENT_PROCEDURE_ID_ET", "2"))
+DMS_NEVER_ELIGIBLE_APPLICANT = bool(int(os.environ.get("DMS_NEVER_ELIGIBLE_APPLICANT", "0")))
+DMS_WEBHOOK_TOKEN_LIST = secrets_utils.get("DEMARCHES_SIMPLIFIEES_WEBHOOK_TOKEN").split(",")
+DMS_INACTIVITY_TOLERANCE_DELAY = int(os.environ.get("DEMARCHES_SIMPLIFIEES_INACTIVITY_TOLERANCE_DELAY", "30"))
+DMS_INSTRUCTOR_ID = secrets_utils.get("DEMARCHES_SIMPLIFIEES_INSTRUCTOR_ID", "")
+DS_BANK_ACCOUNT_PROCEDURE_ID = os.environ.get("DEMARCHES_SIMPLIFIEES_BANK_ACCOUNT_PROCEDURE_ID", "0")
+DS_BANK_ACCOUNT_NC_PROCEDURE_ID = os.environ.get("DEMARCHES_SIMPLIFIEES_BANK_ACCOUNT_NC_PROCEDURE_ID", "0")
+DS_MARK_WITHOUT_CONTINUATION_INSTRUCTOR_ID = secrets_utils.get("DS_MARK_WITHOUT_CONTINUATION_INSTRUCTOR_ID")
+DS_MARK_WITHOUT_CONTINUATION_APPLICATION_DEADLINE = int(
+    os.environ.get("DS_MARK_WITHOUT_CONTINUATION_APPLICATION_DEADLINE", "30")
+)
+DS_MARK_WITHOUT_CONTINUATION_ANNOTATION_DEADLINE = int(
+    os.environ.get("DS_MARK_WITHOUT_CONTINUATION_ANNOTATION_DEADLINE", "90")
+)
+DS_MARK_WITHOUT_CONTINUATION_UDPATE_REQUEST_DEADLINE = int(
+    os.environ.get("DS_MARK_WITHOUT_CONTINUATION_UDPATE_REQUEST_DEADLINE", "30")
+)
+DS_LOGGER_ERROR = bool(int(os.environ.get("DS_LOGGER_ERROR", "0")))
+DS_USER_ACCOUNT_UPDATE_PROCEDURE_ID = os.environ.get("DEMARCHES_SIMPLIFIEES_USER_ACCOUNT_UPDATE_PROCEDURE_ID", "0")
+
+# OBJECT STORAGE
+OBJECT_STORAGE_URL = os.environ.get("OBJECT_STORAGE_URL", "")
+OBJECT_STORAGE_PROVIDER = os.environ.get("OBJECT_STORAGE_PROVIDER")
+LOCAL_STORAGE_DIR = Path(os.path.dirname(os.path.realpath(__file__))) / "static" / "object_store_data"
+
+# IMAGE RESIZING
+IMAGE_RESIZING_URL = os.environ.get("IMAGE_RESIZING_URL", "https://image-resizing.passculture.app")
+
+# THUMBS
+THUMBS_FOLDER_NAME = os.environ.get("THUMBS_FOLDER_NAME", "thumbs")
+DATA_TITELIVE_THUMBS_FOLDER_NAME = os.environ.get("DATA_TITELIVE_THUMBS_FOLDER_NAME", "titelive/images")
+
+# ARTISTS THUMBS
+ARTIST_THUMBS_FOLDER_NAME = os.environ.get("ARTIST_THUMBS_FOLDER_NAME", "thumbs/artist")
+DATA_ARTIST_THUMBS_FOLDER_NAME = os.environ.get("DATA_ARTIST_THUMBS_FOLDER_NAME", "artist/images")
+
+# ALLOCINE THUMBS
+DATA_ALLOCINE_POSTERS_FOLDER_NAME = os.environ.get("DATA_ALLOCINE_POSTERS_FOLDER_NAME", "allocine/movie/posters")
+
+
+# GOOGLE
+GCP_BUCKET_NAME = os.environ.get("GCP_BUCKET_NAME", "")
+GCP_DATA_BUCKET_NAME = secrets_utils.get("GCP_DATA_BUCKET_NAME", "")
+GCP_DATA_PROJECT_ID = secrets_utils.get("GCP_DATA_PROJECT_ID", "")
+GCP_DATA_PRODUCT_MEDIATION_BUCKET_NAME = os.environ.get("GCP_DATA_PRODUCT_MEDIATION_BUCKET_NAME", "")
+GCP_PROJECT = os.environ.get("GCP_PROJECT", "")
+GCP_LOGS_BACKEND = os.environ.get("GCP_LOGS_BACKEND")
+
+GOOGLE_DRIVE_BACKEND = os.environ.get("GOOGLE_DRIVE_BACKEND")
+GOOGLE_DRIVE_SERVICE_ACCOUNT_INFO = os.environ.get("GOOGLE_DRIVE_SERVICE_ACCOUNT_INFO")  # only for dev/debug
+GOOGLE_BIG_QUERY_BACKEND = os.environ.get("GOOGLE_BIG_QUERY_BACKEND")
+GCP_GDPR_EXTRACT_BUCKET = os.environ.get("GCP_GDPR_EXTRACT_BUCKET", "gdpr-extract-bucket")
+GCP_GDPR_EXTRACT_FOLDER = os.environ.get("GCP_GDPR_EXTRACT_FOLDER", "gdpr-extract-folder")
+
+# Backoffice Google SSO
+GOOGLE_CLIENT_ID = secrets_utils.get("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = secrets_utils.get("GOOGLE_CLIENT_SECRET")
+
+# Native app Apple SSO
+APPLE_TEAM_ID = secrets_utils.get("APPLE_TEAM_ID", "")
+APPLE_KEYS_URL = os.environ.get("APPLE_KEYS_URL", "https://appleid.apple.com/auth/keys")
+APPLE_ISSUER_URL = os.environ.get("APPLE_ISSUER_URL", "https://appleid.apple.com")
+APPLE_TOKEN_ENDPOINT = os.environ.get("APPLE_TOKEN_ENDPOINT", "https://appleid.apple.com/auth/token")
+APPLE_REVOKE_TOKEN_ENDPOINT = os.environ.get("APPLE_REVOKE_TOKEN_ENDPOINT", "https://appleid.apple.com/auth/revoke")
+APPLE_KEY_ID = secrets_utils.get("APPLE_KEY_ID", "")
+APPLE_WEB_CLIENT_ID = secrets_utils.get("APPLE_WEB_CLIENT_ID", "")
+APPLE_MOBILE_CLIENT_ID = secrets_utils.get("APPLE_MOBILE_CLIENT_ID", "")
+APPLE_PRIVATE_KEY = secrets_utils.get("APPLE_PRIVATE_KEY", "")
+APPLE_TOKEN_EXPIRATION = secrets_utils.get("APPLE_TOKEN_EXPIRATION", "180")
+
+# Native app Google SSO
+NATIVE_APP_GOOGLE_CLIENT_ID = secrets_utils.get("NATIVE_APP_GOOGLE_CLIENT_ID")
+NATIVE_APP_GOOGLE_CLIENT_SECRET = secrets_utils.get("NATIVE_APP_GOOGLE_CLIENT_SECRET")
+
+
+# DEBUG
+DEBUG_ACTIVATED = bool(int(os.environ.get("DEBUG_ACTIVATED", "0")))
+BUG_BOUNTY_USER_AGENT = os.environ.get("BUG_BOUNTY_USER_AGENT", "")
+
+
+# PHONE NUMBERS
+BLACKLISTED_SMS_RECIPIENTS = set(secrets_utils.get("BLACKLISTED_SMS_RECIPIENTS", "").splitlines())
+
+# SEARCH
+SEARCH_BACKEND = os.environ.get("SEARCH_BACKEND")
+
+# ADAGE
+ADAGE_API_KEY = secrets_utils.get("ADAGE_API_KEY", None)
+ADAGE_API_URL = os.environ.get("ADAGE_API_URL", None)
+EAC_API_KEY = secrets_utils.get("EAC_API_KEY", None)
+JWT_ADAGE_PUBLIC_KEY_FILENAME = os.environ.get("JWT_ADAGE_PUBLIC_KEY_FILENAME", "public_key.production")
+ADAGE_BACKEND = os.environ.get("ADAGE_BACKEND", "AdageHttpClient")
+CAN_COLLECTIVE_OFFERER_IGNORE_ADAGE = bool(int(os.environ.get("CAN_COLLECTIVE_OFFERER_IGNORE_ADAGE", "0")))
+# This flag is to create the data for Adage team - not the EAC one - in the testing sandbox
+CREATE_ADAGE_TESTING_DATA = bool(int(os.environ.get("CREATE_ADAGE_TESTING_DATA", "0")))
+ADAGE_REQUEST_TIMEOUT = int(os.environ.get("ADAGE_REQUEST_TIMEOUT", "2"))
+
+EAC_OFFER_PRICE_LIMIT = int(os.environ.get("EAC_OFFER_PRICE_LIMIT", "60000"))
+EAC_NUMBER_OF_TICKETS_LIMIT = int(os.environ.get("EAC_NUMBER_OF_TICKETS_LIMIT", "3000"))
+# We set this flag to False in integration because we do not import deposits
+EAC_CHECK_INSTITUTION_FUND = bool(int(os.environ.get("EAC_CHECK_INSTITUTION_FUND", "1")))
+
+# EDUCONNECT
+API_URL_FOR_EDUCONNECT = os.environ.get(
+    "API_URL_FOR_EDUCONNECT", API_URL
+)  # must match the url specified in the metadata file provided to educonnect
+EDUCONNECT_SP_CERTIFICATE = secrets_utils.get("EDUCONNECT_SP_CERTIFICATE", PUBLIC_CERTIFICATE_EXAMPLE)
+EDUCONNECT_SP_PRIVATE_KEY = secrets_utils.get("EDUCONNECT_SP_PRIVATE_KEY", PRIVATE_KEY_EXAMPLE)
+EDUCONNECT_METADATA_FILE = os.environ.get("EDUCONNECT_METADATA_FILE", "educonnect.pr4.metadata.xml")
+
+# PERMISSIONS
+PERMISSIONS = base64.b64decode(secrets_utils.get("PERMISSIONS", "")).decode("utf-8")
+
+
+# EMAIL VALIDATION / PASSWORD RESET
+MAX_EMAIL_RESENDS = int(os.environ.get("MAX_EMAIL_VALIDATION_RESENDS", "3"))
+EMAIL_RESENDS_TTL = int(os.environ.get("EMAIL_VALIDATION_RESENDS_TTL", str(24 * 60 * 60)))  # 1 day
+
+
+# EMAIL UPDATE
+MAX_EMAIL_UPDATE_ATTEMPTS = int(os.environ.get("MAX_EMAIL_UPDATE_ATTEMPTS", "3"))
+EMAIL_UPDATE_ATTEMPTS_TTL = int(os.environ.get("EMAIL_UPDATE_ATTEMPTS_TTL", str(24 * 60 * 60 * 3)))  # 3 days
+EMAIL_CHANGE_TOKEN_LIFE_TIME = int(os.environ.get("EMAIL_CHANGE_TOKEN_LIFE_TIME", str(24 * 60 * 60)))  # 1 day
+ENABLE_EMAIL_DELIVERABILITY_CHECK = bool(int(os.environ.get("ENABLE_EMAIL_DELIVERABILITY_CHECK", "1")))
+
+
+# SOON EXPIRING BOOKINGS NOTIFICATIONS
+SOON_EXPIRING_BOOKINGS_DAYS_BEFORE_EXPIRATION = int(
+    os.environ.get("SOON_EXPIRING_BOOKINGS_DAYS_BEFORE_EXPIRATION", "3")
+)
+
+
+# SLACK
+INTERNAL_NOTIFICATION_BACKEND = os.environ.get("INTERNAL_NOTIFICATION_BACKEND", "LoggerBackend")
+SLACK_BOT_TOKEN = secrets_utils.get("SLACK_BOT_TOKEN", None)
+SLACK_CHANGE_FEATURE_FLIP_CHANNEL = os.environ.get("SLACK_CHANGE_FEATURE_FLIP_CHANNEL", "feature-flip-ehp")
+SLACK_REBUILD_STAGING_CHANNEL = os.environ.get("SLACK_REBUILD_STAGING_CHANNEL", "alertes-dump-restore-staging")
+SLACK_GENERATE_INVOICES_FINISHED_CHANNEL = os.environ.get(
+    "SLACK_GENERATE_INVOICES_FINISHED_CHANNEL", "notifications-ehp"
+)
+SLACK_DATABASE_ALERT_CHANNEL = os.environ.get("SLACK_DATABASE_ALERT_CHANNEL", "alertes-ehp")
+
+
+# OUTSCALE
+OUTSCALE_ACCESS_KEY = secrets_utils.get("OUTSCALE_ACCESS_KEY", "")
+OUTSCALE_SECRET_KEY = secrets_utils.get("OUTSCALE_SECRET_KEY", "")
+OUTSCALE_SECNUM_BUCKET_NAME = os.environ.get("OUTSCALE_SECNUM_BUCKET_NAME", "")
+OUTSCALE_REGION = os.environ.get("OUTSCALE_REGION", "cloudgouv-eu-west-1")
+OUTSCALE_ENDPOINT_URL = os.environ.get("OUTSCALE_ENDPOINT_URL", "https://oos.cloudgouv-eu-west-1.outscale.com")
+
+# ZENDESK
+ZENDESK_API_URL = os.environ.get("ZENDESK_API_URL")
+ZENDESK_API_EMAIL = os.environ.get("ZENDESK_API_EMAIL")
+ZENDESK_API_TOKEN = secrets_utils.get("ZENDESK_API_TOKEN")
+ZENDESK_WEBHOOK_API_KEY = secrets_utils.get("ZENDESK_WEBHOOK_API_KEY")
+
+# ZENDESK SELL
+ZENDESK_SELL_BACKEND = os.environ.get(
+    "ZENDESK_SELL_BACKEND", "pcapi.core.external.zendesk_sell.backends.zendesk_sell.ZendeskSellBackend"
+)
+ZENDESK_SELL_API_KEY = secrets_utils.get("ZENDESK_SELL_API_KEY")
+ZENDESK_SELL_API_URL = os.environ.get("ZENDESK_SELL_API_URL", "https://api.getbase.com")
+
+# ACCOUNT (UN)SUSPENSION
+DELETE_SUSPENDED_ACCOUNTS_SINCE = int(os.environ.get("DELETE_SUSPENDED_ACCOUNTS_SINCE", "61"))
+NOTIFY_X_DAYS_BEFORE_DELETION = int(os.environ.get("NOTIFY_X_DAYS_BEFORE_DELETION", "10"))
+
+# FINANCE
+FINANCE_GOOGLE_DRIVE_ROOT_FOLDER_ID = os.environ.get("FINANCE_GOOGLE_DRIVE_ROOT_FOLDER_ID", "")
+FINANCE_OVERRIDE_PRICING_ORDERING_ON_PRICING_POINTS = utils.env_get_list(
+    "FINANCE_OVERRIDE_PRICING_ORDERING_ON_PRICING_POINTS", type_=int
+)
+FINANCE_BACKEND = os.environ.get("FINANCE_BACKEND", "DummyFinanceBackend")
+CGR_GOOGLE_DRIVE_CSV_REIMBURSEMENT_ID = os.environ.get("CGR_GOOGLE_DRIVE_CSV_REIMBURSEMENT_ID", "")
+KINEPOLIS_GOOGLE_DRIVE_CSV_REIMBURSEMENT_ID = os.environ.get("KINEPOLIS_GOOGLE_DRIVE_CSV_REIMBURSEMENT_ID", "")
+CGR_EMAIL = os.environ.get("CGR_EMAIL", "")
+KINEPOLIS_EMAIL = os.environ.get("KINEPOLIS_EMAIL", "")
+GENERATE_CGR_KINEPOLIS_INVOICES = bool(int(os.environ.get("GENERATE_CGR_KINEPOLIS_INVOICES", "0")))
+
+# BACKOFFICE
+BACKOFFICE_ADD_ALL_PERMISSIONS_TO_SPECIFIC_ROLES = bool(
+    int(os.environ.get("BACKOFFICE_ADD_ALL_PERMISSIONS_TO_SPECIFIC_ROLES", "0"))
+)
+BACKOFFICE_ALLOW_USER_CREATION = os.environ.get("BACKOFFICE_ALLOW_USER_CREATION", "False") == "True"
+BACKOFFICE_FAVICON_PATH = os.environ.get("BACKOFFICE_FAVICON_PATH", "favicon_default.ico")
+BACKOFFICE_USER_EMAIL = os.environ.get("BACKOFFICE_USER_EMAIL", "dummy.backoffice@example.com")
+BACKOFFICE_URL = os.environ.get("BACKOFFICE_URL", "localhost:5002")
+ENABLE_TEST_USER_GENERATION = bool(int(os.environ.get("ENABLE_TEST_USER_GENERATION", "0")))
+ENABLE_TEST_OFFER_GENERATION = bool(int(os.environ.get("ENABLE_TEST_OFFER_GENERATION", "0")))
+BACKOFFICE_OFFERERS_DOCUMENTS_LINK = os.environ.get("BACKOFFICE_OFFERERS_DOCUMENTS_LINK")
+BACKOFFICE_LOCAL_USER_EMAIL = os.environ.get("BACKOFFICE_LOCAL_USER_EMAIL", "admin@passculture.local")
+BACKOFFICE_LOGIN_WITHOUT_CREDENTIALS = bool(int(os.environ.get("BACKOFFICE_LOGIN_WITHOUT_CREDENTIALS", "0")))
+BACKOFFICE_ROLES_WITHOUT_GOOGLE_GROUPS = bool(int(os.environ.get("BACKOFFICE_ROLES_WITHOUT_GOOGLE_GROUPS", "0")))
+ENABLE_BO_COMPONENT_PAGE = bool(int(os.environ.get("ENABLE_BO_COMPONENT_PAGE", "0")))
+ENABLE_BO_BUNDLES_AUTORELOAD = bool(int(os.environ.get("ENABLE_BO_BUNDLES_AUTORELOAD", "0")))
+
+# SIRENE
+SIRENE_BACKEND = os.environ.get("SIRENE_BACKEND")
+INSEE_SIRENE_API_TOKEN = secrets_utils.get("INSEE_SIRENE_API_TOKEN", "")
+INSEE_SIRENE_API_URL = os.environ.get("INSEE_SIRENE_API_URL", "https://api.insee.fr/api-sirene/3.11")
+ENFORCE_SIRET_CHECK = bool(int(os.environ.get("ENFORCE_SIRET_CHECK", "1")))
+
+# API ENTREPRISE
+ENTREPRISE_BACKEND = os.environ.get("ENTREPRISE_BACKEND")
+ENTREPRISE_API_URL = os.environ.get("ENTREPRISE_API_URL")
+ENTREPRISE_API_TOKEN = secrets_utils.get("ENTREPRISE_API_TOKEN")
+PASS_CULTURE_SIRET = os.environ.get("PASS_CULTURE_SIRET", "85331845900056")
+
+# API PARTICULIER
+ENABLE_PARTICULIER_API_MOCK = bool(int(os.environ.get("ENABLE_PARTICULIER_API_MOCK", "0")))
+PARTICULIER_API_URL = os.environ.get("PARTICULIER_API_URL")
+PARTICULIER_API_TOKEN = secrets_utils.get("PARTICULIER_API_TOKEN")
+PARTICULIER_API_RATE_LIMIT_THRESHOLD = int(os.environ.get("PARTICULIER_API_RATE_LIMIT_THRESHOLD", "200"))
+
+# OFFERERS AND PRO ACCOUNTS
+CHECK_OFFERER_RATE_LIMIT_THRESHOLD = int(os.environ.get("CHECK_OFFERER_RATE_LIMIT_THRESHOLD", "3"))
+CHECK_OFFERER_RATE_LIMIT_TIME_WINDOW_SECONDS = int(os.environ.get("CHECK_OFFERER_RATE_LIMIT_TIME_WINDOW_SECONDS", "1"))
+CLOSED_OFFERER_PRO_USER_DELETION_DELAY = int(os.environ.get("CLOSED_OFFERER_PRO_USER_DELETION_DELAY", "90"))  # days
+OFFERER_INVITATION_EXPIRATION_DELAY = int(os.environ.get("OFFERER_INVITATION_EXPIRATION_DELAY", "30"))  # days
+
+# ADRESSE
+ADRESSE_BACKEND = os.environ.get("ADRESSE_BACKEND")
+
+# GEO API (Découpage administratif)
+GEO_API_BACKEND = os.environ.get("GEO_API_BACKEND", "pcapi.connectors.api_geo.GeoApiBackend")
+
+# GOOGLE BIG QUERY
+BIG_QUERY_TABLE_BASENAME = os.environ.get("BIG_QUERY_TABLE_BASENAME", "")
+
+# NATIONAL PARTNERS
+NATIONAL_PARTNERS_EMAIL_DOMAINS = os.environ.get("NATIONAL_PARTNERS_EMAIL_DOMAINS", "impossible_email_domain.fr")
+
+# NAME CHECKING
+ENABLE_PERMISSIVE_NAME_VALIDATION = bool(int(os.environ.get("ENABLE_PERMISSIVE_NAME_VALIDATION", "0")))
+
+# API COMPLIANCE
+SA_API_COMPLIANCE_IAP = secrets_utils.get("SA_API_COMPLIANCE_IAP")
+COMPLIANCE_API_CLIENT_ID = secrets_utils.get("COMPLIANCE_API_CLIENT_ID")
+COMPLIANCE_API_SERVICE_ACCOUNT = os.environ.get("COMPLIANCE_API_SERVICE_ACCOUNT", "")
+COMPLIANCE_DOMAIN = os.environ.get("COMPLIANCE_DOMAIN", "https://compliance.passculture.team")
+COMPLIANCE_BACKEND = os.environ.get("COMPLIANCE_BACKEND", "ComplianceBackend")
+SECRET_ENCRYPTION_KEY = secrets_utils.get("SECRET_ENCRYPTION_KEY")
+ENABLE_COMMAND_CLEAN_DATABASE = bool(int(os.environ.get("ENABLE_COMMAND_CLEAN_DATABASE", "0")))
+
+# ROUTES FOR END-TO-END TESTS
+ENABLE_TEST_ROUTES = bool(int(os.environ.get("ENABLE_TEST_ROUTES", "0")))
+
+# GOOGLE MAPS
+GOOGLE_MAPS_API_KEY = secrets_utils.get("GOOGLE_MAPS_API_KEY")
+
+# ACCESLIBRE
+ACCESLIBRE_BACKEND = os.environ.get("ACCESLIBRE_BACKEND")
+ACCESLIBRE_API_KEY = secrets_utils.get("ACCESLIBRE_API_KEY")
+ACCESLIBRE_API_URL = os.environ.get("ACCESLIBRE_API_URL", "https://recette.acceslibre.info/api/erps/")
+ACCESLIBRE_REQUEST_TIMEOUT = int(os.environ.get("ACCESLIBRE_REQUEST_TIMEOUT", "6"))
+
+# Recommendation API
+RECOMMENDATION_BACKEND = os.environ.get("RECOMMENDATION_BACKEND", "pcapi.connectors.recommendation.TestingBackend")
+RECOMMENDATION_API_AUTHENTICATION_TOKEN = os.environ.get("RECOMMENDATION_API_AUTHENTICATION_TOKEN", "")
+RECOMMENDATION_API_URL = os.environ.get("RECOMMENDATION_API_URL", "")
+
+
+# PRO TESTS
+MAKE_PROS_BENEFICIARIES_IN_APP = bool(int(os.environ.get("MAKE_PROS_BENEFICIARIES_IN_APP", "0")))
+
+# VIRUSTOTAL
+VIRUSTOTAL_BACKEND = os.environ.get("VIRUSTOTAL_BACKEND", "pcapi.connectors.virustotal.LoggerBackend")
+VIRUSTOTAL_API_KEY = secrets_utils.get("VIRUSTOTAL_API_KEY")
+
+# DB STATS CSV EXPORT TO DRIVE
+PG_STAT_FOLDER_ID = secrets_utils.get("PG_STAT_FOLDER_ID", "")
+
+# GDPR configuration
+GDPR_MAX_EXTRACT_PER_DAY = int(os.environ.get("GDPR_MAX_EXTRACT_PER_DAY", "10"))
+GDPR_LOCK_TIMEOUT = int(os.environ.get("GDPR_LOCK_TIMEOUT", "900"))
+
+# DISCORD pass culture bot
+DISCORD_CLIENT_SECRET = secrets_utils.get("DISCORD_CLIENT_SECRET")
+DISCORD_BOT_TOKEN = secrets_utils.get("DISCORD_BOT_TOKEN")
+
+# TYPEFORM
+TYPEFORM_BACKEND = os.environ.get("TYPEFORM_BACKEND", "pcapi.connectors.typeform.TestingBackend")
+TYPEFORM_API_KEY = secrets_utils.get("TYPEFORM_API_KEY")
+TYPEFORM_IMPORT_CHUNK_SIZE = int(os.environ.get("TYPEFORM_IMPORT_CHUNK_SIZE", "500"))
+
+# YOUTUBE
+YOUTUBE_API_KEY = secrets_utils.get("YOUTUBE_API_KEY")
+YOUTUBE_API_URL = os.environ.get("YOUTUBE_API_URL", "https://www.googleapis.com/youtube/v3/videos")
+YOUTUBE_API_BACKEND = os.environ.get("YOUTUBE_API_BACKEND", "pcapi.connectors.youtube.YoutubeBackend")
+
+# CLICKHOUSE
+CLICKHOUSE_BACKEND = os.environ.get(
+    "CLICKHOUSE_BACKEND",
+    "pcapi.connectors.clickhouse.backend.ClickhouseBackend",
+)
+CLICKHOUSE_IP = secrets_utils.get("CLICKHOUSE_IP", "127.0.0.1")
+CLICKHOUSE_USER = secrets_utils.get("CLICKHOUSE_USER", "default")
+CLICKHOUSE_PASSWORD = secrets_utils.get("CLICKHOUSE_PASSWORD")
+
+
+# CEGID
+CEGID_URL = os.environ.get("CEGID_URL", secrets_utils.get("CEGID_URL"))
+CEGID_ENDPOINT = os.environ.get("CEGID_ENDPOINT", "Entity/INTERFACES/23.200.001")
+CEGID_USERNAME = secrets_utils.get("CEGID_USERNAME")
+CEGID_PASSWORD = secrets_utils.get("CEGID_PASSWORD")
+CEGID_CLIENT_ID = secrets_utils.get("CEGID_CLIENT_ID")
+CEGID_CLIENT_SECRET = secrets_utils.get("CEGID_CLIENT_SECRET")
+
+# External APIs
+EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS = int(os.environ.get("EXTERNAL_BOOKINGS_TIMEOUT_IN_SECONDS", "10"))
+ENABLE_CINEMA_PROVIDER_DEBUG = bool(int(os.environ.get("ENABLE_CINEMA_PROVIDER_DEBUG", "0")))
+ALLOW_REQUESTS_REDIRECT = bool(int(os.environ.get("ALLOW_REQUESTS_REDIRECT", "0")))
+WEBHOOK_AUTH_KEY = secrets_utils.get("WEBHOOK_AUTH_KEY", "")
+
+# HARVESTR
+HARVESTR_API_KEY = secrets_utils.get("HARVESTR_API_KEY", "")
+
+# Credit reform
+CREDIT_V3_DECREE_DATETIME = datetime.fromisoformat(os.environ.get("CREDIT_V3_DECREE_DATETIME", "2025-01-01"))
+
+# Soft deletion
+SOFTDELETE_ENABLED = bool(int(os.environ.get("SOFTDELETE_ENABLED", "0")))
+
+# Passwordless signup
+PASSWORDLESS_LOGIN_PRIVATE_KEY = secrets_utils.get("PASSWORDLESS_LOGIN_PRIVATE_KEY", PASSWORDLESS_PRIVATE_KEY_EXAMPLE)
+PASSWORDLESS_LOGIN_PUBLIC_KEY = os.environ.get("PASSWORDLESS_LOGIN_PUBLIC_KEY", PASSWORDLESS_PUBLIC_KEY_EXAMPLE)
+
+# Public API
+PUBLIC_API_EAN_PRODUCTS_BATCH_SIZE = int(os.environ.get("PUBLIC_API_EAN_PRODUCTS_BATCH_SIZE", "35"))
+
+# Beneficiary profiles should stay up to date
+PROFILE_EXPIRY_DATE_STRING = os.environ.get("PROFILE_EXPIRY_DATETIME")
+PROFILE_EXPIRY_DATETIME = datetime.fromisoformat(PROFILE_EXPIRY_DATE_STRING) if PROFILE_EXPIRY_DATE_STRING else None
+
+BATCH_UPDATE_OFFERS_CHUNK_SIZE = int(os.environ.get("BATCH_UPDATE_OFFERS_CHUNK_SIZE", "25"))
+
+# Celery worker
+CELERY_WORKER_METRICS_PORT = int(os.environ.get("CELERY_WORKER_METRICS_PORT", "8080"))
+CELERY_WORKER_ENABLE_METRICS = bool(int(os.environ.get("CELERY_WORKER_ENABLE_METRICS", "1")))
+CELERY_TASK_RETRY_BACKOFF_MAX = int(os.environ.get("CELERY_TASK_RETRY_BACKOFF_MAX", "120"))
+CELERY_TASK_MAX_RETRIES = int(os.environ.get("CELERY_TASK_MAX_RETRIES", "7"))
+PROMETHEUS_MULTIPROC_DIR = str(os.environ.get("PROMETHEUS_MULTIPROC_DIR", ""))
+
+# DIGITAL CAP
+DIGITAL_CAP_V2_DATETIME = datetime.fromisoformat(os.environ.get("DIGITAL_CAP_V2_DATETIME", "2026-03-01"))
+
+# Bonus credit
+EXTENDED_BIRTHDAY_BONUS_CUTOFF_DATETIME = datetime.fromisoformat(
+    os.environ.get("EXTENDED_BIRTHDAY_BONUS_CUTOFF_DATETIME", "2026-01-01")
+)
+BONUS_CREDIT_DELAY = int(os.environ.get("BONUS_CREDIT_DELAY", "300"))
+BONUS_CREDIT_DELAY_JITTER = int(os.environ.get("BONUS_CREDIT_DELAY_JITTER", "0"))
+BONUS_CREDIT_DEPLOYMENT_DATETIME = datetime.fromisoformat(
+    os.environ.get("BONUS_CREDIT_DEPLOYMENT_DATETIME", "2026-08-01")
+)
+MIN_QUOTIENT_FAMILIAL_PER_DISABILITY_BONUS = int(os.environ.get("MIN_QUOTIENT_FAMILIAL_PER_DISABILITY_BONUS", "3"))
+MIN_QUOTIENT_FAMILIAL_BONUSES_TO_PUBLISH = int(os.environ.get("MIN_QUOTIENT_FAMILIAL_BONUSES_TO_PUBLISH", "3"))
+
+# App names
+BACKEND_APP_NAME = "BACKEND"
+BACKOFFICE_APP_NAME = "BACKOFFICE"

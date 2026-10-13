@@ -1,0 +1,141 @@
+import { screen } from '@testing-library/react'
+import * as router from 'react-router'
+import { Route, Routes } from 'react-router'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import type { SharedLoginUserResponseModel } from '@/apiClient/v1'
+import {
+  defaultGetOffererResponseModel,
+  getOffererNameFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import * as utils from '@/commons/utils/recaptcha'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+import { SnackBarContainer } from '@/components/SnackBarContainer/SnackBarContainer'
+
+import { SignIn } from './SignIn'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    signin: vi.fn(),
+    getOfferer: vi.fn(),
+    listOfferersNames: vi.fn(),
+    getProfile: vi.fn(),
+  },
+}))
+
+vi.mock('@/commons/utils/windowMatchMedia', () => ({
+  doesUserPreferReducedMotion: vi.fn(),
+}))
+
+vi.mock('react-router', async () => ({
+  ...(await vi.importActual('react-router')),
+  useSearchParams: () => [],
+}))
+
+const renderSignIn = (options?: RenderWithProvidersOptions) => {
+  return renderWithProviders(
+    <>
+      <SignIn />
+      <Routes>
+        <Route
+          path="/accueil"
+          element={<span>I’m logged standard user redirect route</span>}
+        />
+        <Route
+          path="/inscription"
+          element={<span>I’m the inscription page</span>}
+        />
+        <Route
+          path="/inscription/structure/recherche"
+          element={<span>I’m the onboarding page</span>}
+        />
+        <Route path="/offres" element={<span>I’m the offer page</span>} />
+      </Routes>
+      <SnackBarContainer />
+    </>,
+    {
+      initialRouterEntries: ['/connexion'],
+      features: ['API_SIRENE_AVAILABLE'],
+      ...options,
+    }
+  )
+}
+const scrollIntoViewMock = vi.fn()
+describe('SignIn', () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = scrollIntoViewMock
+    vi.spyOn(api, 'getProfile').mockResolvedValue(sharedCurrentUserFactory())
+    vi.spyOn(api, 'signin').mockResolvedValue(
+      {} as SharedLoginUserResponseModel
+    )
+    vi.spyOn(utils, 'initReCaptchaScript').mockReturnValue({
+      remove: vi.fn(),
+    } as unknown as HTMLScriptElement)
+    vi.spyOn(utils, 'getReCaptchaToken').mockResolvedValue('token')
+
+    vi.spyOn(api, 'listOfferersNames').mockResolvedValue({
+      offerersNames: [
+        getOffererNameFactory({
+          id: 1,
+          name: 'Mon super cinéma',
+          validated: true,
+        }),
+        getOffererNameFactory({
+          id: 1,
+          name: 'Ma super librairie',
+          validated: true,
+        }),
+      ],
+    })
+
+    vi.spyOn(api, 'getOfferer').mockResolvedValue(
+      defaultGetOffererResponseModel
+    )
+  })
+
+  describe('should display messages after account validation', () => {
+    it('should render without accessibility violations', async () => {
+      vi.spyOn(router, 'useSearchParams').mockReturnValue([
+        new URLSearchParams(),
+        vi.fn(),
+      ])
+      const { container } = renderSignIn()
+
+      expect(await axe(container)).toHaveNoViolations()
+    })
+
+    it('should display confirmation', async () => {
+      vi.spyOn(router, 'useSearchParams').mockReturnValue([
+        new URLSearchParams({ accountValidation: 'true' }),
+        vi.fn(),
+      ])
+      renderSignIn()
+      expect(
+        (
+          await screen.findAllByText(
+            'Votre compte a été créé. Vous pouvez vous connecter avec les identifiants que vous avez choisis.'
+          )
+        ).length
+      ).toBeGreaterThan(0)
+    })
+
+    it('should display error', async () => {
+      vi.spyOn(router, 'useSearchParams').mockReturnValue([
+        new URLSearchParams({
+          accountValidation: 'false',
+          message: 'Erreur invalide',
+        }),
+        vi.fn(),
+      ])
+      renderSignIn()
+      expect(
+        (await screen.findAllByText('Erreur invalide')).length
+      ).toBeGreaterThan(0)
+    })
+  })
+})

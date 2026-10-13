@@ -1,0 +1,33 @@
+{% macro build_offerer_validation_toggle_extra_row_button(offerer_id, dms_venues) %}
+  {% if dms_venues %}
+    <button class="btn btn-sm {{ 'btn-outline-success' if 'accepte' in dms_venues | map(attribute='state') else 'btn-outline-danger' }} pc-btn-chevron-toggle"
+            data-bs-toggle="collapse"
+            data-bs-target=".pc-offerer-validation-{{ offerer_id }}">
+      <i class="bi bi-chevron-down"></i>
+    </button>
+  {% endif %}
+{% endmacro %}
+{% macro build_offerer_validation_extra_row(offerer_id, dms_venues) %}
+  {% if dms_venues %}
+    <tr class="collapse accordion-collapse pc-offerer-validation-{{ offerer_id }}">
+      <td colspan="100%">
+        <div class="row">
+          <div class="col-6">
+            <div class="card shadow-sm p-4 mx-2">
+              {% for dms_venue in dms_venues %}
+                {% if dms_venue.state %}
+                  <ul>
+                    <li>{{ ("Nom : " + dms_venue.name) if dms_venue.name else "Dossier sans partenaire culturel" }}</li>
+                    <li>SIRET : {{ dms_venue.siret }}</li>
+                    <li>Statut du dossier DN ADAGE : {{ dms_venue.state | format_dms_status }}</li>
+                    <li>Date de dernière modification : {{ dms_venue.lastChangeDate | format_string_to_date_time }}</li>
+                  </ul>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+      </td>
+    </tr>
+  {% endif %}
+{% endmacro %}

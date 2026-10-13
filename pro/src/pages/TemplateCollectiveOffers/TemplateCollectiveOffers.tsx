@@ -1,0 +1,78 @@
+import { useNavigate } from 'react-router'
+import useSWR from 'swr'
+
+import { api } from '@/apiClient/api'
+import { ContentLayout } from '@/app/App/layouts/ContentLayout/ContentLayout'
+import {
+  DEFAULT_COLLECTIVE_SEARCH_FILTERS,
+  DEFAULT_PAGE,
+} from '@/commons/core/Offers/constants'
+import { useCollectiveOffersSwrKeys } from '@/commons/core/Offers/hooks/useCollectiveOffersSwrKeys'
+import { useQueryCollectiveSearchFilters } from '@/commons/core/Offers/hooks/useQuerySearchFilters'
+import type { CollectiveSearchFiltersParams } from '@/commons/core/Offers/types'
+import { computeCollectiveOffersUrl } from '@/commons/core/Offers/utils/computeCollectiveOffersUrl'
+import { serializeApiCollectiveFilters } from '@/commons/core/Offers/utils/serializeApiCollectiveFilters'
+import { TemplateCollectiveOffersScreen } from '@/pages/TemplateCollectiveOffers/TemplateCollectiveOffersScreen/TemplateCollectiveOffersScreen'
+import { Spinner } from '@/ui-kit/Spinner/Spinner'
+
+import styles from './TemplateCollectiveOffers.module.scss'
+
+export const TemplateCollectiveOffers = () => {
+  const urlSearchFilters = useQueryCollectiveSearchFilters()
+
+  const currentPageNumber = urlSearchFilters.page ?? DEFAULT_PAGE
+  const navigate = useNavigate()
+
+  const redirectWithUrlFilters = (
+    filters: Partial<CollectiveSearchFiltersParams>
+  ) => {
+    // The offererId and partner venueId come from the Redux store, no need
+    // to also reflect them in the URL.
+    delete filters.offererId
+    delete filters.venueId
+
+    void navigate(
+      computeCollectiveOffersUrl(
+        filters,
+        DEFAULT_COLLECTIVE_SEARCH_FILTERS,
+        true
+      ),
+      { replace: true }
+    )
+  }
+
+  const [queryKey, apiFilters] = useCollectiveOffersSwrKeys({
+    isInTemplateOffersPage: true,
+  })
+
+  const offersQuery = useSWR(
+    [queryKey, apiFilters],
+    () => {
+      const params = serializeApiCollectiveFilters(apiFilters)
+      return api.getCollectiveOfferTemplates({ query: { ...params } })
+    },
+    { fallbackData: [] }
+  )
+
+  return (
+    <ContentLayout>
+      <h1 className={styles['title']}>Offres vitrines</h1>
+      {offersQuery.isLoading ? (
+        <Spinner />
+      ) : (
+        <TemplateCollectiveOffersScreen
+          currentPageNumber={currentPageNumber}
+          initialSearchFilters={apiFilters}
+          isLoading={offersQuery.isLoading}
+          offers={offersQuery.data ?? []}
+          redirectWithUrlFilters={redirectWithUrlFilters}
+          urlSearchFilters={urlSearchFilters}
+        />
+      )}
+    </ContentLayout>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = TemplateCollectiveOffers

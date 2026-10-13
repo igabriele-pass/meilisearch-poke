@@ -1,0 +1,37 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_a11y.scss" as a11y;
+
+.offers-table-search {
+  margin-bottom: var(--size-spacing-xxl);
+
+  &-name-and-toggle-row {
+    display: flex;
+    align-items: flex-end;
+    flex-flow: row nowrap;
+    gap: var(--size-spacing-l);
+    margin-bottom: var(--size-spacing-l);
+  }
+
+  &-input-wrapper {
+    width: rem.torem(500px);
+    max-width: 100%;
+  }
+
+  &-separator-wrapper {
+      align-items: center;
+      display: flex;
+      margin-top: rem.torem(23px);
+    }
+  
+  &-separator-element {
+    background-color: var(--separator-color-subtle);
+    flex: 1;
+    height: rem.torem(1px);
+  }
+}
+
+.visually-hidden {
+  @include a11y.visually-hidden;
+}

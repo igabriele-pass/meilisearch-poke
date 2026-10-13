@@ -1,0 +1,18 @@
+{% from "components/links.html" import build_offerer_name_to_details_link %}
+<div class="card shadow">
+  <div class="card-body">
+    <h5 class="mb-3"></h5>
+    {% set link = get_link_to_detail(row.id, form=search_form) %}
+    <h5 class="card-title">
+      <a href="{{ link }}"
+         class="link-primary">{{ row.label | upper }}</a>
+      <span class="fs-5 ps-4">{{ "Compte bancaire" | format_badge("warning") }}</span>
+    </h5>
+    <h6 class="card-subtitle mt-4 mb-3 text-muted">Bank Account ID : {{ row.id }}</h6>
+    <div class="d-flex flex-row-reverse">
+      <a href="{{ link }}"
+         class="btn btn-md btn-outline-primary fw-bold">CONSULTER CE COMPTE <i class="bi bi-arrow-right"></i>
+      </a>
+    </div>
+  </div>
+</div>

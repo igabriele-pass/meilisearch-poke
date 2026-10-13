@@ -1,0 +1,921 @@
+from datetime import date
+from datetime import datetime
+from datetime import time
+from datetime import timedelta
+
+import pytest
+from pytest import fixture
+
+import pcapi.core.bookings.factories as bookings_factories
+import pcapi.core.bookings.repository as booking_repository
+import pcapi.core.offerers.factories as offerers_factories
+import pcapi.core.offers.factories as offers_factories
+import pcapi.core.users.factories as users_factories
+from pcapi.core.bookings.models import BookingStatus
+from pcapi.core.bookings.models import BookingStatusFilter
+from pcapi.core.bookings.repository import get_bookings_from_deposit
+from pcapi.core.categories import subcategories
+from pcapi.core.testing import assert_no_duplicated_queries
+from pcapi.core.testing import assert_num_queries
+from pcapi.utils import date as date_utils
+from pcapi.utils.date import get_department_timezone
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+NOW = date_utils.get_naive_utc_now()
+YESTERDAY = NOW - timedelta(days=1)
+TWO_DAYS_AGO = NOW - timedelta(days=2)
+THREE_DAYS_AGO = NOW - timedelta(days=3)
+FOUR_DAYS_AGO = NOW - timedelta(days=4)
+FIVE_DAYS_AGO = NOW - timedelta(days=5)
+ONE_WEEK_FROM_NOW = NOW + timedelta(weeks=1)
+
+
+def test_find_all_ongoing_bookings(app):
+    user = users_factories.BeneficiaryGrant18Factory()
+    stock = offers_factories.StockFactory(price=0, quantity=10)
+    bookings_factories.CancelledBookingFactory(user=user, stock=stock)
+    bookings_factories.UsedBookingFactory(user=user, stock=stock)
+    ongoing_booking = bookings_factories.BookingFactory(user=user, stock=stock)
+
+    all_ongoing_bookings = booking_repository.find_ongoing_bookings_by_stock(stock.id)
+
+    assert all_ongoing_bookings == [ongoing_booking]
+
+
+def test_find_not_cancelled_bookings_by_stock(app):
+    user = users_factories.BeneficiaryGrant18Factory()
+    stock = offers_factories.ThingStockFactory(price=0)
+    bookings_factories.CancelledBookingFactory(user=user, stock=stock)
+    used_booking = bookings_factories.UsedBookingFactory(user=user, stock=stock)
+    not_cancelled_booking = bookings_factories.BookingFactory(user=user, stock=stock)
+
+    all_not_cancelled_bookings = booking_repository.find_not_cancelled_bookings_by_stock(stock)
+
+    assert set(all_not_cancelled_bookings) == {used_booking, not_cancelled_booking}
+
+
+default_booking_date = date.today()
+one_year_before_booking = default_booking_date - timedelta(weeks=52)
+one_year_after_booking = default_booking_date + timedelta(weeks=52)
+
+
+class FindByVenueTest:
+    def test_should_return_only_expected_booking_attributes(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory(
+            email="beneficiary@example.com", firstName="Ron", lastName="Weasley"
+        )
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offer = offers_factories.ThingOfferFactory(venue=venue)
+        stock = offers_factories.ThingStockFactory(offer=offer, price=0)
+        booking_date = datetime(2020, 1, 1, 10, 0, 0) - timedelta(days=1)
+        bookings_factories.UsedBookingFactory(
+            user=beneficiary,
+            stock=stock,
+            dateCreated=booking_date,
+            token="ABCDEF",
+            amount=12,
+        )
+
+        bookings_query, total = booking_repository.find_by_venue(
+            pro_user_id=pro.id,
+            venue_id=venue.id,
+            booking_period=(booking_date - timedelta(days=365), booking_date + timedelta(days=365)),
+        )
+
+        bookings = bookings_query.all()
+
+        assert total == 1
+        assert len(bookings) == 1
+        expected_booking = bookings[0]
+        assert expected_booking.offerId == stock.offer.id
+        assert expected_booking.offerName == offer.name
+        assert expected_booking.beneficiaryFirstname == "Ron"
+        assert expected_booking.beneficiaryLastname == "Weasley"
+        assert expected_booking.beneficiaryEmail == "beneficiary@example.com"
+        assert expected_booking.bookedAt == booking_date  # .astimezone(tz.gettz("Europe/Paris"))
+        assert expected_booking.bookingToken == "ABCDEF"
+        assert expected_booking.usedAt
+        assert not expected_booking.cancelledAt
+        assert not expected_booking.reimbursedAt
+        assert expected_booking.quantity == 1
+        assert expected_booking.bookingAmount == 12
+
+    def test_should_return_only_validated_bookings_for_requested_period(self, app: fixture):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offer = offers_factories.ThingOfferFactory(venue=venue)
+        stock = offers_factories.ThingStockFactory(offer=offer, price=0)
+
+        booking_date = datetime(2020, 1, 1, 10, 0, 0)
+
+        bookings_factories.UsedBookingFactory(
+            stock=stock, quantity=1, dateCreated=booking_date, dateUsed=(booking_date + timedelta(days=1))
+        )
+        used_booking_2 = bookings_factories.UsedBookingFactory(
+            stock=stock, quantity=1, dateCreated=booking_date, dateUsed=(booking_date + timedelta(days=4))
+        )
+        bookings_factories.UsedBookingFactory(
+            stock=stock, quantity=1, dateCreated=booking_date, dateUsed=(booking_date + timedelta(days=8))
+        )
+
+        bookings_query, total = booking_repository.find_by_venue(
+            pro_user_id=pro.id,
+            venue_id=venue.id,
+            booking_period=((booking_date + timedelta(2)), (booking_date + timedelta(5))),
+            status_filter=BookingStatusFilter.VALIDATED,
+        )
+        bookings = bookings_query.all()
+
+        assert total == 1
+        assert len(bookings) == 1
+        assert bookings[0].bookingToken == used_booking_2.token
+
+    def test_should_return_only_reimbursed_bookings_for_requested_period(self, app: fixture):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        stock = offers_factories.ThingStockFactory(offer__venue=venue, price=10)
+
+        booking_date = datetime(2020, 1, 1, 10, 0, 0)
+
+        bookings_factories.UsedBookingFactory(
+            stock=stock, quantity=1, dateCreated=booking_date, reimbursementDate=(booking_date + timedelta(days=1))
+        )
+        reimbursed_booking_1 = bookings_factories.UsedBookingFactory(
+            stock=stock, quantity=1, dateCreated=booking_date, reimbursementDate=(booking_date + timedelta(days=2))
+        )
+        bookings_factories.UsedBookingFactory(
+            stock=stock, quantity=1, dateCreated=booking_date, reimbursementDate=(booking_date + timedelta(days=4))
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro.id,
+            venue_id=venue.id,
+            booking_period=(date(2020, 1, 3), date(2020, 1, 4)),
+            status_filter=BookingStatusFilter.REIMBURSED,
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        assert bookings[0].bookingToken == reimbursed_booking_1.token
+
+    def test_should_return_booking_as_duo_when_quantity_is_two(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory(
+            email="beneficiary@example.com", firstName="Ron", lastName="Weasley"
+        )
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offer = offers_factories.ThingOfferFactory(venue=venue)
+        stock = offers_factories.ThingStockFactory(offer=offer, price=0)
+        bookings_factories.BookingFactory(user=beneficiary, stock=stock, quantity=2)
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro.id, venue_id=venue.id, booking_period=(one_year_before_booking, one_year_after_booking)
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 2
+        assert bookings[0].quantity == 2
+
+    def test_should_return_event_booking_when_booking_is_on_an_event(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory(
+            email="beneficiary@example.com", firstName="Ron", lastName="Weasley"
+        )
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offer = offers_factories.ThingOfferFactory(venue=venue)
+        stock = offers_factories.ThingStockFactory(
+            offer=offer, price=0, beginningDatetime=date_utils.get_naive_utc_now() + timedelta(hours=98)
+        )
+        yesterday = date_utils.get_naive_utc_now() - timedelta(days=1)
+        bookings_factories.BookingFactory(
+            user=beneficiary,
+            stock=stock,
+            dateCreated=yesterday,
+            token="ABCDEF",
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro.id, venue_id=venue.id, booking_period=(one_year_before_booking, one_year_after_booking)
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        expected_booking = bookings[0]
+        assert expected_booking.offerId == stock.offer.id
+        assert expected_booking.offerName == stock.offer.name
+        assert expected_booking.beneficiaryFirstname == "Ron"
+        assert expected_booking.beneficiaryLastname == "Weasley"
+        assert expected_booking.beneficiaryEmail == "beneficiary@example.com"
+        assert expected_booking.bookedAt == yesterday
+        assert expected_booking.bookingToken == "ABCDEF"
+        assert not expected_booking.usedAt
+        assert not expected_booking.cancelledAt
+        assert not expected_booking.reimbursedAt
+        assert not expected_booking.isConfirmed
+        assert expected_booking.stockBeginningDatetime == stock.beginningDatetime
+
+    def test_should_return_event_confirmed_booking_when_booking_is_on_an_event_in_confirmation_period(
+        self, app: fixture
+    ):
+        beneficiary = users_factories.BeneficiaryGrant18Factory(
+            email="beneficiary@example.com", firstName="Ron", lastName="Weasley"
+        )
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offer = offers_factories.ThingOfferFactory(venue=venue)
+        stock = offers_factories.ThingStockFactory(
+            offer=offer, price=0, beginningDatetime=date_utils.get_naive_utc_now() + timedelta(hours=98)
+        )
+        more_than_two_days_ago = date_utils.get_naive_utc_now() - timedelta(days=3)
+        bookings_factories.BookingFactory(
+            user=beneficiary, stock=stock, dateCreated=more_than_two_days_ago, token="ABCDEF"
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro.id, venue_id=venue.id, booking_period=(one_year_before_booking, one_year_after_booking)
+        )
+        bookings = bookings_query.all()
+
+        assert bookings[0].isConfirmed
+
+    def test_should_return_cancellation_date_when_booking_has_been_cancelled(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory(
+            email="beneficiary@example.com", firstName="Ron", lastName="Weasley"
+        )
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offer = offers_factories.ThingOfferFactory(venue=venue)
+        stock = offers_factories.ThingStockFactory(offer=offer, price=5)
+        yesterday = date_utils.get_naive_utc_now() - timedelta(days=1)
+        bookings_factories.CancelledBookingFactory(
+            user=beneficiary,
+            stock=stock,
+            dateCreated=yesterday,
+            token="ABCDEF",
+            amount=5,
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro.id, venue_id=venue.id, booking_period=(one_year_before_booking, one_year_after_booking)
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        assert bookings[0].cancelledAt
+
+    def test_should_return_validation_date_when_booking_has_been_used_and_not_cancelled_not_reimbursed(
+        self, app: fixture
+    ):
+        beneficiary = users_factories.BeneficiaryGrant18Factory()
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        product = offers_factories.EventProductFactory()
+        offer = offers_factories.EventOfferFactory(venue=venue, product=product)
+        stock = offers_factories.EventStockFactory(offer=offer, price=5)
+        yesterday = date_utils.get_naive_utc_now() - timedelta(days=1)
+        bookings_factories.UsedBookingFactory(
+            user=beneficiary,
+            stock=stock,
+            dateCreated=yesterday,
+            token="ABCDEF",
+            amount=5,
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro.id, venue_id=venue.id, booking_period=(one_year_before_booking, one_year_after_booking)
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        expected_booking = bookings[0]
+        assert expected_booking.usedAt
+        assert not expected_booking.cancelledAt
+        assert not expected_booking.reimbursedAt
+
+    def test_should_return_bookings_from_first_page(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory(email="beneficiary@example.com")
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offer = offers_factories.EventOfferFactory(venue=venue)
+        stock = offers_factories.EventStockFactory(offer=offer, price=0)
+        today = date_utils.get_naive_utc_now()
+        yesterday = date_utils.get_naive_utc_now() - timedelta(days=1)
+        bookings_factories.BookingFactory(user=beneficiary, stock=stock, dateCreated=yesterday, token="ABCD")
+        booking2 = bookings_factories.BookingFactory(user=beneficiary, stock=stock, dateCreated=today, token="FGHI")
+
+        bookings_query, total = booking_repository.find_by_venue(
+            pro_user_id=pro.id,
+            venue_id=venue.id,
+            booking_period=(one_year_before_booking, one_year_after_booking),
+            page=1,
+            per_page_limit=1,
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        assert bookings[0].bookingToken == booking2.token
+        assert total == 2
+
+    def test_should_return_one_booking_recap_item_when_quantity_booked_is_one(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory()
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offer = offers_factories.EventOfferFactory(venue=venue, isDuo=True)
+        stock = offers_factories.EventStockFactory(
+            offer=offer, price=0, beginningDatetime=date_utils.get_naive_utc_now()
+        )
+        today = date_utils.get_naive_utc_now()
+        booking = bookings_factories.BookingFactory(user=beneficiary, stock=stock, dateCreated=today, token="FGHI")
+
+        bookings_query, total = booking_repository.find_by_venue(
+            pro_user_id=pro.id,
+            venue_id=venue.id,
+            booking_period=(one_year_before_booking, one_year_after_booking),
+            page=1,
+            per_page_limit=4,
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        assert bookings[0].bookingToken == booking.token
+        assert total == 1
+
+    def test_should_return_two_booking_recap_items_when_quantity_booked_is_two(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory()
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offer = offers_factories.EventOfferFactory(venue=venue, isDuo=True)
+        stock = offers_factories.EventStockFactory(
+            offer=offer, price=0, beginningDatetime=date_utils.get_naive_utc_now()
+        )
+        today = date_utils.get_naive_utc_now()
+        booking = bookings_factories.BookingFactory(
+            user=beneficiary, stock=stock, dateCreated=today, token="FGHI", quantity=2
+        )
+
+        bookings_query, total = booking_repository.find_by_venue(
+            pro_user_id=pro.id,
+            venue_id=venue.id,
+            booking_period=(one_year_before_booking, one_year_after_booking),
+            page=1,
+            per_page_limit=4,
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 2
+        assert bookings[0].bookingToken == booking.token
+        assert bookings[1].bookingToken == booking.token
+        assert total == 2
+
+    def test_should_return_booking_date_with_offerer_timezone_when_venue_is_digital(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory()
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offer = offers_factories.ThingOfferFactory(venue=venue)
+        stock = offers_factories.ThingStockFactory(offer=offer, price=0)
+        booking_date = datetime(2020, 1, 1, 10, 0, 0) - timedelta(days=1)
+        bookings_factories.UsedBookingFactory(
+            user=beneficiary,
+            stock=stock,
+            dateCreated=booking_date,
+            token="ABCDEF",
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro.id,
+            venue_id=venue.id,
+            booking_period=(booking_date - timedelta(days=365), booking_date + timedelta(days=365)),
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        assert bookings[0].bookedAt == booking_date
+
+    def test_should_return_booking_ean_when_information_is_available(self, app: fixture):
+        beneficiary = users_factories.BeneficiaryGrant18Factory()
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offer = offers_factories.ThingOfferFactory(venue=venue, ean="9876543234999")
+        stock = offers_factories.ThingStockFactory(offer=offer, price=0)
+        booking_date = datetime(2020, 1, 1, 10, 0, 0) - timedelta(days=1)
+        bookings_factories.UsedBookingFactory(
+            user=beneficiary,
+            stock=stock,
+            dateCreated=booking_date,
+            token="ABCDEF",
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro.id,
+            venue_id=venue.id,
+            booking_period=(booking_date - timedelta(days=365), booking_date + timedelta(days=365)),
+        )
+        bookings = bookings_query.all()
+
+        assert bookings[0].offerEan == "9876543234999"
+
+    def test_should_return_only_bookings_for_requested_offerer_address(self):
+        pro_user = users_factories.ProFactory()
+        user_offerer = offerers_factories.UserOffererFactory(user=pro_user)
+        offerer = user_offerer.offerer
+
+        offerer_address_1 = offerers_factories.OfferLocationFactory(offerer=offerer)
+
+        booking_1 = bookings_factories.BookingFactory(
+            stock__offer__venue__managingOfferer=offerer, stock__offer__offererAddress=offerer_address_1
+        )
+        bookings_factories.BookingFactory(stock__offer__venue__managingOfferer=offerer)
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro_user.id,
+            venue_id=booking_1.venue.id,
+            booking_period=(one_year_before_booking, one_year_after_booking),
+            offerer_address_id=offerer_address_1.id,
+        )
+
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        assert bookings[0].offerId == booking_1.stock.offer.id
+
+    def test_should_return_only_booking_for_requested_venue(self, app: fixture):
+        pro_user = users_factories.ProFactory()
+        user_offerer = offerers_factories.UserOffererFactory(user=pro_user)
+
+        bookings_factories.BookingFactory(stock__offer__venue__managingOfferer=user_offerer.offerer)
+        booking_two = bookings_factories.BookingFactory(stock__offer__venue__managingOfferer=user_offerer.offerer)
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=pro_user.id,
+            venue_id=booking_two.venue.id,
+            booking_period=(one_year_before_booking, one_year_after_booking),
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        expected_booking = bookings[0]
+        assert expected_booking.offerId == booking_two.stock.offer.id
+        assert expected_booking.offerName == booking_two.stock.offer.name
+        assert expected_booking.bookingAmount == booking_two.amount
+
+    def test_should_return_only_booking_for_requested_event_date(self, app: fixture):
+        user_offerer = offerers_factories.UserOffererFactory()
+        event_date = datetime(2020, 12, 24, 10, 30)
+        expected_booking = bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=event_date, offer__venue__managingOfferer=user_offerer.offerer
+            )
+        )
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(offer__venue__managingOfferer=user_offerer.offerer)
+        )
+        bookings_factories.BookingFactory(
+            stock=offers_factories.ThingStockFactory(offer__venue__managingOfferer=user_offerer.offerer)
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=user_offerer.user.id,
+            venue_id=expected_booking.venue.id,
+            booking_period=(one_year_before_booking, one_year_after_booking),
+            event_date=event_date.date(),
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        assert bookings[0].bookingToken == expected_booking.token
+
+    def should_consider_venue_locale_datetime_when_filtering_by_event_date(self, app: fixture):
+        user_offerer = offerers_factories.UserOffererFactory()
+        event_datetime = datetime(2020, 4, 21, 20, 00)
+
+        # Cayenne
+        offer_in_cayenne = offers_factories.OfferFactory(
+            venue__managingOfferer=user_offerer.offerer,
+            venue__offererAddress__address__timezone=get_department_timezone("973"),
+            venue__offererAddress__address__postalCode="97300",
+        )
+        cayenne_event_datetime = datetime(2020, 4, 22, 2, 0)
+        stock_in_cayenne = offers_factories.EventStockFactory(
+            offer=offer_in_cayenne, beginningDatetime=cayenne_event_datetime
+        )
+        cayenne_booking = bookings_factories.BookingFactory(stock=stock_in_cayenne)
+
+        # Mayotte
+        offer_in_mayotte = offers_factories.OfferFactory(
+            venue__managingOfferer=user_offerer.offerer,
+            venue__offererAddress__address__timezone=get_department_timezone("976"),
+            venue__offererAddress__address__postalCode="97600",
+        )
+        mayotte_event_datetime = datetime(2020, 4, 20, 22, 0)
+        stock_in_mayotte = offers_factories.EventStockFactory(
+            offer=offer_in_mayotte, beginningDatetime=mayotte_event_datetime
+        )
+        mayotte_booking = bookings_factories.BookingFactory(stock=stock_in_mayotte)
+
+        # cayenne
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=user_offerer.user.id,
+            venue_id=cayenne_booking.venue.id,
+            booking_period=(one_year_before_booking, one_year_after_booking),
+            event_date=event_datetime.date(),
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        bookings_tokens = [booking_recap.bookingToken for booking_recap in bookings]
+        assert cayenne_booking.token in bookings_tokens
+
+        # mayotte
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=user_offerer.user.id,
+            venue_id=mayotte_booking.venue.id,
+            booking_period=(one_year_before_booking, one_year_after_booking),
+            event_date=event_datetime.date(),
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        bookings_tokens = [booking_recap.bookingToken for booking_recap in bookings]
+        assert mayotte_booking.token in bookings_tokens
+
+    def test_should_return_only_bookings_for_requested_booking_period(self, app: fixture):
+        user_offerer = offerers_factories.UserOffererFactory()
+        booking_beginning_period = datetime(2020, 12, 24, 10, 30).date()
+        booking_ending_period = datetime(2020, 12, 26, 15, 00).date()
+        booking_status_filter = BookingStatusFilter.BOOKED
+        expected_booking = bookings_factories.BookingFactory(
+            dateCreated=datetime(2020, 12, 26, 15, 30),
+            stock=offers_factories.ThingStockFactory(offer__venue__managingOfferer=user_offerer.offerer),
+        )
+        bookings_factories.BookingFactory(
+            dateCreated=datetime(2020, 12, 29, 15, 30),
+            stock=offers_factories.ThingStockFactory(offer__venue__managingOfferer=user_offerer.offerer),
+        )
+        bookings_factories.BookingFactory(
+            dateCreated=datetime(2020, 12, 22, 15, 30),
+            stock=offers_factories.ThingStockFactory(offer__venue__managingOfferer=user_offerer.offerer),
+        )
+
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=user_offerer.user.id,
+            venue_id=expected_booking.venue.id,
+            booking_period=(booking_beginning_period, booking_ending_period),
+            status_filter=booking_status_filter,
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        assert bookings[0].bookedAt == expected_booking.dateCreated
+
+    def should_consider_venue_locale_datetime_when_filtering_by_booking_period(self, app: fixture):
+        user_offerer = offerers_factories.UserOffererFactory()
+        requested_booking_period_beginning = datetime(2020, 4, 21, 20, 00).date()
+        requested_booking_period_ending = datetime(2020, 4, 22, 20, 00).date()
+
+        offer_in_cayenne = offers_factories.OfferFactory(
+            venue__offererAddress__address__street="1 Rue de Rémire",
+            venue__offererAddress__address__city="Cayenne",
+            venue__offererAddress__address__postalCode="97300",
+            venue__managingOfferer=user_offerer.offerer,
+        )
+        cayenne_booking_datetime = datetime(2020, 4, 22, 2, 0)
+        stock_in_cayenne = offers_factories.EventStockFactory(
+            offer=offer_in_cayenne,
+        )
+        cayenne_booking = bookings_factories.BookingFactory(
+            stock=stock_in_cayenne, dateCreated=cayenne_booking_datetime
+        )
+
+        offer_in_mayotte = offers_factories.OfferFactory(
+            venue__offererAddress__address__street="Boulevard Halidi Sélémani",
+            venue__offererAddress__address__city="Mamoudzou",
+            venue__offererAddress__address__postalCode="97600",
+            venue__managingOfferer=user_offerer.offerer,
+        )
+        mayotte_booking_datetime = datetime(2020, 4, 20, 23, 0)
+        stock_in_mayotte = offers_factories.EventStockFactory(
+            offer=offer_in_mayotte,
+        )
+        mayotte_booking = bookings_factories.BookingFactory(
+            stock=stock_in_mayotte, dateCreated=mayotte_booking_datetime
+        )
+
+        # cayenne
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=user_offerer.user.id,
+            venue_id=cayenne_booking.venue.id,
+            booking_period=(requested_booking_period_beginning, requested_booking_period_ending),
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        bookings_tokens = [booking_recap.bookingToken for booking_recap in bookings]
+        assert cayenne_booking.token in bookings_tokens
+
+        # mayotte
+        bookings_query, _ = booking_repository.find_by_venue(
+            pro_user_id=user_offerer.user.id,
+            venue_id=mayotte_booking.venue.id,
+            booking_period=(requested_booking_period_beginning, requested_booking_period_ending),
+        )
+        bookings = bookings_query.all()
+
+        assert len(bookings) == 1
+        bookings_tokens = [booking_recap.bookingToken for booking_recap in bookings]
+        assert mayotte_booking.token in bookings_tokens
+
+
+class FindSoonToBeExpiredBookingsTest:
+    def test_should_return_only_soon_to_be_expired_individual_bookings(self, app: fixture):
+        expired_creation_date = date.today() - timedelta(days=23)
+        expired_creation_date = datetime.combine(expired_creation_date, time(12, 34, 17))
+        non_expired_creation_date = date.today() - timedelta(days=24)
+        non_expired_creation_date = datetime.combine(non_expired_creation_date, time(12, 34, 17))
+        too_old_expired_creation_date = date.today() - timedelta(days=22)
+        too_old_expired_creation_date = datetime.combine(too_old_expired_creation_date, time(12, 34, 17))
+
+        expected_booking = bookings_factories.BookingFactory(
+            dateCreated=expired_creation_date,
+            stock__offer__subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id,
+        )
+        # offer type not expirable
+        bookings_factories.BookingFactory(
+            dateCreated=expired_creation_date,
+            stock__offer__subcategoryId=subcategories.TELECHARGEMENT_LIVRE_AUDIO.id,
+        )
+        bookings_factories.BookingFactory(
+            dateCreated=non_expired_creation_date,
+            stock__offer__subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id,
+        )
+        bookings_factories.BookingFactory(
+            dateCreated=too_old_expired_creation_date,
+            stock__offer__subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id,
+        )
+
+        expired_bookings = booking_repository.find_soon_to_be_expiring_individual_bookings_ordered_by_user().all()
+
+        assert expired_bookings == [expected_booking]
+
+    def test_should_return_only_soon_to_be_expired_bookings_books_case(self):
+        soon_expired_creation_date = datetime.combine(date.today() - timedelta(days=5), time(12, 34, 17))
+        too_old_creation_date = datetime.combine(date.today() - timedelta(days=6), time(12, 34, 17))
+        non_expired_creation_date = datetime.combine(date.today() - timedelta(days=4), time(12, 34, 17))
+
+        soon_expired_books_booking = bookings_factories.BookingFactory(
+            dateCreated=soon_expired_creation_date,
+            stock__offer__subcategoryId=subcategories.LIVRE_PAPIER.id,
+        )
+        bookings_factories.BookingFactory(
+            dateCreated=soon_expired_creation_date,
+            stock__offer__subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id,
+        )
+        bookings_factories.BookingFactory(
+            dateCreated=too_old_creation_date,
+            stock__offer__subcategoryId=subcategories.LIVRE_PAPIER.id,
+        )
+        bookings_factories.BookingFactory(
+            dateCreated=non_expired_creation_date,
+            stock__offer__subcategoryId=subcategories.LIVRE_PAPIER.id,
+        )
+
+        assert booking_repository.find_soon_to_be_expiring_individual_bookings_ordered_by_user().all() == [
+            soon_expired_books_booking
+        ]
+
+
+class FindExpiringBookingsTest:
+    def test_find_expired_bookings_before_and_after_enabling_feature_flag(self):
+        now = date_utils.get_naive_utc_now()
+        book_offer = offers_factories.OfferFactory(subcategoryId=subcategories.LIVRE_PAPIER.id)
+        movie_offer = offers_factories.OfferFactory(subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id)
+
+        _movie_booking_too_recent = bookings_factories.BookingFactory(
+            stock__offer=movie_offer, dateCreated=now - timedelta(days=30)
+        )
+        movie_booking_old_enough = bookings_factories.BookingFactory(
+            stock__offer=movie_offer, dateCreated=now - timedelta(days=31)
+        )
+
+        _book_booking_too_recent = bookings_factories.BookingFactory(
+            stock__offer=book_offer, dateCreated=now - timedelta(days=10)
+        )
+        book_booking_old_enough = bookings_factories.BookingFactory(
+            stock__offer=book_offer, dateCreated=now - timedelta(days=11)
+        )
+
+        bookings = set(booking_repository.find_expiring_individual_bookings_query())
+        assert bookings == {book_booking_old_enough, movie_booking_old_enough}
+
+
+def test_get_bookings_from_deposit():
+    deposit1 = users_factories.BeneficiaryFactory().deposit
+    deposit2 = users_factories.BeneficiaryFactory().deposit
+    booking1 = bookings_factories.BookingFactory(deposit=deposit1)
+    booking2 = bookings_factories.BookingFactory(deposit=deposit2)
+    bookings_factories.CancelledBookingFactory(deposit=deposit2)  # cancelled bookings are ignored
+
+    assert get_bookings_from_deposit(deposit1.id) == [booking1]
+    assert get_bookings_from_deposit(deposit2.id) == [booking2]
+
+
+class SoonExpiringBookingsTest:
+    def test_get_soon_expiring_bookings(self):
+        stock = offers_factories.ThingStockFactory()
+
+        bookings_factories.UsedBookingFactory(stock=stock)
+        bookings_factories.CancelledBookingFactory(stock=stock)
+        booking = bookings_factories.BookingFactory(stock=stock)
+
+        creation_date = date_utils.get_naive_utc_now() - timedelta(days=1)
+        bookings_factories.BookingFactory(stock=stock, dateCreated=creation_date)
+
+        remaining_days = (booking.expirationDate.date() - date.today()).days
+
+        bookings = set(booking_repository.get_soon_expiring_bookings(remaining_days))
+        assert {booking.id for booking in bookings} == {booking.id}
+
+    def test_no_unexpected_queries(self):
+        stocks = offers_factories.ThingStockFactory.create_batch(5)
+        bookings = [bookings_factories.BookingFactory(stock=stock) for stock in stocks]
+
+        remaining_days = (bookings[0].expirationDate.date() - date.today()).days
+        with assert_no_duplicated_queries():
+            list(booking_repository.get_soon_expiring_bookings(remaining_days))
+
+
+class GetTomorrowEventOfferTest:
+    def test_find_tomorrow_event_offer(self):
+        tomorrow = date_utils.get_naive_utc_now() + timedelta(days=1)
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=tomorrow,
+            )
+        )
+
+        bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 1
+
+    def should_not_select_given_before_tomorrow_booking_event(self):
+        yesterday = date_utils.get_naive_utc_now() - timedelta(days=1)
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=yesterday,
+            )
+        )
+
+        bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 0
+
+    def should_not_select_given_after_tomorrow_booking_event(self):
+        after_tomorrow = date_utils.get_naive_utc_now() + timedelta(days=2)
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=after_tomorrow,
+            )
+        )
+
+        bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 0
+
+    def should_not_select_given_not_booking_event(self):
+        tomorrow = date_utils.get_naive_utc_now() + timedelta(days=1)
+        bookings_factories.BookingFactory(stock__beginningDatetime=tomorrow)
+
+        bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 0
+
+    def should_do_only_one_query(self):
+        tomorrow = date_utils.get_naive_utc_now() + timedelta(days=1)
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=tomorrow,
+            )
+        )
+
+        with assert_no_duplicated_queries():
+            bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 1
+
+    def should_not_select_digital_event(self):
+        tomorrow = date_utils.get_naive_utc_now() + timedelta(days=1)
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=tomorrow,
+                offer__url="http://digitaloffer.pass",
+            )
+        )
+
+        bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 0
+
+    @pytest.mark.parametrize(
+        "offer_url",
+        [
+            None,
+            "",
+        ],
+    )
+    def should_select_not_digital_event(self, offer_url):
+        tomorrow = date_utils.get_naive_utc_now() + timedelta(days=1)
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=tomorrow,
+                offer__url=offer_url,
+            )
+        )
+
+        bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 1
+
+    def should_not_select_cancelled_booking(self):
+        tomorrow = date_utils.get_naive_utc_now() + timedelta(days=1)
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=tomorrow,
+            ),
+            status=BookingStatus.CANCELLED,
+        )
+
+        bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 0
+
+    def should_select_several_bookings_given_one_stock_with_several_bookings(self):
+        tomorrow = date_utils.get_naive_utc_now() + timedelta(days=1)
+        stock = offers_factories.EventStockFactory(
+            beginningDatetime=tomorrow,
+        )
+        bookings_factories.BookingFactory(stock=stock)
+        bookings_factories.BookingFactory(stock=stock)
+
+        bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 2
+
+    def test_find_tomorrow_event_offer_without_address(self):
+        tomorrow = date_utils.get_naive_utc_now() + timedelta(days=1)
+        bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                beginningDatetime=tomorrow,
+                offer__offererAddress=None,
+            )
+        )
+
+        with assert_num_queries(1):
+            bookings = booking_repository.find_individual_bookings_event_happening_tomorrow_query()
+
+        assert len(bookings) == 1

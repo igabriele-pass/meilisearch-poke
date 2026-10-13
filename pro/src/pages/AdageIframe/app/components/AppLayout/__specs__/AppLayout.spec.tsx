@@ -1,0 +1,135 @@
+import { screen } from '@testing-library/react'
+import { axe } from 'vitest-axe'
+
+import {
+  defaultAdageUser,
+  defaultUseInfiniteHitsReturn,
+} from '@/commons/utils/factories/adageFactories'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+import { MARSEILLE_EN_GRAND } from '@/pages/AdageIframe/app/constants'
+import { AdageUserContextProvider } from '@/pages/AdageIframe/app/providers/AdageUserContext'
+
+import { AppLayout } from '../AppLayout'
+
+vi.mock(
+  '../../OffersInstantSearch/OffersSearch/Autocomplete/Autocomplete',
+  () => {
+    return {
+      Autocomplete: ({ initialQuery }: { initialQuery: string }) => (
+        <div>
+          <label htmlFor={`autocomplete-1`}>Autocomplete</label>
+
+          <input
+            id={`autocomplete-1`}
+            value={initialQuery}
+            onChange={() => vi.fn()}
+            aria-label="Autocomplete search"
+          />
+          <button onClick={() => vi.fn()}>Rechercher</button>
+        </div>
+      ),
+    }
+  }
+)
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    listEducationalDomains: vi.fn(() => [
+      { id: 1, name: 'Danse' },
+      { id: 2, name: 'Architecture' },
+    ]),
+  },
+}))
+
+vi.mock('react-instantsearch', async () => {
+  return {
+    ...(await vi.importActual('react-instantsearch')),
+    Configure: vi.fn(() => <div />),
+    InstantSearch: vi.fn(({ children }) => <div>{children}</div>),
+    useStats: () => ({ nbHits: 1 }),
+    useSearchBox: () => ({ refine: vi.fn() }),
+    useInfiniteHits: () => ({
+      items: defaultUseInfiniteHitsReturn.items.slice(0, 1),
+    }),
+    useInstantSearch: () => ({
+      scopedResults: [],
+    }),
+    Index: vi.fn(({ children }) => children),
+  }
+})
+
+vi.mock('@/commons/utils/config', async () => {
+  return {
+    ...(await vi.importActual('@/commons/utils/config')),
+    ALGOLIA_API_KEY: 'adage-api-key',
+    ALGOLIA_APP_ID: '1',
+    ALGOLIA_COLLECTIVE_OFFERS_INDEX: 'adage-collective-offers',
+  }
+})
+
+vi.mock('@/commons/hooks/useIsElementVisible', () => ({
+  useIsElementVisible: vi.fn(() => [false, false]),
+}))
+
+window.scrollTo = vi.fn().mockImplementation(() => {})
+
+const renderAppLayout = (
+  options?: RenderWithProvidersOptions,
+  user = defaultAdageUser
+) => {
+  const renderResult = renderWithProviders(
+    <AdageUserContextProvider adageUser={{ ...user, offersCount: 1 }}>
+      <AppLayout />
+    </AdageUserContextProvider>,
+    options
+  )
+
+  Object.defineProperty(window, 'matchMedia', {
+    writable: true,
+    value: () => ({
+      matches: true,
+    }),
+  })
+
+  return renderResult
+}
+
+const featureOverrides = {
+  features: ['ENABLE_MARSEILLE'],
+}
+
+describe('AppLayout', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderAppLayout(featureOverrides, {
+      ...defaultAdageUser,
+      programs: [{ label: '', name: MARSEILLE_EN_GRAND, description: null }],
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should redirect to the search page if the user is in Marseille en Grand and if the FF is active', () => {
+    renderAppLayout(featureOverrides, {
+      ...defaultAdageUser,
+      programs: [{ label: '', name: MARSEILLE_EN_GRAND, description: null }],
+    })
+
+    expect(screen.getByRole('link', { name: 'Rechercher' })).toBeInTheDocument()
+  })
+
+  it('should redirect to the discovery page if the user is not in Marseille en Grand and if the FF is active', async () => {
+    renderAppLayout(featureOverrides, {
+      ...defaultAdageUser,
+      programs: [],
+    })
+
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Découvrez la part collective du pass Culture',
+      })
+    ).toBeInTheDocument()
+  })
+})

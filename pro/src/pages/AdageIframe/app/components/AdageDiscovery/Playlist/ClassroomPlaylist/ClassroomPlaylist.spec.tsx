@@ -1,0 +1,116 @@
+import { screen, waitForElementToBeRemoved } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import { AdageFrontRoles } from '@/apiClient/adage'
+import { apiAdage } from '@/apiClient/api'
+import * as useIsElementVisible from '@/commons/hooks/useIsElementVisible'
+import * as useSnackBar from '@/commons/hooks/useSnackBar'
+import {
+  defaultAdageUser,
+  defaultCollectiveOffer,
+} from '@/commons/utils/factories/adageFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { AdageUserContextProvider } from '@/pages/AdageIframe/app/providers/AdageUserContext'
+
+import { ClassroomPlaylist } from './ClassroomPlaylist'
+
+vi.mock('@/apiClient/api', () => ({
+  apiAdage: {
+    logConsultPlaylistElement: vi.fn(),
+    getClassroomPlaylist: vi.fn(),
+  },
+}))
+
+const mockTrackPlaylistElementClicked = vi.fn()
+const mockOnWholePlaylistSeen = vi.fn()
+
+const renderClassroomPlaylist = () => {
+  const user = {
+    ...defaultAdageUser,
+    role: AdageFrontRoles.REDACTOR,
+    uai: 'uai',
+    departmentCode: '30',
+    institutionName: 'COLLEGE BELLEVUE',
+    institutionCity: 'ALES',
+  }
+
+  return renderWithProviders(
+    <AdageUserContextProvider adageUser={user}>
+      <ClassroomPlaylist
+        onWholePlaylistSeen={mockOnWholePlaylistSeen}
+        trackPlaylistElementClicked={mockTrackPlaylistElementClicked}
+      />
+    </AdageUserContextProvider>
+  )
+}
+
+describe('AdageDiscover classRoomPlaylist', () => {
+  const snackBarError = vi.fn()
+
+  beforeEach(async () => {
+    vi.spyOn(apiAdage, 'logConsultPlaylistElement')
+    vi.spyOn(apiAdage, 'getClassroomPlaylist').mockResolvedValue({
+      collectiveOffers: [defaultCollectiveOffer],
+    })
+
+    const snackBarsImport = (await vi.importActual(
+      '@/commons/hooks/useSnackBar'
+    )) as ReturnType<typeof useSnackBar.useSnackBar>
+    vi.spyOn(useSnackBar, 'useSnackBar').mockImplementation(() => ({
+      ...snackBarsImport,
+      error: snackBarError,
+    }))
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderClassroomPlaylist()
+
+    await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should render new offer playlist', async () => {
+    renderClassroomPlaylist()
+
+    expect(
+      await screen.findByText(
+        'Ces interventions peuvent avoir lieu dans votre établissement'
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('should call tracker for classroom playlist element', async () => {
+    renderClassroomPlaylist()
+
+    await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+
+    const classRoomPlaylistElement = screen.getByText('Une chouette à la mer')
+    classRoomPlaylistElement.addEventListener('click', (e) => {
+      e.preventDefault()
+    })
+    await userEvent.click(classRoomPlaylistElement)
+
+    expect(mockTrackPlaylistElementClicked).toHaveBeenNthCalledWith(1, {
+      index: 0,
+      offerId: 479,
+      playlistId: 2,
+      playlistType: 'offer',
+    })
+  })
+
+  it('should call tracker when whole classroom playlist is seen', async () => {
+    renderClassroomPlaylist()
+    vi.spyOn(useIsElementVisible, 'useIsElementVisible')
+      .mockReturnValueOnce([true, true])
+      .mockReturnValueOnce([true, true])
+
+    await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+
+    expect(mockOnWholePlaylistSeen).toHaveBeenNthCalledWith(1, {
+      playlistId: 2,
+      playlistType: 'offer',
+      numberOfTiles: 1,
+    })
+  })
+})

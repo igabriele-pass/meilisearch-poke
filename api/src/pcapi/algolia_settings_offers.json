@@ -1,0 +1,141 @@
+{
+    "minWordSizefor1Typo": 4,
+    "minWordSizefor2Typos": 8,
+    "hitsPerPage": 20,
+    "maxValuesPerFacet": 100,
+    "version": 2,
+    "searchableAttributes": [
+        "offer.name",
+        "unordered(offer.artist)",
+        "unordered(distinct)"
+    ],
+    "attributesToRetrieve": null,
+    "ignorePlurals": [
+        "fr"
+    ],
+    "removeStopWords": false,
+    "distinct": true,
+    "unretrievableAttributes": [
+        "offer.last30DaysBookings"
+    ],
+    "optionalWords": null,
+    "queryLanguages": [
+        "fr"
+    ],
+    "replicas": [
+        "virtual(PRODUCTION Top offres)",
+        "virtual(most liked offers)",
+        "virtual(cine club offers)",
+        "PRODUCTION B",
+        "PRODUCTIONC"
+    ],
+    "attributesForFaceting": [
+        "filterOnly(artists.id)",
+        "searchable(artists.name)",
+        "filterOnly(offer.allocineId)",
+        "searchable(offer.artist)",
+        "offer.bookMacroSection",
+        "filterOnly(offer.category)",
+        "filterOnly(offer.dates)",
+        "searchable(offer.ean)",
+        "filterOnly(offer.indexedAt)",
+        "filterOnly(offer.hasUrl)",
+        "filterOnly(offer.isDuo)",
+        "filterOnly(offer.isEducational)",
+        "filterOnly(offer.isEvent)",
+        "filterOnly(offer.isHeadline)",
+        "filterOnly(offer.isHeadlineUntil)",
+        "filterOnly(offer.isForbiddenToUnderage)",
+        "filterOnly(offer.isThing)",
+        "filterOnly(offer.last30DaysBookings)",
+        "filterOnly(offer.likes)",
+        "offer.last30DaysBookingsRange",
+        "offer.movieGenres",
+        "offer.musicType",
+        "offer.gtl_level1",
+        "offer.gtl_level2",
+        "offer.gtl_level3",
+        "offer.gtl_level4",
+        "offer.gtlCodeLevel1",
+        "offer.gtlCodeLevel2",
+        "offer.gtlCodeLevel3",
+        "offer.gtlCodeLevel4",
+        "offer.nativeCategoryId",
+        "filterOnly(offer.prices)",
+        "offer.searchGroups",
+        "offer.searchGroupNamev2",
+        "offer.showType",
+        "filterOnly(offer.students)",
+        "offer.subcategoryId",
+        "searchable(offer.tags)",
+        "filterOnly(offer.times)",
+        "venue.activity",
+        "filterOnly(venue.departmentCode)",
+        "filterOnly(venue.id)",
+        "venue.isAudioDisabilityCompliant",
+        "venue.isMentalDisabilityCompliant",
+        "venue.isMotorDisabilityCompliant",
+        "venue.isVisualDisabilityCompliant"
+    ],
+    "attributesToSnippet": null,
+    "attributesToHighlight": null,
+    "paginationLimitedTo": 1000,
+    "attributeForDistinct": "distinct",
+    "disableTypoToleranceOnWords": [
+        "canal+"
+    ],
+    "exactOnSingleWordQuery": "attribute",
+    "disableTypoToleranceOnAttributes": [
+        "distinct"
+    ],
+    "ranking": [
+        "typo",
+        "words",
+        "filters",
+        "proximity",
+        "attribute",
+        "exact",
+        "geo",
+        "custom"
+    ],
+    "customRanking": [
+        "desc(offer.rankingWeight)",
+        "desc(offer.isEvent)",
+        "desc(offer.hasImage)",
+        "desc(offer.thumbUrl)"
+    ],
+    "separatorsToIndex": "+",
+    "removeWordsIfNoResults": "allOptional",
+    "queryType": "prefixLast",
+    "highlightPreTag": "<em>",
+    "highlightPostTag": "</em>",
+    "snippetEllipsisText": "",
+    "alternativesAsExact": [
+        "ignorePlurals",
+        "singleWordSynonym"
+    ],
+    "maxFacetHits": 10,
+    "indexLanguages": [
+        "fr"
+    ],
+    "enableReRanking": false,
+    "reRankingApplyFilter": [
+        [
+            "offer.searchGroups:SPECTACLES",
+            "offer.searchGroups:CONCERTS_FESTIVALS",
+            "offer.searchGroups:MUSEES_VISITES_CULTURELLES",
+            "offer.searchGroupNamev2:SPECTACLES",
+            "offer.searchGroupNamev2:CONCERTS_FESTIVALS",
+            "offer.searchGroupNamev2:MUSEES_VISITES_CULTURELLES"
+        ]
+    ],
+    "numericAttributesForFiltering": [
+        "offer.chroniclesCount",
+        "offer.dates",
+        "offer.last30DaysBookings",
+        "offer.likes",
+        "offer.prices",
+        "offer.releaseDate",
+        "offer.times"
+    ]
+}

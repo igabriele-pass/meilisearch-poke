@@ -1,0 +1,821 @@
+import datetime
+
+import pytest
+
+import pcapi.core.highlights.factories as highlights_factories
+import pcapi.core.offerers.factories as offerers_factories
+import pcapi.core.offerers.models as offerers_models
+import pcapi.core.offers.factories as offers_factories
+import pcapi.core.opening_hours.api as opening_hours_api
+import pcapi.core.users.factories as users_factories
+from pcapi.connectors.acceslibre import ExpectedFieldsEnum as acceslibre_enum
+from pcapi.core import testing
+from pcapi.core.categories import subcategories
+from pcapi.core.educational import factories as educational_factories
+from pcapi.core.offerers.models import VenueTypeCode
+from pcapi.core.offerers.models import Weekday
+from pcapi.models import db
+from pcapi.models.api_errors import OBJECT_NOT_FOUND_ERROR_MESSAGE
+from pcapi.utils import date as date_utils
+from pcapi.utils import db as db_utils
+from pcapi.utils.date import format_into_utc_date
+from pcapi.utils.date import timespan_str_to_numrange
+from pcapi.utils.image_conversion import DO_NOT_CROP
+
+
+@pytest.mark.usefixtures("db_session")
+class Returns200Test:
+    num_queries = testing.AUTHENTICATION_QUERIES
+    num_queries += 1  # select venue, venue_bank_account_link, bank_acount, offerer
+    num_queries += 1  # select venue_pricing_point_link
+    num_queries += 1  # check user has rignts on venue
+    num_queries += 1  # select google_places_info
+    num_queries += 1  # select accessibility_provider
+    num_queries += 1  # select offer
+    num_queries += 1  # venue.hasActiveIndividualOffer
+    num_queries += 1  # venue.hasAtLeastOneBookableOffer
+    num_queries += 1  # venue.canDisplayHighlights
+    num_queries += 1  # venue.hasHighlightRequest
+    num_queries += 1  # venue.hasNonDraftOffers
+    num_queries += 1  # get_offerer_is_onboarded
+    num_queries += 1  # check whether the venue is a pricing point
+
+    # venue_has_non_free_offers short-circuits the second query via an `or` condition
+    # when the venue has a non-free individual offer, generating (in this case) a single query instead of two
+    num_queries_for_venue_with_non_free_individual_offer = num_queries + 1
+    num_queries_for_venue_with_only_free_individual_offers = num_queries + 2
+
+    # When both venue._bannerUrl and venue._bannerMeta are set, their hybrid prop both early-return,
+    # skipping google_places_info lazy-load.
+    num_queries_skipped_without_google_places_info = 1
+
+    def when_user_has_rights_on_managing_offerer(self, client):
+        now = date_utils.get_naive_utc_now()
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.CollectiveVenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            collectiveDescription="Description du lieu",
+            isOpenToPublic=True,
+            activity=offerers_models.Activity.BOOKSTORE,
+            volunteeringUrl="https://www.jeveuxaider.gouv.fr/organisations/structure-name",
+        )
+        offerers_factories.VenuePricingPointLinkFactory(
+            venue=venue,
+            timespan=[now - datetime.timedelta(days=30), now - datetime.timedelta(days=7)],
+        )
+        venue_currently_used_for_pricing = offerers_factories.VenueFactory(
+            publicName="Le Repos du Comptable",
+            managingOfferer=user_offerer.offerer,
+        )
+        offerers_factories.VenuePricingPointLinkFactory(
+            pricingPoint=venue_currently_used_for_pricing,
+            venue=venue,
+            timespan=[now - datetime.timedelta(days=7), None],
+        )
+        offerers_factories.VenueFactory(
+            name="Le nouveau lieu de remboursement",
+            publicName="Le Palais de Midas",
+            managingOfferer=user_offerer.offerer,
+        )
+        offerers_factories.AccessibilityProviderFactory(
+            venue=venue,
+            externalAccessibilityId="accessibility-slug",
+            externalAccessibilityData={
+                "access_modality": [acceslibre_enum.EXTERIOR_ACCESS_ELEVATOR, acceslibre_enum.ENTRANCE_ELEVATOR],
+                "audio_description": [
+                    acceslibre_enum.AUDIODESCRIPTION_OCCASIONAL,
+                    acceslibre_enum.AUDIODESCRIPTION_PERMANENT_SMARTPHONE,
+                ],
+                "deaf_and_hard_of_hearing_amenities": [
+                    acceslibre_enum.DEAF_AND_HARD_OF_HEARING_PORTABLE_INDUCTION_LOOP,
+                    acceslibre_enum.DEAF_AND_HARD_OF_HEARING_SUBTITLE,
+                ],
+                "facilities": [acceslibre_enum.FACILITIES_UNADAPTED],
+                "sound_beacon": [],
+                "trained_personnel": [acceslibre_enum.PERSONNEL_UNTRAINED],
+                "transport_modality": [acceslibre_enum.PARKING_NEARBY],
+            },
+        )
+        offerers_factories.VenueBankAccountLinkFactory(  # former bank account link
+            venue=venue,
+            timespan=[now - datetime.timedelta(days=21), now - datetime.timedelta(days=14)],
+        )
+        bank_account_link = offerers_factories.VenueBankAccountLinkFactory(
+            venue=venue,
+            timespan=[now - datetime.timedelta(days=14), None],
+        )
+
+        other_venue = offerers_factories.VenueWithoutSiretFactory(
+            publicName="Autre partenaire relié au même compte bancaire",
+            managingOfferer=user_offerer.offerer,
+            pricing_point=venue_currently_used_for_pricing,
+        )
+        offerers_factories.VenueBankAccountLinkFactory(
+            venue=other_venue,
+            bankAccount=bank_account_link.bankAccount,
+            timespan=[now - datetime.timedelta(days=12), now - datetime.timedelta(days=7)],
+        )
+        offerers_factories.VenueBankAccountLinkFactory(
+            venue=other_venue,
+            bankAccount=bank_account_link.bankAccount,
+            timespan=[now - datetime.timedelta(days=7), None],
+        )
+
+        venue_id = venue.id
+        dmsapplication = educational_factories.CollectiveDmsApplicationFactory(venue=venue)
+        # older dms application, will not be in the result
+        educational_factories.CollectiveDmsApplicationFactory(
+            venue=venue, lastChangeDate=dmsapplication.lastChangeDate - datetime.timedelta(days=10)
+        )
+        event_stock = offers_factories.EventStockFactory(offer__venue=venue)
+        highlights_factories.HighlightRequestFactory(offer=event_stock.offer)
+
+        expected_serialized_venue = {
+            "activity": "BOOKSTORE",
+            "audioDisabilityCompliant": venue.audioDisabilityCompliant,
+            "bookingEmail": venue.bookingEmail,
+            "contact": {
+                "email": venue.contact.email,
+                "website": venue.contact.website,
+                "phoneNumber": venue.contact.phone_number,
+                "socialMedias": venue.contact.social_medias,
+            },
+            "comment": venue.comment,
+            "pricingPoint": {
+                "id": venue_currently_used_for_pricing.id,
+                "venueName": venue_currently_used_for_pricing.publicName,
+                "siret": venue_currently_used_for_pricing.siret,
+            },
+            "isPricingPoint": False,
+            "dateCreated": format_into_utc_date(venue.dateCreated),
+            "description": venue.description,
+            "externalAccessibilityData": {
+                "isAccessibleMotorDisability": True,
+                "isAccessibleAudioDisability": True,
+                "isAccessibleVisualDisability": True,
+                "isAccessibleMentalDisability": False,
+                "motorDisability": {
+                    "facilities": acceslibre_enum.FACILITIES_UNADAPTED.value,
+                    "exterior": acceslibre_enum.EXTERIOR_ACCESS_ELEVATOR.value,
+                    "entrance": acceslibre_enum.ENTRANCE_ELEVATOR.value,
+                    "parking": acceslibre_enum.PARKING_NEARBY.value,
+                },
+                "audioDisability": {
+                    "deafAndHardOfHearing": [
+                        acceslibre_enum.DEAF_AND_HARD_OF_HEARING_PORTABLE_INDUCTION_LOOP.value,
+                        acceslibre_enum.DEAF_AND_HARD_OF_HEARING_SUBTITLE.value,
+                    ],
+                },
+                "visualDisability": {
+                    "soundBeacon": acceslibre_enum.UNKNOWN.value,
+                    "audioDescription": [
+                        acceslibre_enum.AUDIODESCRIPTION_OCCASIONAL.value,
+                        acceslibre_enum.AUDIODESCRIPTION_PERMANENT_SMARTPHONE.value,
+                    ],
+                },
+                "mentalDisability": {"trainedPersonnel": acceslibre_enum.PERSONNEL_UNTRAINED.value},
+            },
+            "externalAccessibilityId": "accessibility-slug",
+            "hasActiveIndividualOffer": True,
+            "hasAtLeastOneBookableOffer": True,
+            "isPermanent": venue.isPermanent,
+            "managingOfferer": {
+                "id": venue.managingOfferer.id,
+                "isValidated": venue.managingOfferer.isValidated,
+                "name": venue.managingOfferer.name,
+                "siren": venue.managingOfferer.siren,
+                "isClosed": venue.managingOfferer.isClosed,
+            },
+            "mentalDisabilityCompliant": venue.mentalDisabilityCompliant,
+            "motorDisabilityCompliant": venue.motorDisabilityCompliant,
+            "name": venue.name,
+            "openingHours": opening_hours_api.format_opening_hours(venue.openingHours).model_dump(),
+            "publicName": venue.publicName,
+            "siret": venue.siret,
+            "visualDisabilityCompliant": venue.visualDisabilityCompliant,
+            "withdrawalDetails": None,
+            "bannerUrl": venue.bannerUrl,
+            "bannerMeta": {
+                "crop_params": {
+                    "height_crop_percent": 1.0,
+                    "width_crop_percent": 1.0,
+                    "x_crop_percent": 0.0,
+                    "y_crop_percent": 0.0,
+                },
+                "image_credit": None,
+                "original_image_url": None,
+                "image_alternative_text": None,
+            },
+            "id": venue.id,
+            "canDisplayHighlights": True,
+            "collectiveDescription": "Description du lieu",
+            "collectiveDomains": [],
+            "collectiveEmail": None,
+            "collectiveInterventionArea": ["75", "92"],
+            "collectiveLegalStatus": None,
+            "collectivePhone": None,
+            "collectiveStudents": [],
+            "collectiveWebsite": None,
+            "lastCollectiveDmsApplication": {
+                "venueId": dmsapplication.venue.id,
+                "state": dmsapplication.state,
+                "procedure": dmsapplication.procedure,
+                "application": dmsapplication.application,
+                "lastChangeDate": format_into_utc_date(dmsapplication.lastChangeDate),
+                "depositDate": format_into_utc_date(dmsapplication.depositDate),
+                "expirationDate": format_into_utc_date(dmsapplication.expirationDate),
+                "buildDate": format_into_utc_date(dmsapplication.buildDate),
+                "instructionDate": None,
+                "processingDate": None,
+                "userDeletionDate": None,
+            },
+            "hasAdageId": True,
+            "adageInscriptionDate": format_into_utc_date(venue.adageInscriptionDate),
+            "location": {
+                "id": venue.offererAddress.addressId,
+                "street": venue.offererAddress.address.street,
+                "postalCode": venue.offererAddress.address.postalCode,
+                "inseeCode": venue.offererAddress.address.inseeCode,
+                "city": venue.offererAddress.address.city,
+                "departmentCode": venue.offererAddress.address.departmentCode,
+                "latitude": float(venue.offererAddress.address.latitude),
+                "longitude": float(venue.offererAddress.address.longitude),
+                "banId": venue.offererAddress.address.banId,
+                "label": venue.publicName,
+                "isManualEdition": venue.offererAddress.address.isManualEdition,
+                "isVenueLocation": True,
+            },
+            "hasOffers": True,
+            "hasHighlightRequest": True,
+            "isOpenToPublic": True,
+            "isCaledonian": False,
+            "bankAccountStatus": "valid",
+            "hasNonFreeOffers": True,
+            "isOnboarded": True,
+            "isValidated": True,
+            "allowedOnAdage": True,
+            "hasNonDraftOffers": True,
+            "volunteeringUrl": "https://www.jeveuxaider.gouv.fr/organisations/structure-name",
+            "state": None,
+        }
+        db.session.expire_all()
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        # extra selectinload for BankAccount.venueLinks
+        num_queries_with_bank_account_link = self.num_queries_for_venue_with_non_free_individual_offer + 1
+        with testing.assert_num_queries(num_queries_with_bank_account_link):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json == expected_serialized_venue
+
+    def when_user_has_rights_on_managing_offerer_with_no_adage_id(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(
+            user__email="user.pro@test.com", offerer__allowedOnAdage=False
+        )
+        venue = offerers_factories.CollectiveVenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            collectiveDescription="Description du lieu",
+            adageId=None,
+            adageInscriptionDate=None,
+        )
+        event_stock = offers_factories.EventStockFactory(offer__venue=venue)
+        highlights_factories.HighlightRequestFactory(
+            offer=event_stock.offer,
+            highlight__availability_datespan=db_utils.make_inclusive_daterange(
+                start=datetime.date.today() - datetime.timedelta(days=10),
+                end=datetime.date.today() - datetime.timedelta(days=1),
+            ),
+        )
+        venue_id = venue.id
+        db.session.expire_all()
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        with testing.assert_num_queries(self.num_queries_for_venue_with_non_free_individual_offer):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["adageInscriptionDate"] is None
+        assert response.json["hasAdageId"] is False
+        assert response.json["hasHighlightRequest"] is False
+        assert response.json["allowedOnAdage"] is False
+
+    def should_ignore_invalid_banner_metadata(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            bannerUrl="http://example.com/image_cropped.png",
+            bannerMeta={
+                "crop_params": {
+                    "x_crop_percent": 0.29,
+                    "y_crop_percent": 0.21,
+                    "height_crop_percent": 0.42,
+                    "width_crop_percent": 0.42,
+                },
+                "image_alternative_text": "A venue banner",
+                "random": "content",
+                "should": "be_ignored",
+            },
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        num_queries = (
+            self.num_queries_for_venue_with_only_free_individual_offers
+            - self.num_queries_skipped_without_google_places_info
+        )
+        with testing.assert_num_queries(num_queries):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["bannerMeta"] == {
+            "crop_params": {
+                "x_crop_percent": 0.29,
+                "y_crop_percent": 0.21,
+                "height_crop_percent": 0.42,
+                "width_crop_percent": 0.42,
+            },
+            "image_credit": None,
+            "image_alternative_text": "A venue banner",
+            "original_image_url": None,
+        }
+
+    def should_not_have_banner_metadata_when_venue_has_not_picture(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["bannerMeta"] is None
+
+    def test_venue_with_MiXeDcAsE_contact_website(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        WEBSITE = "HtTpS://mY.wEbSiTe.CoM/"
+        venue = offerers_factories.VenueFactory(
+            managingOfferer=user_offerer.offerer,
+            contact__website=WEBSITE,
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["contact"]["website"] == WEBSITE
+
+    def should_set_default_crop_params_when_venue_picture_has_no_crop_params(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            bannerUrl="http://example.com/image_cropped.png",
+            bannerMeta=None,
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["bannerMeta"]["crop_params"] == {
+            "x_crop_percent": DO_NOT_CROP.x_crop_percent,
+            "y_crop_percent": DO_NOT_CROP.y_crop_percent,
+            "height_crop_percent": DO_NOT_CROP.height_crop_percent,
+            "width_crop_percent": DO_NOT_CROP.width_crop_percent,
+        }
+
+    def should_not_override_metadata_when_venue_picture_has_no_crop_params(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            bannerUrl="http://example.com/image_cropped.png",
+            bannerMeta={
+                "original_image_url": "http://example.com/original_image.png",
+                "image_alternative_text": "an alt text",
+            },
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        num_queries = (
+            self.num_queries_for_venue_with_only_free_individual_offers
+            - self.num_queries_skipped_without_google_places_info
+        )
+        with testing.assert_num_queries(num_queries):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["bannerMeta"] == {
+            "crop_params": {
+                "x_crop_percent": DO_NOT_CROP.x_crop_percent,
+                "y_crop_percent": DO_NOT_CROP.y_crop_percent,
+                "height_crop_percent": DO_NOT_CROP.height_crop_percent,
+                "width_crop_percent": DO_NOT_CROP.width_crop_percent,
+            },
+            "image_credit": None,
+            "original_image_url": "http://example.com/original_image.png",
+            "image_alternative_text": "an alt text",
+        }
+
+    def should_not_override_metadata_when_venue_picture_has_crop_params(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            bannerUrl="http://example.com/image_cropped.png",
+            bannerMeta={
+                "crop_params": {
+                    "x_crop_percent": 0.29,
+                    "y_crop_percent": 0.21,
+                    "height_crop_percent": 0.42,
+                    "width_crop_percent": 0.42,
+                },
+            },
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        num_queries = (
+            self.num_queries_for_venue_with_only_free_individual_offers
+            - self.num_queries_skipped_without_google_places_info
+        )
+        with testing.assert_num_queries(num_queries):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["bannerMeta"] == {
+            "crop_params": {
+                "x_crop_percent": 0.29,
+                "y_crop_percent": 0.21,
+                "height_crop_percent": 0.42,
+                "width_crop_percent": 0.42,
+            },
+            "image_credit": None,
+            "original_image_url": None,
+            "image_alternative_text": None,
+        }
+
+    def should_complete_crop_params_when_venue_picture_has_incomplete_crop_params(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            bannerUrl="http://example.com/image_cropped.png",
+            bannerMeta={"crop_params": {"x_crop_percent": 0.29, "y_crop_percent": 0.21, "height_crop_percent": 0.42}},
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        num_queries = (
+            self.num_queries_for_venue_with_only_free_individual_offers
+            - self.num_queries_skipped_without_google_places_info
+        )
+        with testing.assert_num_queries(num_queries):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["bannerMeta"]["crop_params"] == {
+            "x_crop_percent": 0.29,
+            "y_crop_percent": 0.21,
+            "height_crop_percent": 0.42,
+            "width_crop_percent": DO_NOT_CROP.width_crop_percent,
+        }
+
+    def should_not_change_crop_params_when_venue_picture_has_complete_crop_params(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            bannerUrl="http://example.com/image_cropped.png",
+            bannerMeta={
+                "crop_params": {
+                    "x_crop_percent": 0.29,
+                    "y_crop_percent": 0.21,
+                    "height_crop_percent": 0.42,
+                    "width_crop_percent": 0.42,
+                },
+            },
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        num_queries = (
+            self.num_queries_for_venue_with_only_free_individual_offers
+            - self.num_queries_skipped_without_google_places_info
+        )
+        with testing.assert_num_queries(num_queries):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["bannerMeta"]["crop_params"] == {
+            "x_crop_percent": 0.29,
+            "y_crop_percent": 0.21,
+            "height_crop_percent": 0.42,
+            "width_crop_percent": 0.42,
+        }
+
+    def should_complete_crop_params_when_venue_image_crop_params_is_null(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume",
+            managingOfferer=user_offerer.offerer,
+            bannerUrl="http://example.com/image_cropped.png",
+            bannerMeta={"crop_params": None},
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        num_queries = (
+            self.num_queries_for_venue_with_only_free_individual_offers
+            - self.num_queries_skipped_without_google_places_info
+        )
+        with testing.assert_num_queries(num_queries):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+    def should_get_opening_hours_when_existing(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume", managingOfferer=user_offerer.offerer, venueTypeCode=VenueTypeCode.LIBRARY
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["openingHours"]["THURSDAY"] == [["10:00", "13:00"], ["14:00", "19:30"]]
+
+    def should_sort_opening_hours(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume", managingOfferer=user_offerer.offerer, venueTypeCode=VenueTypeCode.LIBRARY
+        )
+        offerers_factories.OpeningHoursFactory(
+            venue=venue,
+            weekday=Weekday.SATURDAY,
+            timespan=timespan_str_to_numrange([("14:00", "19:00"), ("10:00", "13:00")]),
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["openingHours"]["SATURDAY"] == [["10:00", "13:00"], ["14:00", "19:00"]]
+
+    def should_return_none_when_venue_has_no_accessibility_provider(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="Festival du pain au chocolat",
+            managingOfferer=user_offerer.offerer,
+            venueTypeCode=VenueTypeCode.FESTIVAL,
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert venue.accessibilityProvider is None
+        assert response.json["externalAccessibilityData"] is None
+
+    def should_return_accessibility_provider_id_and_url(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume", managingOfferer=user_offerer.offerer, venueTypeCode=VenueTypeCode.LIBRARY
+        )
+        offerers_factories.AccessibilityProviderFactory(venue=venue, externalAccessibilityId="lencre-et-la-plume")
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["externalAccessibilityId"] == "lencre-et-la-plume"
+
+    def should_return_unknown_when_venue_has_no_external_accessibility_data(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume", managingOfferer=user_offerer.offerer, venueTypeCode=VenueTypeCode.LIBRARY
+        )
+        accessibility_provider = offerers_factories.AccessibilityProviderFactory(
+            venue=venue, externalAccessibilityData=None
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert venue.accessibilityProvider == accessibility_provider
+        assert response.json["externalAccessibilityData"] == {
+            "isAccessibleMotorDisability": False,
+            "isAccessibleAudioDisability": False,
+            "isAccessibleVisualDisability": False,
+            "isAccessibleMentalDisability": False,
+            "motorDisability": {
+                "facilities": acceslibre_enum.UNKNOWN.value,
+                "exterior": acceslibre_enum.UNKNOWN.value,
+                "entrance": acceslibre_enum.UNKNOWN.value,
+                "parking": acceslibre_enum.UNKNOWN.value,
+            },
+            "audioDisability": {
+                "deafAndHardOfHearing": [acceslibre_enum.UNKNOWN.value],
+            },
+            "visualDisability": {
+                "soundBeacon": acceslibre_enum.UNKNOWN.value,
+                "audioDescription": [acceslibre_enum.UNKNOWN.value],
+            },
+            "mentalDisability": {"trainedPersonnel": acceslibre_enum.UNKNOWN.value},
+        }
+
+    def should_return_accessibility_data_when_venue_has_accessibility_provider(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="L'encre et la plume", managingOfferer=user_offerer.offerer, venueTypeCode=VenueTypeCode.LIBRARY
+        )
+        venue_accessibility_data = {
+            "access_modality": [acceslibre_enum.EXTERIOR_ACCESS_ELEVATOR, acceslibre_enum.ENTRANCE_RAMP],
+            "audio_description": [],
+            "deaf_and_hard_of_hearing_amenities": [
+                acceslibre_enum.DEAF_AND_HARD_OF_HEARING_PORTABLE_INDUCTION_LOOP,
+                acceslibre_enum.DEAF_AND_HARD_OF_HEARING_SUBTITLE,
+            ],
+            "facilities": [acceslibre_enum.FACILITIES_UNADAPTED],
+            "sound_beacon": [acceslibre_enum.SOUND_BEACON],
+            "trained_personnel": [acceslibre_enum.PERSONNEL_UNTRAINED],
+            "transport_modality": [acceslibre_enum.PARKING_UNAVAILABLE],
+        }
+        offerers_factories.AccessibilityProviderFactory(venue=venue, externalAccessibilityData=venue_accessibility_data)
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert venue.accessibilityProvider is not None
+        assert response.json["externalAccessibilityData"] == {
+            "isAccessibleMotorDisability": True,
+            "isAccessibleAudioDisability": True,
+            "isAccessibleVisualDisability": True,
+            "isAccessibleMentalDisability": False,
+            "motorDisability": {
+                "facilities": acceslibre_enum.FACILITIES_UNADAPTED.value,
+                "exterior": acceslibre_enum.EXTERIOR_ACCESS_ELEVATOR.value,
+                "entrance": acceslibre_enum.ENTRANCE_RAMP.value,
+                "parking": acceslibre_enum.PARKING_UNAVAILABLE.value,
+            },
+            "audioDisability": {
+                "deafAndHardOfHearing": [
+                    acceslibre_enum.DEAF_AND_HARD_OF_HEARING_PORTABLE_INDUCTION_LOOP.value,
+                    acceslibre_enum.DEAF_AND_HARD_OF_HEARING_SUBTITLE.value,
+                ],
+            },
+            "visualDisability": {
+                "soundBeacon": acceslibre_enum.SOUND_BEACON.value,
+                "audioDescription": [acceslibre_enum.UNKNOWN.value],
+            },
+            "mentalDisability": {"trainedPersonnel": acceslibre_enum.PERSONNEL_UNTRAINED.value},
+        }
+
+    def should_return_hasOffers_if_offers(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="Festival du pain au chocolat",
+            managingOfferer=user_offerer.offerer,
+            venueTypeCode=VenueTypeCode.FESTIVAL,
+        )
+        offers_factories.OfferFactory(venue=venue)
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue.id
+        with testing.assert_num_queries(self.num_queries_for_venue_with_only_free_individual_offers):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 200
+
+        assert response.json["hasOffers"]
+
+    def should_return_is_caledonian(self, client):
+        venue = offerers_factories.CaledonianVenueFactory()
+        user_offerer = offerers_factories.UserOffererFactory(offerer=venue.managingOfferer)
+
+        response = client.with_session_auth(email=user_offerer.user.email).get(f"/venues/{venue.id}")
+        assert response.status_code == 200
+
+        assert response.json["isCaledonian"] is True
+
+    @pytest.mark.parametrize(
+        "subcategory_id,can_display_highlights",
+        [
+            (subcategories.EVENEMENT_CINE.id, True),
+            (subcategories.VOD.id, False),
+        ],
+    )
+    def test_venue_can_display_highlights(self, client, subcategory_id, can_display_highlights):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(
+            name="Festival du pain au chocolat",
+            managingOfferer=user_offerer.offerer,
+            venueTypeCode=VenueTypeCode.FESTIVAL,
+        )
+        offers_factories.OfferFactory(venue=venue, subcategoryId=subcategory_id)
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        response = auth_request.get(f"/venues/{venue.id}")
+        assert response.status_code == 200
+
+        assert response.json["canDisplayHighlights"] is can_display_highlights
+
+    def test_has_non_draft_offers(self, client):
+        user_offerer = offerers_factories.UserOffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+        offers_factories.DraftOfferFactory(venue=venue)
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        response = auth_request.get(f"/venues/{venue.id}")
+        assert response.status_code == 200
+
+        assert response.json["hasNonDraftOffers"] is False
+
+        offers_factories.OfferFactory(venue=venue)
+
+        response = auth_request.get(f"/venues/{venue.id}")
+        assert response.status_code == 200
+
+        assert response.json["hasNonDraftOffers"] is True
+
+    def test_is_pricing_point_only_for_venues_of_the_same_offerer(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        pricing_point = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+        linked_venue = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+        offerers_factories.VenuePricingPointLinkFactory(venue=linked_venue, pricingPoint=pricing_point)
+
+        other_offerer = offerers_factories.OffererFactory()
+        other_linked_venue = offerers_factories.VenueFactory(managingOfferer=other_offerer)
+        offerers_factories.VenuePricingPointLinkFactory(venue=other_linked_venue, pricingPoint=pricing_point)
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        response = auth_request.get(f"/venues/{pricing_point.id}")
+
+        assert response.status_code == 200
+        assert response.json["isPricingPoint"] is True
+
+    def test_is_not_pricing_point_when_only_linked_to_itself(self, client):
+        user_offerer = offerers_factories.UserOffererFactory(user__email="user.pro@test.com")
+        venue = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+        offerers_factories.VenuePricingPointLinkFactory(venue=venue, pricingPoint=venue)
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        response = auth_request.get(f"/venues/{venue.id}")
+
+        assert response.status_code == 200
+        assert response.json["isPricingPoint"] is False
+
+
+@pytest.mark.usefixtures("db_session")
+class Returns404Test:
+    @pytest.mark.usefixtures("db_session")
+    def when_current_user_doesnt_have_rights(self, client):
+        pro = users_factories.ProFactory(email="user.pro@example.com")
+        venue = offerers_factories.VenueFactory(name="L'encre et la plume")
+
+        auth_request = client.with_session_auth(email=pro.email)
+        num_queries = testing.AUTHENTICATION_QUERIES
+        num_queries += 1  # select venue and offerer
+        num_queries += 1  # select venue_pricing_point_link
+        num_queries += 1  # check user has rignts on venue
+        num_queries += 1  # rollback
+        num_queries += 1  # rollback
+        venue_id = venue.id
+        with testing.assert_num_queries(num_queries):
+            response = auth_request.get("/venues/%s" % venue_id)
+            assert response.status_code == 404
+            assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}
+
+    @pytest.mark.usefixtures("db_session")
+    def test_venue_not_found(self, client):
+        pro = users_factories.ProFactory()
+        auth_request = client.with_session_auth(email=pro.email)
+        response = auth_request.get("/venues/123456789")
+        assert response.status_code == 404
+        assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}

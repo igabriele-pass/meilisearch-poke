@@ -1,0 +1,25 @@
+{% import "components/links.html" as links with context %}
+{% import "pivots/get/common.html" as common with context %}
+{{ common.build_pivot_bar("allocine", form, dst) }}
+<table class="table table-hover my-4">
+  <thead>
+    <tr>
+      <th scope="col"></th>
+      <th scope="col">Id du partenaire culturel</th>
+      <th scope="col">Partenaire culturel</th>
+      <th scope="col">Identifiant cinéma (Allociné)</th>
+      <th scope="col">Identifiant interne Allociné</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for pivot in rows %}
+      <tr>
+        <th scope="row">{{ common.build_pivot_row_menu("allocine", pivot) }}</th>
+        <td class="fw-bolder">{{ pivot.venue.id }}</td>
+        <td>{{ links.build_venue_name_to_details_link(pivot.venue, text_attr="name") }}</td>
+        <td>{{ pivot.theaterId }}</td>
+        <td>{{ pivot.internalId }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

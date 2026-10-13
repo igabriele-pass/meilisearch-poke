@@ -1,0 +1,264 @@
+"""Feature flip related models and tools
+
+To create a feature flag, simply add it to the FeatureToggle
+enumeration and to the FEATURES_DISABLED_BY_DEFAULT list if its default
+value is False.
+To remove one, delete all references to this feature flag, the removal
+will be automatic."""
+
+import enum
+import logging
+
+import flask
+from sqlalchemy import String
+from sqlalchemy import Text
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
+from sqlalchemy.sql import text
+
+from pcapi import settings
+from pcapi.models import Model
+from pcapi.models import db
+from pcapi.models.deactivable_mixin import DeactivableMixin
+from pcapi.models.pc_object import PcObject
+
+
+logger = logging.getLogger(__name__)
+
+
+class DisabledFeatureError(Exception):
+    pass
+
+
+class FeatureToggle(enum.Enum):
+    ALGOLIA_BOOKINGS_NUMBER_COMPUTATION = (
+        "Active le calcul du nombre des réservations lors de l'indexation des offres sur Algolia"
+    )
+    API_SIRENE_AVAILABLE = "Active les fonctionnalitées liées à l'API Sirene"
+    APP_ENABLE_AUTOCOMPLETE = "Active l'autocomplete sur la barre de recherche relative au rework de la homepage"
+    BENEFICIARY_VALIDATION_AFTER_FRAUD_CHECKS = "Active la validation d'un bénéficiaire via les contrôles de sécurité"
+    DISABLE_BOOST_EXTERNAL_BOOKINGS = "Désactiver les réservations externes Boost"
+    DISABLE_CDS_EXTERNAL_BOOKINGS = "Désactiver les réservations externes Ciné Office (ex-CDS)"
+    DISABLE_CGR_EXTERNAL_BOOKINGS = "Désactiver les réservations externes CGR"
+    DISABLE_EMS_EXTERNAL_BOOKINGS = "Désactiver les réservations externes EMS"
+    DISCORD_ENABLE_NEW_ACCESS = "Activer/Désactiver l'accès au serveur Discord à des nouveaux utilisateurs"
+    DISABLE_SIRET_CHECK = "Désactiver la validation de SIRET"
+    DISPLAY_DMS_REDIRECTION = "Affiche une redirection vers DMS si ID Check est KO"
+    EMS_CANCEL_PENDING_EXTERNAL_BOOKING = "Annuler les réservations externes EMS qui ont échouées"
+    ENABLE_ALL_CRON = "Si faux, aucune cron ne sera lancé"
+    ENABLE_RECURRENT_CRON = "Si faux, aucune cron de synchronization, indexation et pricing ne sera lancé"
+    ENABLE_ARTIST_INDEXATION = "Activer l'indexation des artistes depuis les offres et des offres depuis les artistes"
+    ENABLE_AUTO_CLOSE_CLOSED_OFFERERS = "Fermer automatiquement les entités juridiques cessées à l'INSEE"
+    ENABLE_AUTO_VALIDATION_FOR_EXTERNAL_BOOKING = (
+        "Valide automatiquement après 48h les offres issues de l'api billeterie cinéma"
+    )
+    ENABLE_BANK_ACCOUNT_SYNC = (
+        "Active la synchronisation des comptes bancaires avec l'outil finance externe (Cegid XRP Flex)"
+    )
+    ENABLE_BEAMER = "Active Beamer, le système de notifs du portail pro"
+    ENABLE_BONUS_CREDIT = "Active la bonification des jeunes via Quotient Familial ou allocations handicap"
+    ENABLE_CDS_IMPLEMENTATION = "Permet la réservation de place de cinéma avec l'API Ciné Office (ex-CDS)"
+    ENABLE_CRON_TO_UPDATE_OFFERER_STATS = "Active la mise à jour des statistiques des entités juridiques avec un cron"
+    ENABLE_CHRONICLES_SYNC = "Activer la synchronisation des chroniques"
+    ENABLE_CULTURAL_SURVEY = "Activer l'affichage du questionnaire des pratiques initiales pour les bénéficiaires"
+    ENABLE_DMS_LINK_ON_MAINTENANCE_PAGE_FOR_AGE_18 = (
+        "Permet l'affichage du lien vers DMS sur la page de maintenance pour les 18 ans"
+    )
+    ENABLE_DMS_LINK_ON_MAINTENANCE_PAGE_FOR_UNDERAGE = (
+        "Permet l'affichage du lien vers DMS sur la page de maintenance pour les 15-17 ans"
+    )
+    ENABLE_DS_APPLICATION_REFUSED_FROM_ANNOTATION = "Active le refus automatique des dossiers Démarche Numérique (ex-DMS) de crédit en fonction de l'annotation d'un instructeur"
+    ENABLE_DS_SYNC_FOR_USER_ACCOUNT_UPDATE_REQUESTS = (
+        "Active la synchronisation des demandes de modifications avec Démarche Numérique (ex-DMS)"
+    )
+    ENABLE_EDUCONNECT_AUTHENTICATION = "Active l'authentification via educonnect sur l'app native"
+    ENABLE_UNSUSPEND_ACCOUNT = "Active le point d'api /native/v1/account/unsuspend"
+    ENABLE_FRONT_IMAGE_RESIZING = "Active le redimensionnement sur demande des images par l'app et le web"
+    ENABLE_IOS_OFFERS_LINK_WITH_REDIRECTION = "Active l'utilisation du lien avec redirection pour les offres (nécessaires pour contourner des restrictions d'iOS)"
+    ENABLE_INVOICE_SYNC = (
+        "Active la synchronisation des justificatifs de remboursement avec l'outil finance externe (Cegid XRP Flex)"
+    )
+    ENABLE_MARSEILLE = "Activer Marseille en grand dans le front"
+    ENABLE_NATIVE_APP_RECAPTCHA = "Active le reCaptacha sur l'API native"
+    ENABLE_NATIVE_CULTURAL_SURVEY = (
+        "Active le Questionnaire des pratiques initiales natif (non TypeForm) sur l'app native et décli web"
+    )
+    ENABLE_OFFERS_AUTO_CLEANUP = "Active la suppression automatique des offres obsolètes"
+    ENABLE_PRO_ACCOUNT_CREATION = "Permettre l'inscription des comptes professionels"
+    ENABLE_SPECIAL_EVENTS_SYNC = "Activer la synchronisation des réponses aux opérations spéciales"
+    ENABLE_UBBLE = "Active la vérification d'identité par Ubble"
+    ENABLE_UBBLE_ID_CHECK_ON_DN_APPLICATION = (
+        "Active la création automatique de dossier Ubble sur les dossiers Démarche Numérique de demande de crédit"
+    )
+    ENABLE_UBBLE_SUBSCRIPTION_LIMITATION = "Active la limitation en fonction de l'âge lors de pic d'inscription"
+    ENABLE_VIRUSTOTAL = "Active la vérification des liens externes par VirusTotal"
+    GENERATE_CASHFLOWS_BY_CRON = (
+        "Active la génération automatique (via cron) des flux monétaires et fichiers de remboursement"
+    )
+    ID_CHECK_ADDRESS_AUTOCOMPLETION = "Autocomplétion de l'adresse lors du parcours IDCheck"
+    PRICE_FINANCE_EVENTS = "Active la valorisation des évènements de finance"
+    SEND_ALL_EMAILS_TO_EHP = (
+        "Envoyer tous les emails en testing et staging. À activer temporairement lors de phase de test"
+    )
+    SYNCHRONIZE_ALLOCINE = "Permettre la synchronisation journalière avec Allociné"
+    SYNCHRONIZE_ALLOCINE_PRODUCTS = "Permettre la synchronisation des produits/films Allociné via leur API"
+    SYNCHRONIZE_ALLOCINE_PRODUCTS_FROM_BIGQUERY_TABLES = (
+        "Permet la synchronisation des films Allociné via les tables BigQuery fournies par l'équipe Data"
+    )
+    SYNCHRONIZE_ARTISTS_FROM_BIGQUERY_TABLES = (
+        "Permet la synchronisation des artistes via les tables BigQuery fournies par l'équipe Data"
+    )
+    SYNCHRONIZE_EVENT_SERIES_FROM_BIGQUERY_TABLES = (
+        "Permet la synchronisation des séries d'évènements via les tables BigQuery fournies par l'équipe Data"
+    )
+    SYNCHRONIZE_TITELIVE_BOOK_PRODUCTS_FROM_BIGQUERY_TABLES = (
+        "Permet la synchronisation des produits livre Titelive via les tables BigQuery fournies par l'équipe Data"
+    )
+    SYNCHRONIZE_TITELIVE_MUSIC_PRODUCTS_FROM_BIGQUERY_TABLES = (
+        "Permet la synchronisation des produits musique de Titelive via les tables BigQuery fournies par l'équipe Data"
+    )
+    UPDATE_BOOKING_USED = "Permettre la validation automatique des contremarques 48h après la fin de lévènement"
+    ENABLE_VENUE_STRICT_SEARCH = (
+        "Active le fait d'indiquer si une structure a un moins une offre éligible lors de l'indexation (Algolia)"
+    )
+    ENABLE_ZENDESK_SELL_CREATION = "Activer la création de nouvelles entrées dans Zendesk Sell (structures et lieux)"
+    ENABLE_BOOST_API_INTEGRATION = "Active la réservation de places de cinéma via l'API Boost"
+    ENABLE_EMS_INTEGRATION = "Active la synchronisation de stocks et la réservation via EMS"
+    ENABLE_CGR_INTEGRATION = "Active la synchonisation de stocks et la réservation via CGR"
+    LOG_EMS_CINEMAS_AVAILABLE_FOR_SYNC = "Stocker dans Google Drive les cinémas EMS activables"
+    ENABLE_NATIVE_APP_FEEDBACK = "Activer l'envoi des commentaires app vers Harvestr"
+    ENABLE_PRO_FEEDBACK = "Activer l'envoi des commentaires du portail pro vers Harvestr"
+    ENABLE_MOVIE_FESTIVAL_RATE = "Activer les tarifs spéciaux pour un festival cinéma"
+    ENABLE_EXPERIMENTAL_ASYNC_OFFER_INDEXING = (
+        "Activer l'indexation asynchrone des offres pour les lieux et les artistes"
+    )
+    PRO_AUTONOMOUS_ANONYMIZATION = (
+        "Activer la fonctionnalité d'anonymisation autonome des données personnelles depuis le portail pro"
+    )
+    USE_UNIVERSAL_LINKS = (
+        "Utiliser les Universal Links au lieu des Firebase dynamic links (déprécié à partir du 25/08/2025)"
+    )
+    # For features under construction, a temporary feature flag must be named with the `WIP_` prefix
+    WIP_ENABLE_FINANCE_SETTLEMENTS = "Active le workflow finance des règlements"
+    WIP_ENABLE_NEW_BREVO_RECOMMENDATION_WEBHOOK = "Active la nouvelle version du webhook de recommandation Brevo"
+    WIP_IMGPROXY_PRO = "Activer l'utilisation du nouveau format de requête pour le resizing d'image sur le portail pro"
+    WIP_PRE_SIGNUP_SIMULATION = (
+        "Activer le parcours de simulation de documents avant inscription des partenaires culturels sur le portail pro"
+    )
+    WIP_ENABLE_CULTURAL_OUTREACH = "Active la déclaration des actions de médiation culturelle"
+    WIP_CLOSE_VENUE = "Active la fermeture d'une venue depuis l'espace partenaire"
+    WIP_HOME_STATS_V2 = "Active la V2 des statistiques de réservations de la page d'accueil"
+
+    def is_active(self) -> bool:
+        if flask.has_request_context():
+            if not hasattr(flask.request, "_cached_features"):
+                flask.request._cached_features = {  # type: ignore[attr-defined]
+                    f.name: f.isActive for f in db.session.query(Feature.name, Feature.isActive)
+                }
+            return flask.request._cached_features[self.name]  # type: ignore[attr-defined]
+        return db.session.query(Feature).filter_by(name=self.name).one().isActive
+
+
+class Feature(PcObject, Model, DeactivableMixin):
+    __tablename__ = "feature"
+    name: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    description: Mapped[str] = mapped_column(String(300), nullable=False)
+
+    @property
+    def nameKey(self) -> str:
+        return str(self.name).replace("FeatureToggle.", "")
+
+
+FEATURES_DISABLED_BY_DEFAULT: tuple[FeatureToggle, ...] = (
+    FeatureToggle.DISABLE_BOOST_EXTERNAL_BOOKINGS,
+    FeatureToggle.DISABLE_CDS_EXTERNAL_BOOKINGS,
+    FeatureToggle.DISABLE_CGR_EXTERNAL_BOOKINGS,
+    FeatureToggle.DISABLE_EMS_EXTERNAL_BOOKINGS,
+    FeatureToggle.DISPLAY_DMS_REDIRECTION,
+    FeatureToggle.EMS_CANCEL_PENDING_EXTERNAL_BOOKING,
+    FeatureToggle.ENABLE_AUTO_CLOSE_CLOSED_OFFERERS,
+    FeatureToggle.ENABLE_AUTO_VALIDATION_FOR_EXTERNAL_BOOKING,
+    FeatureToggle.ENABLE_BANK_ACCOUNT_SYNC,
+    FeatureToggle.ENABLE_BEAMER,
+    FeatureToggle.ENABLE_CRON_TO_UPDATE_OFFERER_STATS,  # only for production
+    FeatureToggle.ENABLE_CULTURAL_SURVEY,
+    FeatureToggle.ENABLE_DMS_LINK_ON_MAINTENANCE_PAGE_FOR_AGE_18,
+    FeatureToggle.ENABLE_DMS_LINK_ON_MAINTENANCE_PAGE_FOR_UNDERAGE,
+    FeatureToggle.ENABLE_DS_APPLICATION_REFUSED_FROM_ANNOTATION,
+    FeatureToggle.ENABLE_DS_SYNC_FOR_USER_ACCOUNT_UPDATE_REQUESTS,
+    FeatureToggle.ENABLE_UNSUSPEND_ACCOUNT,
+    FeatureToggle.ENABLE_EMS_INTEGRATION,
+    FeatureToggle.ENABLE_EXPERIMENTAL_ASYNC_OFFER_INDEXING,
+    FeatureToggle.ENABLE_IOS_OFFERS_LINK_WITH_REDIRECTION,
+    FeatureToggle.ENABLE_MOVIE_FESTIVAL_RATE,
+    FeatureToggle.ENABLE_OFFERS_AUTO_CLEANUP,
+    FeatureToggle.ENABLE_UBBLE_ID_CHECK_ON_DN_APPLICATION,
+    FeatureToggle.ENABLE_UBBLE_SUBSCRIPTION_LIMITATION,
+    FeatureToggle.ENABLE_VIRUSTOTAL,
+    FeatureToggle.ENABLE_ZENDESK_SELL_CREATION,
+    FeatureToggle.LOG_EMS_CINEMAS_AVAILABLE_FOR_SYNC,
+    FeatureToggle.PRO_AUTONOMOUS_ANONYMIZATION,
+    FeatureToggle.SEND_ALL_EMAILS_TO_EHP,
+    FeatureToggle.SYNCHRONIZE_ALLOCINE_PRODUCTS_FROM_BIGQUERY_TABLES,
+    FeatureToggle.SYNCHRONIZE_EVENT_SERIES_FROM_BIGQUERY_TABLES,
+    FeatureToggle.WIP_ENABLE_CULTURAL_OUTREACH,
+    FeatureToggle.WIP_ENABLE_FINANCE_SETTLEMENTS,
+    FeatureToggle.WIP_ENABLE_NEW_BREVO_RECOMMENDATION_WEBHOOK,
+    FeatureToggle.WIP_CLOSE_VENUE,
+    FeatureToggle.WIP_HOME_STATS_V2,
+    FeatureToggle.WIP_IMGPROXY_PRO,
+    FeatureToggle.WIP_PRE_SIGNUP_SIMULATION,
+    # Please keep alphabetic order
+)
+
+if settings.IS_PROD:
+    FEATURES_DISABLED_BY_DEFAULT += ()
+
+
+def install_feature_flags() -> None:
+    """Automatically add new feature flags to the database.
+
+    This is done before each deployment and in tests.
+    """
+    installed_flag_names = {f[0] for f in db.session.query(Feature).with_entities(Feature.name).all()}
+    defined_flag_name = {f.name for f in list(FeatureToggle)}
+
+    to_install_flags = defined_flag_name - installed_flag_names
+
+    for flag in to_install_flags:
+        db.session.add(
+            Feature(
+                name=FeatureToggle[flag].name,
+                description=FeatureToggle[flag].value,
+                isActive=FeatureToggle[flag] not in FEATURES_DISABLED_BY_DEFAULT,
+            ),
+        )
+
+    db.session.commit()
+
+
+def clean_feature_flags() -> None:
+    """Automatically remove old feature flags from database.
+
+    This is done after each deployment and in tests.
+    """
+    installed_flag_names = {f[0] for f in db.session.query(Feature).with_entities(Feature.name).all()}
+    defined_flag_name = {f.name for f in list(FeatureToggle)}
+
+    to_remove_flags = installed_flag_names - defined_flag_name
+
+    for flag in to_remove_flags:
+        db.session.execute(text("DELETE FROM feature WHERE name = :name").bindparams(name=flag))
+    db.session.commit()
+
+
+def check_feature_flags_completeness() -> None:
+    """Check if all feature flags are present in the database and in the code"""
+    installed_flag_names = {f[0] for f in db.session.query(Feature).with_entities(Feature.name).all()}
+    defined_flag_name = {f.name for f in FeatureToggle}
+    extra_flags = installed_flag_names - defined_flag_name
+    if extra_flags:
+        logger.error(
+            "The following feature flags are present in the database but not present in the code: %s",
+            extra_flags,
+        )

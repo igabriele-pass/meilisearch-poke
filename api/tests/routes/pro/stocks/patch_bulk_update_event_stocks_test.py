@@ -1,0 +1,635 @@
+import dataclasses
+import datetime
+import logging
+from unittest import mock
+
+import pytest
+from dateutil.relativedelta import relativedelta
+
+import pcapi.core.mails.testing as mails_testing
+import pcapi.core.offerers.factories as offerers_factories
+import pcapi.core.offers.factories as offers_factories
+import pcapi.core.users.factories as users_factories
+from pcapi.core.bookings import factories as bookings_factories
+from pcapi.core.bookings import models as bookings_models
+from pcapi.core.mails.transactional import brevo_template_ids
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offers import models as offers_models
+from pcapi.models import db
+from pcapi.models.api_errors import OBJECT_NOT_FOUND_ERROR_MESSAGE
+from pcapi.utils import date as date_utils
+from pcapi.utils.date import format_into_utc_date
+
+
+@pytest.mark.usefixtures("db_session")
+class Returns200Test:
+    def test_edit_one_stock(self, client):
+        offer = offers_factories.EventOfferFactory(isActive=False, validation=offers_models.OfferValidationStatus.DRAFT)
+        existing_stock = offers_factories.EventStockFactory(offer=offer, quantity=10)
+        price_category = offers_factories.PriceCategoryFactory(offer=offer, price=23, label="Carré Or")
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        beginning = date_utils.get_naive_utc_now() + datetime.timedelta(days=1)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "beginningDatetime": format_into_utc_date(beginning),
+                        "priceCategoryId": price_category.id,
+                        "quantity": 14,
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        updated_stock = db.session.query(offers_models.Stock).first()
+        assert response.json == {
+            "totalStockCount": 1,
+            "editedStockCount": 1,
+            "stocks": [
+                {
+                    "activationCodesExpirationDatetime": None,
+                    "beginningDatetime": format_into_utc_date(updated_stock.beginningDatetime),
+                    "bookingLimitDatetime": format_into_utc_date(updated_stock.bookingLimitDatetime),
+                    "bookingsQuantity": 0,
+                    "hasActivationCode": False,
+                    "id": updated_stock.id,
+                    "isEventDeletable": updated_stock.isEventDeletable,
+                    "price": 23.0,
+                    "priceCategoryId": updated_stock.priceCategoryId,
+                    "quantity": updated_stock.quantity,
+                    "remainingQuantity": updated_stock.remainingQuantity,
+                }
+            ],
+        }
+        assert offer.id == updated_stock.offerId
+        assert updated_stock.priceCategoryId == price_category.id
+        assert updated_stock.quantity == 14
+        assert db.session.query(offers_models.Stock).count() == 1
+
+    def test_do_not_edit_one_stock_when_duplicated(self, client):
+        offer = offers_factories.EventOfferFactory()
+        beginning = date_utils.get_naive_utc_now() + datetime.timedelta(days=1)
+        tomorrow = beginning + datetime.timedelta(days=1)
+        price_category = offers_factories.PriceCategoryFactory(offer=offer, label="Tarif 1", price=10)
+        existing_stock = offers_factories.EventStockFactory(
+            offer=offer,
+            beginningDatetime=format_into_utc_date(beginning),
+            bookingLimitDatetime=format_into_utc_date(beginning),
+            priceCategory=price_category,
+            quantity=10,
+        )
+        offers_factories.EventStockFactory(
+            offer=offer,
+            beginningDatetime=format_into_utc_date(tomorrow),
+            bookingLimitDatetime=format_into_utc_date(beginning),
+            priceCategory=price_category,
+            quantity=10,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "priceCategoryId": price_category.id,
+                        "quantity": 20,
+                        "beginningDatetime": format_into_utc_date(tomorrow),
+                        "bookingLimitDatetime": format_into_utc_date(beginning),
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        updated_stocks = db.session.query(offers_models.Stock).all()
+        first_stock = updated_stocks[0]
+        second_stock = updated_stocks[1]
+        assert response.json == {
+            "totalStockCount": 2,
+            "editedStockCount": 0,
+            "stocks": [
+                {
+                    "activationCodesExpirationDatetime": None,
+                    "beginningDatetime": format_into_utc_date(first_stock.beginningDatetime),
+                    "bookingLimitDatetime": format_into_utc_date(first_stock.bookingLimitDatetime),
+                    "bookingsQuantity": 0,
+                    "hasActivationCode": False,
+                    "id": first_stock.id,
+                    "isEventDeletable": first_stock.isEventDeletable,
+                    "price": 10.1,
+                    "priceCategoryId": first_stock.priceCategoryId,
+                    "quantity": first_stock.quantity,
+                    "remainingQuantity": first_stock.remainingQuantity,
+                },
+                {
+                    "activationCodesExpirationDatetime": None,
+                    "beginningDatetime": format_into_utc_date(second_stock.beginningDatetime),
+                    "bookingLimitDatetime": format_into_utc_date(second_stock.bookingLimitDatetime),
+                    "bookingsQuantity": 0,
+                    "hasActivationCode": False,
+                    "id": second_stock.id,
+                    "isEventDeletable": second_stock.isEventDeletable,
+                    "price": 10.1,
+                    "priceCategoryId": second_stock.priceCategoryId,
+                    "quantity": second_stock.quantity,
+                    "remainingQuantity": second_stock.remainingQuantity,
+                },
+            ],
+        }
+        assert existing_stock.beginningDatetime == beginning  # didn't change
+        assert existing_stock.quantity == 10  # didn't change
+
+    def test_edit_one_event_stock_created_with_price_category(self, client, caplog):
+        offer = offers_factories.EventOfferFactory(isActive=False, validation=offers_models.OfferValidationStatus.DRAFT)
+        old_price_category = offers_factories.PriceCategoryFactory(offer=offer)
+        new_price_category = offers_factories.PriceCategoryFactory(offer=offer, price=25)
+        existing_stock = offers_factories.StockFactory(offer=offer, price=10, priceCategory=old_price_category)
+        beginning = date_utils.get_naive_utc_now() + relativedelta(days=10)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        with caplog.at_level(logging.INFO):
+            response = client.with_session_auth("user@example.com").patch(
+                "/stocks/bulk",
+                json={
+                    "offerId": offer.id,
+                    "stocks": [
+                        {
+                            "id": existing_stock.id,
+                            "beginningDatetime": format_into_utc_date(beginning),
+                            "bookingLimitDatetime": format_into_utc_date(beginning),
+                            "priceCategoryId": new_price_category.id,
+                        }
+                    ],
+                },
+            )
+
+        assert response.status_code == 200
+
+        edited_stock = db.session.query(offers_models.Stock).first()
+        assert response.json == {
+            "totalStockCount": 1,
+            "editedStockCount": 1,
+            "stocks": [
+                {
+                    "activationCodesExpirationDatetime": None,
+                    "beginningDatetime": format_into_utc_date(edited_stock.beginningDatetime),
+                    "bookingLimitDatetime": format_into_utc_date(edited_stock.bookingLimitDatetime),
+                    "bookingsQuantity": 0,
+                    "hasActivationCode": False,
+                    "id": edited_stock.id,
+                    "isEventDeletable": edited_stock.isEventDeletable,
+                    "price": 25.0,
+                    "priceCategoryId": edited_stock.priceCategoryId,
+                    "quantity": edited_stock.quantity,
+                    "remainingQuantity": edited_stock.remainingQuantity,
+                }
+            ],
+        }
+        assert offer.id == edited_stock.offerId
+        assert db.session.query(offers_models.Stock).count() == 1
+        assert edited_stock.priceCategory == new_price_category
+        assert edited_stock.price == 25
+
+        target_log_message = "Successfully updated stock"
+        log = next(record for record in caplog.records if record.message == target_log_message)
+
+        changes = log.extra["changes"]
+
+        expected_updated_field = {"beginningDatetime", "bookingLimitDatetime", "priceCategory", "price"}
+        assert expected_updated_field <= set(changes)
+
+        assert changes["beginningDatetime"]["old_value"] != changes["beginningDatetime"]["new_value"]
+        assert changes["beginningDatetime"]["new_value"] == beginning
+
+        assert changes["bookingLimitDatetime"]["old_value"] != changes["bookingLimitDatetime"]["new_value"]
+        assert changes["bookingLimitDatetime"]["new_value"] == beginning
+
+        assert changes["priceCategory"]["old_value"] != changes["priceCategory"]["new_value"]
+        assert changes["priceCategory"]["new_value"] == new_price_category
+
+    def test_sends_email_if_beginning_date_changes_on_edition(self, client):
+        offer = offers_factories.EventOfferFactory(
+            venue__bookingEmail="venue@postponed.net", bookingEmail="offer@bookingemail.fr"
+        )
+        price_cat = offers_factories.PriceCategoryFactory(offer=offer, label="Tarif 1", price=10)
+        existing_stock = offers_factories.EventStockFactory(offer=offer, priceCategory=price_cat)
+        beginning = date_utils.get_naive_utc_now() + relativedelta(days=10)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        bookings_factories.BookingFactory(stock=existing_stock, user__email="beneficiary@bookingEmail.fr")
+        bookings_factories.CancelledBookingFactory(stock=existing_stock)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "priceCategoryId": price_cat.id,
+                        "beginningDatetime": format_into_utc_date(beginning),
+                        "bookingLimitDatetime": format_into_utc_date(beginning),
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+
+        edited_stock = db.session.query(offers_models.Stock).one()
+        assert response.json == {
+            "totalStockCount": 1,
+            "editedStockCount": 1,
+            "stocks": [
+                {
+                    "activationCodesExpirationDatetime": None,
+                    "beginningDatetime": format_into_utc_date(edited_stock.beginningDatetime),
+                    "bookingLimitDatetime": format_into_utc_date(edited_stock.bookingLimitDatetime),
+                    "bookingsQuantity": edited_stock.dnBookedQuantity,
+                    "hasActivationCode": False,
+                    "id": edited_stock.id,
+                    "isEventDeletable": edited_stock.isEventDeletable,
+                    "price": 10.1,
+                    "priceCategoryId": edited_stock.priceCategoryId,
+                    "quantity": edited_stock.quantity,
+                    "remainingQuantity": edited_stock.remainingQuantity,
+                }
+            ],
+        }
+        assert edited_stock.beginningDatetime == beginning
+        assert edited_stock.bookingLimitDatetime == beginning
+
+        assert len(mails_testing.outbox) == 2
+        assert mails_testing.outbox[0]["template"] == dataclasses.asdict(
+            brevo_template_ids.TransactionalEmail.EVENT_OFFER_POSTPONED_CONFIRMATION_TO_PRO.value
+        )
+        assert mails_testing.outbox[0]["To"] == "venue@postponed.net"
+        assert mails_testing.outbox[1]["template"] == dataclasses.asdict(
+            brevo_template_ids.TransactionalEmail.BOOKING_POSTPONED_BY_PRO_TO_BENEFICIARY.value
+        )
+        assert mails_testing.outbox[1]["To"] == "beneficiary@bookingEmail.fr"
+
+    @mock.patch("pcapi.core.bookings.api.update_cancellation_limit_dates")
+    def should_update_bookings_cancellation_limit_date_on_delayed_event(
+        self, mock_update_cancellation_limit_dates, client
+    ):
+        now = date_utils.get_naive_utc_now()
+        event_in_4_days = now + relativedelta(days=4)
+        event_reported_in_10_days = now + relativedelta(days=10)
+        offer = offers_factories.EventOfferFactory(bookingEmail="test@bookingEmail.fr")
+        price_cat = offers_factories.PriceCategoryFactory(offer=offer, label="Tarif 1", price=10)
+
+        existing_stock = offers_factories.EventStockFactory(
+            offer=offer, beginningDatetime=event_in_4_days, priceCategory=price_cat
+        )
+        booking = bookings_factories.BookingFactory(stock=existing_stock, dateCreated=now)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "priceCategoryId": price_cat.id,
+                        "beginningDatetime": format_into_utc_date(event_reported_in_10_days),
+                        "bookingLimitDatetime": format_into_utc_date(existing_stock.bookingLimitDatetime),
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        mock_update_cancellation_limit_dates.assert_called_once_with([booking], event_reported_in_10_days)
+
+    def should_invalidate_booking_token_when_event_is_reported(self, client):
+        now = date_utils.get_naive_utc_now()
+        booking_made_3_days_ago = now - relativedelta(days=3)
+        event_in_4_days = now + relativedelta(days=4)
+        event_reported_in_10_days = now + relativedelta(days=10)
+        offer = offers_factories.EventOfferFactory(bookingEmail="test@bookingEmail.fr")
+        price_cat = offers_factories.PriceCategoryFactory(offer=offer, label="Tarif 1", price=10)
+
+        existing_stock = offers_factories.EventStockFactory(
+            offer=offer, beginningDatetime=event_in_4_days, priceCategory=price_cat
+        )
+        booking = bookings_factories.UsedBookingFactory(stock=existing_stock, dateCreated=booking_made_3_days_ago)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "priceCategoryId": price_cat.id,
+                        "beginningDatetime": format_into_utc_date(event_reported_in_10_days),
+                        "bookingLimitDatetime": format_into_utc_date(existing_stock.bookingLimitDatetime),
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        updated_booking = db.session.get(bookings_models.Booking, booking.id)
+        assert updated_booking.status is not bookings_models.BookingStatus.USED
+        assert updated_booking.dateUsed is None
+        assert updated_booking.cancellationLimitDate == booking.cancellationLimitDate
+
+    def should_not_invalidate_booking_token_when_event_is_reported_in_less_than_48_hours(self, client):
+        now = date_utils.get_naive_utc_now() + relativedelta(hours=4)
+        date_used_in_48_hours = now + relativedelta(days=2)
+        event_in_3_days = now + relativedelta(days=3)
+        event_reported_in_less_48_hours = now + relativedelta(days=1)
+        offer = offers_factories.EventOfferFactory(bookingEmail="test@bookingEmail.fr")
+        price_cat = offers_factories.PriceCategoryFactory(offer=offer, label="Tarif 1", price=10)
+
+        existing_stock = offers_factories.EventStockFactory(
+            offer=offer,
+            beginningDatetime=event_in_3_days,
+            priceCategory=price_cat,
+            bookingLimitDatetime=now,
+        )
+        booking = bookings_factories.UsedBookingFactory(
+            stock=existing_stock, dateCreated=now, dateUsed=date_used_in_48_hours
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "priceCategoryId": price_cat.id,
+                        "beginningDatetime": format_into_utc_date(event_reported_in_less_48_hours),
+                        "bookingLimitDatetime": format_into_utc_date(existing_stock.bookingLimitDatetime),
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        updated_booking = db.session.get(bookings_models.Booking, booking.id)
+        assert updated_booking.status is bookings_models.BookingStatus.USED
+        assert updated_booking.dateUsed == date_used_in_48_hours
+
+    def test_update_event_stock_quantity(self, client):
+        beginning = date_utils.get_naive_utc_now() + datetime.timedelta(days=1)
+        offer = offers_factories.EventOfferFactory(isActive=False, validation=offers_models.OfferValidationStatus.DRAFT)
+        price_category_1 = offers_factories.PriceCategoryFactory(offer=offer, price=10)
+        existing_stock = offers_factories.EventStockFactory(
+            offer=offer,
+            beginningDatetime=format_into_utc_date(beginning),
+            bookingLimitDatetime=format_into_utc_date(beginning),
+            priceCategory=price_category_1,
+            quantity=20,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "priceCategoryId": price_category_1.id,
+                        "id": existing_stock.id,
+                        "quantity": 42,
+                        "beginningDatetime": format_into_utc_date(beginning),
+                        "bookingLimitDatetime": format_into_utc_date(beginning),
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 200
+        created_stock = db.session.query(offers_models.Stock).first()
+        assert offer.id == created_stock.offerId
+        assert created_stock.quantity == 42
+
+
+@pytest.mark.usefixtures("db_session")
+class Returns400Test:
+    def when_missing_offer_id(self, client):
+        offer = offers_factories.EventOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        booking_limit_datetime = datetime.datetime(2019, 2, 14)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "stocks": [
+                    {"quantity": -2, "bookingLimitDatetime": format_into_utc_date(booking_limit_datetime)},
+                ]
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json == {
+            "offerId": ["Ce champ est obligatoire"],
+            "stocks.0.id": ["Ce champ est obligatoire"],
+            "stocks.0.beginningDatetime": ["Ce champ est obligatoire"],
+            "stocks.0.bookingLimitDatetime": ["The datetime must be in the future."],
+            "stocks.0.priceCategoryId": ["Ce champ est obligatoire"],
+            "stocks.0.quantity": ["Saisissez un nombre supérieur ou égal à 0"],
+        }
+
+    @pytest.mark.parametrize(
+        "validation_status",
+        [offers_models.OfferValidationStatus.PENDING, offers_models.OfferValidationStatus.REJECTED],
+    )
+    def test_patch_non_editable_offer_fails(self, validation_status, client):
+        offer = offers_factories.EventOfferFactory(validation=validation_status)
+        stock = offers_factories.EventStockFactory(offer=offer)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": stock.id,
+                        "quantity": 14,
+                        "priceCategoryId": stock.priceCategoryId,
+                        "beginningDatetime": format_into_utc_date(stock.beginningDatetime),
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json["global"] == ["Les offres refusées ou en attente de validation ne sont pas modifiables"]
+
+    def test_when_stock_does_not_belong_to_offer(self, client):
+        offer = offers_factories.EventOfferFactory(isActive=False, validation=offers_models.OfferValidationStatus.DRAFT)
+        price_category = offers_factories.PriceCategoryFactory(offer=offer, price=23)
+        existing_stock = offers_factories.EventStockFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "quantity": 14,
+                        "priceCategoryId": price_category.id,
+                        "beginningDatetime": format_into_utc_date(existing_stock.beginningDatetime),
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json == {"stock_id": [f"Pas de stocks avec les ids: {existing_stock.id}"]}
+
+    def test_beginning_datetime_after_booking_limit_datetime(self, client):
+        stock = offers_factories.EventStockFactory()
+        beginning = date_utils.get_naive_utc_now() + datetime.timedelta(days=1)
+        after_beginning = beginning + datetime.timedelta(days=1)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=stock.offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": stock.offer.id,
+                "stocks": [
+                    {
+                        "id": stock.id,
+                        "beginningDatetime": format_into_utc_date(beginning),
+                        "bookingLimitDatetime": format_into_utc_date(after_beginning),
+                        "priceCategoryId": stock.priceCategoryId,
+                        "quantity": 1000,
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json == {
+            "stocks": ["La date limite de réservation ne peut être postérieure à la date de début de l'évènement"]
+        }
+
+    def test_cannot_update_event_stock_with_price_higher_than_300_euros(self, client):
+        offer = offers_factories.EventOfferFactory(isActive=False, validation=offers_models.OfferValidationStatus.DRAFT)
+        positive_price_category = offers_factories.PriceCategoryFactory(offer=offer, label="positive_price", price=10)
+        too_high_price_category = offers_factories.PriceCategoryFactory(
+            offer=offer, label="too_high_price_category", price=310
+        )
+        beginning = date_utils.get_naive_utc_now() + relativedelta(days=10)
+        existing_stock = offers_factories.EventStockFactory(
+            offer=offer, priceCategoryId=positive_price_category.id, beginningDatetime=beginning
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "beginningDatetime": format_into_utc_date(beginning),
+                        "bookingLimitDatetime": format_into_utc_date(beginning),
+                        "priceCategoryId": too_high_price_category.id,
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json["priceCategories.1.price"] == ["Le prix d’une offre ne peut excéder 300 euros."]
+
+
+@pytest.mark.usefixtures("db_session")
+class Returns403Test:
+    def test_error_if_venue_is_closed(self, client):
+        offer = offers_factories.EventOfferFactory(
+            isActive=False,
+            validation=offers_models.OfferValidationStatus.DRAFT,
+            venue__state=offerers_models.VenueState.CLOSED,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        existing_stock = offers_factories.EventStockFactory(offer=offer, quantity=10)
+        price_category = offers_factories.PriceCategoryFactory(offer=offer, price=23, label="Carré Or")
+
+        beginning = date_utils.get_naive_utc_now() + datetime.timedelta(days=1)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": existing_stock.id,
+                        "beginningDatetime": format_into_utc_date(beginning),
+                        "priceCategoryId": price_category.id,
+                    }
+                ],
+            },
+        )
+
+        assert response.status_code == 403
+
+
+@pytest.mark.usefixtures("db_session")
+class Returns404Test:
+    def when_user_has_no_rights_and_creating_stock_from_offer_id(self, client, db_session):
+        users_factories.ProFactory(email="wrong@example.com")
+        offer = offers_factories.EventOfferFactory()
+        booking_datetime = date_utils.get_naive_utc_now() + relativedelta(hours=4)
+
+        response = client.with_session_auth("wrong@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": offer.id,
+                "stocks": [
+                    {
+                        "id": 10,
+                        "priceCategoryId": 10,
+                        "quantity": 10,
+                        "beginningDatetime": format_into_utc_date(booking_datetime),
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}
+
+    def test_offer_not_found(self, client):
+        users_factories.ProFactory(email="user@example.com")
+        booking_datetime = date_utils.get_naive_utc_now() + relativedelta(hours=4)
+
+        response = client.with_session_auth("user@example.com").patch(
+            "/stocks/bulk",
+            json={
+                "offerId": 123456789,
+                "stocks": [
+                    {
+                        "id": 10,
+                        "priceCategoryId": 10,
+                        "quantity": 10,
+                        "beginningDatetime": format_into_utc_date(booking_datetime),
+                    },
+                ],
+            },
+        )
+
+        assert response.status_code == 404
+        assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}

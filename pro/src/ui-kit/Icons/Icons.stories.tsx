@@ -1,0 +1,107 @@
+/* istanbul ignore file */
+import type React from 'react'
+import { useState } from 'react'
+
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+import strokeSearchIcon from 'icons/stroke-search.svg'
+
+import styles from './Icons.module.scss'
+import { fullIcons, otherIcons, strokeIcons } from './iconsList'
+import { TextInput } from '@/design-system/TextInput/TextInput'
+
+const iconsSections = [
+  { title: 'Full icons', icons: fullIcons },
+  { title: 'Stroke icons', icons: strokeIcons },
+  { title: 'Other icons', icons: otherIcons },
+]
+
+export const Icons = () => {
+
+  const [searchInput, setSearchInput] = useState('')
+
+  const onClick = async (e: React.MouseEvent<HTMLDivElement>) => {
+    e.persist()
+    const target = e.currentTarget as Element
+
+    await navigator.clipboard.writeText(target.getAttribute('data-src') ?? '')
+
+    target.classList.add(styles['copy-to-clipboard'])
+    const timeoutId = setTimeout(() => {
+      target.classList.remove(styles['copy-to-clipboard'])
+      clearTimeout(timeoutId)
+    }, 600)
+  }
+
+  return (
+    <div className={styles['icon-stories']}>
+      <div className={styles['search-input-container']}>
+        <TextInput
+          name="search"
+          label='Rechercher une icon'
+          icon={strokeSearchIcon}
+          onChange={(event) => setSearchInput(event.target.value)}
+          value={searchInput}
+        />
+      </div>
+
+      {iconsSections.map((section) => {
+        const filteredIcons = section.icons.filter((iconListItem) =>
+          iconListItem.src.toLowerCase().includes(searchInput.toLowerCase())
+        )
+
+        if (filteredIcons.length === 0) {
+          return null
+        }
+
+        return (
+          <div key={section.title}>
+            <h1 className={styles['title']}>{section.title}</h1>
+
+            <div className={styles['icon-list']}>
+              {filteredIcons.map((icon) => {
+                const fileNameParts = icon.src.split('/')
+                const iconName = fileNameParts[fileNameParts.length - 1]
+                  .split('.')[0]
+                  .replace('full-', '')
+                  .replace('stroke-', '')
+                  .replace('shadow-', '')
+
+                return (
+                  <div
+                    key={icon.src}
+                    className={styles['container']}
+                    onClick={onClick}
+                    data-src={icon.src}
+                  >
+                    <div className={styles['copy-to-clipboard-wrapper']}>
+                      <span>
+                        Copié !
+                      </span>
+                    </div>
+
+                    <div className={styles['icon-container']}>
+                      <SvgIcon
+                        src={icon.src}
+                        alt={icon.src}
+                        viewBox={icon.viewBox}
+                        className={styles['icon']}
+                      />
+                    </div>
+
+                    <div className={styles['name-container']}>
+                      <span className={styles['name']}>{iconName}</span>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+export default {
+  title: '@/icons/Icons',
+}

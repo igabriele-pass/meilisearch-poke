@@ -1,0 +1,29 @@
+import type { SharedCurrentUserResponseModel } from '@/apiClient/v1'
+import { NBSP } from '@/commons/core/shared/constants'
+import fullInfoIcon from '@/icons/full-info.svg'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import styles from './ConnectedAsAside.module.scss'
+
+interface ConnectedAsAsideProps {
+  currentUser: SharedCurrentUserResponseModel
+}
+
+export const ConnectedAsAside = ({ currentUser }: ConnectedAsAsideProps) => {
+  return (
+    <aside aria-label="Connect as" className={styles['connect-as']}>
+      <SvgIcon
+        src={fullInfoIcon}
+        alt="Information"
+        width="20"
+        className={styles['connect-as-icon']}
+      />
+      <div className={styles['connect-as-text']}>
+        Vous êtes connecté en tant que :{NBSP}
+        <strong>
+          {currentUser.firstName} {currentUser.lastName}
+        </strong>
+      </div>
+    </aside>
+  )
+}

@@ -1,0 +1,51 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_outline.scss" as outline;
+
+.selected-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-spacing-s);
+  padding-top: var(--size-spacing-s);
+}
+
+.tag-extra-count {
+  @include fonts.body-accent-xs;
+
+  border-radius: var(--size-border-radius-s);
+  background-color: var(--color-background-info);
+  color: var(--color-text-default);
+  padding: var(--size-spacing-xs) var(--size-spacing-s);
+}
+
+.tag-button {
+  @include fonts.body-accent-xs;
+
+  color: var(--color-text-default);
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  background-color: var(--color-background-info);
+  border-radius: var(--size-border-radius-s);
+  border: none;
+  white-space: normal;
+  text-align: left;
+  padding: var(--size-spacing-xs) var(--size-spacing-s);
+
+  &-icon {
+    margin: rem.torem(1px) 0 0 var(--size-spacing-xs);
+    height: rem.torem(16px);
+  }
+
+  &:hover:not([disabled]) {
+    background-color: var(--color-background-subtle);
+  }
+
+  &:focus-visible {
+    @include outline.focus-outline;
+  }
+
+  &:disabled {
+    cursor: default;
+  }
+}

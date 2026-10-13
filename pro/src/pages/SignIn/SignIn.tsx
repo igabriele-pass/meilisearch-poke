@@ -1,0 +1,162 @@
+import { yupResolver } from '@hookform/resolvers/yup'
+import { useEffect, useState } from 'react'
+import { FormProvider, useForm } from 'react-hook-form'
+import { useNavigate, useSearchParams } from 'react-router'
+
+import { api } from '@/apiClient/api'
+import { HTTP_STATUS, isErrorAPIError } from '@/apiClient/helpers'
+import { FullLayout } from '@/app/App/layouts/FullLayout/FullLayout'
+import { SignUpLayout } from '@/app/App/layouts/logged-out/SignUpLayout/SignUpLayout'
+import { getUserDefaultPath } from '@/app/AppRouter/utils/getUserDefaultPath'
+import {
+  RECAPTCHA_ERROR,
+  RECAPTCHA_ERROR_MESSAGE,
+} from '@/commons/core/shared/constants'
+import { useActiveFeature } from '@/commons/hooks/useActiveFeature'
+import { useAppDispatch } from '@/commons/hooks/useAppDispatch'
+import { useInitReCaptcha } from '@/commons/hooks/useInitReCaptcha'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { initializeUser } from '@/commons/store/user/dispatchers/initializeUser'
+import { getReCaptchaToken } from '@/commons/utils/recaptcha'
+import { MandatoryInfo } from '@/components/FormLayout/FormLayoutMandatoryInfo'
+
+import { SIGNIN_FORM_DEFAULT_VALUES } from './constants'
+import styles from './Signin.module.scss'
+import { SigninForm } from './SigninForm'
+import { validationSchema } from './validationSchema'
+
+export interface SigninFormValues {
+  email: string
+  password: string
+}
+
+interface SigninApiErrorResponse {
+  status: number
+  errors: {
+    [key: string]: string
+  }
+}
+
+// TODO (jclery-pass, 2026-09-29): Once WIP_PRE_SIGNUP_SIMULATION is removed,
+// just remove this temporary component and directly use the <FullLayout> inside <SignIn>’s render
+const SigninFullLayout = ({ children }: { children: React.ReactNode }) => (
+  <FullLayout verticallyCenteredContent>
+    <div className={styles['signin-wrapper']} data-testid="signin-full-layout">
+      {children}
+    </div>
+  </FullLayout>
+)
+
+export const SignIn = (): JSX.Element => {
+  const snackBar = useSnackBar()
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [hasApiError, setHasApiError] = useState(false)
+  const dispatch = useAppDispatch()
+
+  useInitReCaptcha()
+
+  useEffect(() => {
+    if (searchParams.get('accountValidation') === 'true') {
+      snackBar.success(
+        'Votre compte a été créé. Vous pouvez vous connecter avec les identifiants que vous avez choisis.'
+      )
+      setSearchParams('')
+    } else if (
+      searchParams.get('accountValidation') === 'false' &&
+      searchParams.get('message')
+    ) {
+      snackBar.error(searchParams.get('message') ?? '')
+      setSearchParams('')
+    }
+  }, [searchParams, setSearchParams, snackBar.error, snackBar.success])
+
+  const onSubmit = async (values: SigninFormValues) => {
+    const { email, password } = values
+    try {
+      const captchaToken = await getReCaptchaToken('loginUser')
+      const user = await api.signin({
+        body: {
+          identifier: email,
+          password,
+          captchaToken,
+        },
+      })
+
+      await dispatch(initializeUser({ user })).unwrap()
+
+      await navigate(getUserDefaultPath())
+    } catch (error) {
+      if (isErrorAPIError(error) || error === RECAPTCHA_ERROR) {
+        if (isErrorAPIError(error)) {
+          onHandleFail({ status: error.status, errors: error.body })
+        } else {
+          snackBar.error(RECAPTCHA_ERROR_MESSAGE)
+        }
+      }
+    }
+  }
+
+  const hookForm = useForm({
+    defaultValues: SIGNIN_FORM_DEFAULT_VALUES,
+    resolver: yupResolver(validationSchema),
+    mode: 'onTouched',
+  })
+
+  // This is to reproduce a Formik behavior that reset form error status after an API error
+  useEffect(() => {
+    const handleClick = () => {
+      if (hasApiError) {
+        hookForm.clearErrors()
+        hookForm.reset({}, { keepValues: true })
+        setHasApiError(false)
+      }
+    }
+    document.addEventListener('click', handleClick)
+    return () => {
+      document.removeEventListener('click', handleClick)
+    }
+  }, [hookForm, hasApiError])
+
+  const onHandleFail = (payload: SigninApiErrorResponse) => {
+    const { errors, status } = payload
+    if (status === HTTP_STATUS.TOO_MANY_REQUESTS) {
+      snackBar.error(
+        'Nombre de tentatives de connexion dépassé. Veuillez réessayer dans 1 minute.'
+      )
+    } else if (Object.values(errors).length > 0) {
+      hookForm.setError('root', { type: 'apiError' })
+      hookForm.setError('email', {
+        message: 'Identifiant ou mot de passe incorrect.',
+      })
+      hookForm.setError('password', {
+        message: 'Identifiant ou mot de passe incorrect.',
+      })
+      setHasApiError(true)
+    }
+  }
+
+  const isSignupSimulationEnabled = useActiveFeature(
+    'WIP_PRE_SIGNUP_SIMULATION'
+  )
+
+  const LayoutComponent = isSignupSimulationEnabled
+    ? SigninFullLayout
+    : SignUpLayout
+
+  return (
+    <LayoutComponent>
+      <h1 className={styles['title']}>Connectez-vous</h1>
+      {!isSignupSimulationEnabled && (
+        <MandatoryInfo areAllFieldsMandatory={true} />
+      )}
+      <FormProvider {...hookForm}>
+        <SigninForm onSubmit={hookForm.handleSubmit(onSubmit)} />
+      </FormProvider>
+    </LayoutComponent>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = SignIn

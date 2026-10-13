@@ -1,0 +1,71 @@
+import { screen } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import { DEFAULT_COLLECTIVE_SEARCH_FILTERS } from '@/commons/core/Offers/constants'
+import { useActiveFeature } from '@/commons/hooks/useActiveFeature'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+
+import {
+  CollectiveOffersSearchFilters,
+  type CollectiveOffersSearchFiltersProps,
+} from './CollectiveOffersSearchFilters'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getVenueAddresses: vi.fn(),
+  },
+}))
+
+vi.mock('@/commons/hooks/useActiveFeature', () => ({
+  useActiveFeature: vi.fn(),
+}))
+
+const renderCollectiveOffersSearchFilters = (
+  props: CollectiveOffersSearchFiltersProps,
+  options?: RenderWithProvidersOptions
+) => {
+  return renderWithProviders(<CollectiveOffersSearchFilters {...props} />, {
+    storeOverrides: {
+      user: {
+        currentUser: sharedCurrentUserFactory(),
+        selectedPartnerVenue: { id: 1 },
+      },
+    },
+    ...options,
+  })
+}
+
+const baseProps = {
+  hasFilters: true,
+  applyFilters: () => {},
+  offererId: '1',
+  selectedFilters: DEFAULT_COLLECTIVE_SEARCH_FILTERS,
+  setSelectedFilters: () => {},
+  disableAllFilters: false,
+  resetFilters: () => {},
+}
+
+describe('CollectiveOffersSearchFilters', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderCollectiveOffersSearchFilters({ ...baseProps })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display location filter', async () => {
+    vi.mocked(useActiveFeature).mockReturnValue(true)
+    renderCollectiveOffersSearchFilters({ ...baseProps })
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    expect(await screen.findByLabelText('Localisation')).toBeInTheDocument()
+    expect(
+      await screen.findByRole('option', { name: 'Toutes' })
+    ).toBeInTheDocument()
+  })
+})

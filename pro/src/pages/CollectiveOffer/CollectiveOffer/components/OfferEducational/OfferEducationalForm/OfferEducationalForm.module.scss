@@ -1,0 +1,38 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.radio-group-title {
+  @include fonts.title2;
+}
+
+.banner-space {
+  margin-bottom: var(--size-spacing-l);
+}
+
+.description-info-boxes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-s);
+}
+
+.description-info-spacing {
+  display: block;
+  margin-bottom: var(--size-spacing-m);
+}
+
+.title,
+.description,
+.price-detail {
+  margin-bottom: var(--size-spacing-l);
+}
+
+.specific-address {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-l);
+
+  &-search {
+    margin-bottom: 0;
+  }
+}

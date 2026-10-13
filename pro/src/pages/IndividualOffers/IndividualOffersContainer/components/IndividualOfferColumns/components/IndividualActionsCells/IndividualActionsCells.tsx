@@ -1,0 +1,342 @@
+import { getOfferEnhancementActionsVisibility } from 'commons/core/Offers/utils/getOfferEnhancementActionsVisibility'
+import { OfferRecommendationModal } from 'components/IndividualOfferLayout/components/OfferRecommendationCard/OfferRecommendationModal'
+import { Button } from 'design-system/Button/Button'
+import {
+  ButtonColor,
+  ButtonSize,
+  ButtonVariant,
+} from 'design-system/Button/types'
+import { useCallback, useRef, useState } from 'react'
+import { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import { type ListOffersOfferResponseModel, OfferStatus } from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { GET_OFFERS_QUERY_KEY } from '@/commons/config/swrQueryKeys'
+import { useHeadlineOfferContext } from '@/commons/context/HeadlineOfferContext/HeadlineOfferContext'
+import {
+  EngagementEvents,
+  Events,
+  INDIVIDUAL_OFFERS_NAVIGATION_SOURCE,
+  OFFER_FORM_NAVIGATION_MEDIUM,
+} from '@/commons/core/FirebaseEvents/constants'
+import { useQuerySearchFilters } from '@/commons/core/Offers/hooks/useQuerySearchFilters'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { useStoredFilterConfig } from '@/components/OffersTableSearch/utils'
+import { Dropdown } from '@/design-system/Dropdown/Dropdown'
+import { SimpleModal } from '@/design-system/SimpleModal/SimpleModal'
+import penIcon from '@/icons/full-edit.svg'
+import fullMessageIcon from '@/icons/full-message.svg'
+import fullStarIcon from '@/icons/full-star.svg'
+import fullStockIcon from '@/icons/full-stock.svg'
+import fullThreeDotsIcon from '@/icons/full-three-dots.svg'
+import fullTrashIcon from '@/icons/full-trash.svg'
+import strokeMessageIcon from '@/icons/stroke-message.svg'
+import strokeStarIcon from '@/icons/stroke-star.svg'
+import strokeTrashIcon from '@/icons/stroke-trash.svg'
+import type { IndividualOffersFilters } from '@/pages/IndividualOffers/common/types'
+import { computeDeletionErrorMessage } from '@/pages/IndividualOffers/utils/computeDeletionErrorMessage'
+import { computeDeletionSuccessMessage } from '@/pages/IndividualOffers/utils/computeDeletionSuccessMessage'
+import { computeIndividualApiFilters } from '@/pages/IndividualOffers/utils/computeIndividualApiFilters'
+
+import { HeadlineOfferImageDialogs } from '../HeadlineOfferImageDialogs'
+import styles from './IndividualActionsCells.module.scss'
+
+interface IndividualActionsCellsProps {
+  offer: ListOffersOfferResponseModel
+  editionOfferLink: string
+  editionStockLink: string
+  isHeadline: boolean
+}
+
+export const IndividualActionsCells = ({
+  offer,
+  editionOfferLink,
+  editionStockLink,
+  isHeadline,
+}: IndividualActionsCellsProps) => {
+  const { storedFilters } = useStoredFilterConfig('individual')
+  const { headlineOffer, upsertHeadlineOffer, removeHeadlineOffer } =
+    useHeadlineOfferContext()
+  const urlSearchFilters = useQuerySearchFilters()
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+  const finalSearchFilters = {
+    ...urlSearchFilters,
+    ...(storedFilters as Partial<IndividualOffersFilters>),
+    venueId: selectedPartnerVenue.id,
+  }
+  const dropdownTriggerRef = useRef<HTMLButtonElement>(null)
+  const headlineButtonTriggerRef = useRef<HTMLButtonElement>(null)
+
+  const { mutate } = useSWRConfig()
+  const [isConfirmDialogDeleteDraftOpen, setIsConfirmDialogDeleteDraftOpen] =
+    useState(false)
+  const [isProAdviceOpen, setIsProAdviceOpen] = useState(false)
+
+  const [
+    isConfirmDialogReplaceHeadlineOfferOpen,
+    setIsConfirmDialogReplaceHeadlineOfferOpen,
+  ] = useState(false)
+  const [
+    isDialogForHeadlineOfferWithoutImageOpen,
+    setIsDialogForHeadlineOfferWithoutImageOpen,
+  ] = useState(false)
+  const { logEvent } = useAnalytics()
+  const snackBar = useSnackBar()
+
+  const closeDeleteDraftDialog = useCallback(() => {
+    /* istanbul ignore next */
+    setIsConfirmDialogDeleteDraftOpen(false)
+  }, [])
+  const closeReplaceHeadlineOfferDialog = useCallback(() => {
+    /* istanbul ignore next */
+    setIsConfirmDialogReplaceHeadlineOfferOpen(false)
+  }, [])
+
+  const { shouldDisplayRecommendationAction, shouldDisplayHeadlineAction } =
+    getOfferEnhancementActionsVisibility(offer)
+
+  const apiFilters = computeIndividualApiFilters({
+    finalSearchFilters,
+    selectedVenueId: selectedPartnerVenue.id,
+  })
+
+  const onConfirmDeleteDraftOffer = async () => {
+    try {
+      await api.deleteDraftOffers({
+        body: {
+          ids: [offer.id],
+        },
+      })
+      setIsConfirmDialogDeleteDraftOpen(false)
+      snackBar.success(computeDeletionSuccessMessage(1))
+      logEvent(Events.DELETE_DRAFT_OFFER, {
+        used: OFFER_FORM_NAVIGATION_MEDIUM.OFFERS_TRASH_ICON,
+        offerId: offer.id,
+        offerType: 'individual',
+        isDraft: true,
+      })
+      await mutate([GET_OFFERS_QUERY_KEY, apiFilters])
+    } catch {
+      setIsConfirmDialogDeleteDraftOpen(false)
+      snackBar.error(computeDeletionErrorMessage(1))
+    }
+  }
+
+  const onConfirmReplaceHeadlineOffer = async () => {
+    await upsertHeadlineOffer({
+      offerId: offer.id,
+      context: { actionType: 'replace' },
+    })
+    setIsConfirmDialogReplaceHeadlineOfferOpen(false)
+  }
+
+  async function onClickAddHeadlineOffer() {
+    if (!shouldDisplayHeadlineAction) {
+      snackBar.error(
+        'Seules les offres au statut « Publié » peuvent être mises à la une.'
+      )
+      return
+    }
+    if (isHeadline) {
+      await removeHeadlineOffer({ offerId: offer.id })
+    } else if (offer.thumbUrl) {
+      if (headlineOffer?.id) {
+        setIsConfirmDialogReplaceHeadlineOfferOpen(true)
+      } else {
+        await upsertHeadlineOffer({
+          offerId: offer.id,
+          context: { actionType: 'add' },
+        })
+      }
+    } else {
+      setIsDialogForHeadlineOfferWithoutImageOpen(true)
+    }
+  }
+
+  function onClickAddProAdvice() {
+    if (!shouldDisplayRecommendationAction) {
+      let errorMessage =
+        'Votre offre doit être publiée pour faire cette action.'
+      if (offer.status === OfferStatus.REJECTED) {
+        errorMessage =
+          "Offre non-conforme : aucune modification n'est possible dans ce cas. Veuillez créer une nouvelle offre."
+      } else if (offer.status === OfferStatus.PENDING) {
+        errorMessage =
+          "Offre en cours de vérification : aucune modification n'est possible durant la vérification d’éligibilité."
+      }
+      snackBar.error(errorMessage)
+    } else {
+      logEvent(EngagementEvents.HAS_MADE_RECOMMENDATION, {
+        offerId: offer.id,
+        action: offer.hasProAdvice ? 'edited' : 'started',
+      })
+      setIsProAdviceOpen(true)
+    }
+  }
+
+  const logOfferNavigation = (source: INDIVIDUAL_OFFERS_NAVIGATION_SOURCE) => {
+    logEvent(Events.CLICKED_OFFER_FORM_NAVIGATION, {
+      used: source,
+      offerId: offer.id,
+    })
+  }
+
+  return (
+    <>
+      <div className={styles['actions-column']}>
+        <Button
+          color={isHeadline ? ButtonColor.BRAND : ButtonColor.NEUTRAL}
+          variant={ButtonVariant.SECONDARY}
+          size={ButtonSize.SMALL}
+          icon={
+            isHeadline && shouldDisplayHeadlineAction
+              ? fullStarIcon
+              : strokeStarIcon
+          }
+          onClick={onClickAddHeadlineOffer}
+          tooltip={isHeadline ? 'Ne plus mettre à la une' : 'Mettre à la une'}
+          ref={headlineButtonTriggerRef}
+        />
+
+        <OfferRecommendationModal
+          onOpenChange={() => {
+            if (shouldDisplayRecommendationAction) {
+              setIsProAdviceOpen(!isProAdviceOpen)
+            }
+          }}
+          offerId={offer.id}
+          isOpen={isProAdviceOpen}
+          proAdvice={null}
+          onSubmit={async () => {
+            await mutate([GET_OFFERS_QUERY_KEY, apiFilters])
+            setIsProAdviceOpen(false)
+          }}
+          submitLabel={'Enregistrer la recommandation'}
+          loadAdviceFromOffer={offer.hasProAdvice}
+        />
+
+        <Button
+          color={
+            offer.hasProAdvice && shouldDisplayRecommendationAction
+              ? ButtonColor.BRAND
+              : ButtonColor.NEUTRAL
+          }
+          variant={ButtonVariant.SECONDARY}
+          size={ButtonSize.SMALL}
+          icon={
+            offer.hasProAdvice && shouldDisplayRecommendationAction
+              ? fullMessageIcon
+              : strokeMessageIcon
+          }
+          onClick={onClickAddProAdvice}
+          tooltip={
+            offer.hasProAdvice ? 'Modifier la recommandation' : 'Recommander'
+          }
+        />
+        <Dropdown
+          label="Voir les actions"
+          trigger={
+            <Button
+              variant={ButtonVariant.SECONDARY}
+              icon={fullThreeDotsIcon}
+              ref={dropdownTriggerRef}
+              size={ButtonSize.SMALL}
+              color={ButtonColor.NEUTRAL}
+              tooltip="Voir les actions"
+            />
+          }
+          align="end"
+          items={[
+            [
+              {
+                text: 'Voir l’offre',
+                icon: penIcon,
+                link: {
+                  to: editionOfferLink,
+                  onClick: () =>
+                    logOfferNavigation(
+                      INDIVIDUAL_OFFERS_NAVIGATION_SOURCE.ACTIONS_MENU_VIEW_OFFER
+                    ),
+                },
+              },
+              ...(offer.status === OfferStatus.DRAFT
+                ? [
+                    {
+                      text: 'Supprimer l’offre',
+                      icon: fullTrashIcon,
+                      onClick: () =>
+                        setIsConfirmDialogDeleteDraftOpen(
+                          !isConfirmDialogDeleteDraftOpen
+                        ),
+                    },
+                  ]
+                : [
+                    {
+                      text: offer.isEvent ? 'Dates et capacités' : 'Stocks',
+                      icon: fullStockIcon,
+                      link: {
+                        to: editionStockLink,
+                        onClick: () =>
+                          logOfferNavigation(
+                            INDIVIDUAL_OFFERS_NAVIGATION_SOURCE.ACTIONS_MENU_EDIT_OFFER_STOCK
+                          ),
+                      },
+                    },
+                  ]),
+            ],
+          ]}
+        />
+      </div>
+      <SimpleModal
+        iconPath={strokeTrashIcon}
+        title={`Voulez-vous supprimer le brouillon : "${offer.name}" ?`}
+        isOpen={isConfirmDialogDeleteDraftOpen}
+        onClose={closeDeleteDraftDialog}
+        actionButtons={[
+          <Button
+            onClick={closeDeleteDraftDialog}
+            variant={ButtonVariant.SECONDARY}
+            color={ButtonColor.NEUTRAL}
+            label="Annuler"
+            key="cancel"
+          />,
+          <Button
+            onClick={onConfirmDeleteDraftOffer}
+            label="Supprimer ce brouillon"
+            key="confirm"
+          />,
+        ]}
+      />
+      <SimpleModal
+        iconPath={strokeStarIcon}
+        title="Vous êtes sur le point de remplacer votre offre à la une par une nouvelle offre."
+        isOpen={isConfirmDialogReplaceHeadlineOfferOpen}
+        onClose={closeReplaceHeadlineOfferDialog}
+        refToFocusOnClose={headlineButtonTriggerRef}
+        actionButtons={[
+          <Button
+            onClick={closeReplaceHeadlineOfferDialog}
+            variant={ButtonVariant.SECONDARY}
+            color={ButtonColor.NEUTRAL}
+            label="Annuler"
+            key="cancel"
+          />,
+          <Button
+            onClick={onConfirmReplaceHeadlineOffer}
+            label="Confirmer"
+            key="confirm"
+          />,
+        ]}
+      />
+      <HeadlineOfferImageDialogs
+        offerId={offer.id}
+        isFirstDialogOpen={isDialogForHeadlineOfferWithoutImageOpen}
+        setIsFirstDialogOpen={setIsDialogForHeadlineOfferWithoutImageOpen}
+        refToFocusOnClose={headlineButtonTriggerRef}
+      />
+    </>
+  )
+}

@@ -1,0 +1,126 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_outline.scss" as outline;
+
+.cardlink {
+  border: rem.torem(1px) solid var(--color-border-default);
+  border-radius: var(--size-border-radius-m);
+  position: relative;
+
+  // Direction: horizontal (default)
+  padding: var(--size-spacing-l);
+  display: flex;
+  flex-direction: row-reverse;
+  align-items: center;
+
+  &-body {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    flex-grow: 1;
+  }
+
+  &-icon {
+    width: rem.torem(24px);
+    height: rem.torem(24px);
+    color: var(--color-icon-brand-primary);
+    margin-right: rem.torem(18px);
+  }
+
+  &-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
+
+  &-link,
+  &-button {
+    &:focus {
+      outline: none;
+    }
+
+    &::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+    }
+  }
+
+  &-button {
+    border: none;
+    background: none;
+    cursor: pointer;
+  }
+
+  &-description {
+    @include fonts.body-xs;
+
+    color: var(--color-text-subtle);
+    margin-top: var(--size-spacing-xs);
+  }
+
+  // Other states
+  &:hover {
+    border-color: var(--color-border-brand-primary);
+    background-color: var(--color-background-info);
+    cursor: pointer;
+  }
+
+  &:focus-within {
+    @include outline.focus-outline;
+  }
+
+  &:active {
+    outline: none;
+    background-color: var(--color-background-info);
+
+    .cardlink-icon,
+    .cardlink-link,
+    .cardlink-description {
+      color: var(--color-text-brand-primary);
+    }
+  }
+
+  // Vertical state
+  @mixin cardlink-vertical-styles {
+    padding: var(--size-spacing-xxxl) var(--size-spacing-l)
+      var(--size-spacing-xxl);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+
+    .cardlink-body {
+      align-items: center;
+      flex-direction: column;
+      justify-content: initial;
+    }
+
+    .cardlink-icon {
+      width: rem.torem(40px);
+      height: rem.torem(40px);
+      margin-bottom: var(--size-spacing-m);
+      margin-right: 0;
+    }
+
+    .cardlink-content {
+      align-items: center;
+    }
+
+    .cardlink-description {
+      text-align: center;
+    }
+  }
+
+  &.cardlink-vertical {
+    @include cardlink-vertical-styles;
+  }
+
+  // Force vertical state in mobile
+  @media (max-width: size.$tablet) {
+    @include cardlink-vertical-styles;
+  }
+}

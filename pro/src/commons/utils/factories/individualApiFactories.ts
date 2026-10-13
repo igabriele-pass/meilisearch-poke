@@ -1,0 +1,562 @@
+/* istanbul ignore file: Those are test helpers, their coverage is not relevant */
+import {
+  BankAccountApplicationStatus,
+  type BankAccountResponseModel,
+  BookingOfferType,
+  type BookingRecapResponseModel,
+  type BookingRecapResponseStockModel,
+  BookingRecapStatus,
+  type CategoryResponseModel,
+  DisplayableActivity,
+  type GetBookingResponse,
+  type GetIndividualOfferResponseModel,
+  type GetOfferExposureResponseModel,
+  type GetOffererNameResponseModel,
+  type GetOffererResponseModel,
+  type GetOffererVenueResponseModel,
+  type GetOffererVenueResponseModel as GetOffererVenueResponseModelNew,
+  type GetOfferManagingOffererResponseModel,
+  type GetOfferStockResponseModel,
+  type GetOfferVenueResponseModel,
+  type GetStocksResponseModel,
+  type GetVenueResponseModel,
+  type ListOffersOfferResponseModel,
+  type ListOffersStockResponseModel,
+  type ManagedVenue,
+  type OfferHomeResponseModel,
+  OfferStatus,
+  type PriceCategoryResponseModel,
+  SubcategoryIdEnum,
+  type SubcategoryResponseModel,
+  type VenueProviderResponse,
+} from '@/apiClient/v1'
+import type { IndividualOfferContextValues } from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import { REIMBURSEMENT_RULES } from '@/commons/core/Finances/constants'
+import { CATEGORY_STATUS } from '@/commons/core/Offers/constants'
+import type { StocksEvent } from '@/pages/IndividualOffer/IndividualOfferTimetable/components/StocksCalendar/form/types'
+
+let offerId = 1
+let stockId = 1
+let venueId = 1
+let offererId = 1
+let getOffererNameId = 1
+let bookingId = 1
+let stockResponseId = 1
+let priceCategoryId = 1
+let offerCategoryId = 1
+let offerSubCategoryId = 1
+
+export const listOffersOfferFactory = (
+  customListOffersOffer: Partial<ListOffersOfferResponseModel> = {}
+): ListOffersOfferResponseModel => {
+  const currentOfferId = offerId++
+
+  return {
+    id: currentOfferId,
+    status: OfferStatus.ACTIVE,
+    subcategoryId: SubcategoryIdEnum.CINE_PLEIN_AIR,
+    name: `offer name ${offerId}`,
+    isEvent: true,
+    stocks: [],
+    highlightRequests: [],
+    hasProAdvice: false,
+    ...customListOffersOffer,
+  }
+}
+
+export const listOffersStockFactory = (
+  customListOffersStockFactory: Partial<ListOffersStockResponseModel> = {}
+): ListOffersStockResponseModel => {
+  const currentStockId = stockId++
+  return {
+    id: currentStockId,
+    remainingQuantity: 100,
+    ...customListOffersStockFactory,
+  }
+}
+
+export const getOfferExposureFactory = (
+  customGetOfferExposure: Partial<GetOfferExposureResponseModel> = {}
+): GetOfferExposureResponseModel => {
+  return {
+    views: 0,
+    events: [],
+    ...customGetOfferExposure,
+  }
+}
+
+// TODO (igabriele, 2025-08-05): Factories shouldn't set sensitive domain boolean values to true by default or build children that are not guaranteed to be present.
+// This makes writing tests more difficult and increases the risk of false positives.
+export const getIndividualOfferFactory = (
+  customGetIndividualOffer: Partial<GetIndividualOfferResponseModel> = {},
+  venue: GetOfferVenueResponseModel = getOfferVenueFactory()
+): GetIndividualOfferResponseModel => {
+  const id = customGetIndividualOffer.id ?? offerId++
+
+  return {
+    id,
+    name: `Le nom de l’offre ${id}`,
+    isActive: true,
+    isEditable: true,
+    isEvent: true,
+    canBeEvent: true,
+    isHeadlineOffer: false,
+    isThing: true,
+    status: OfferStatus.ACTIVE,
+    venue,
+    hasBookingLimitDatetimesPassed: false,
+    hasStocks: true,
+    dateCreated: '2020-04-12T19:31:12Z',
+    isDigital: false,
+    isDuo: true,
+    isNational: true,
+    subcategoryId: SubcategoryIdEnum.SEANCE_CINE,
+    // TODO (tpommellet) to remove once GetIndividualOfferResponseModel is migrated to Pydantic V2
+    // @ts-expect-error
+    lastProvider: null,
+    bookingsCount: 0,
+    isNonFreeOffer: true,
+    visualDisabilityCompliant: true,
+    audioDisabilityCompliant: true,
+    motorDisabilityCompliant: true,
+    mentalDisabilityCompliant: true,
+    hasPendingBookings: false,
+    hasCulturalOutreachClaim: false,
+    priceCategories: [priceCategoryFactory()],
+    externalTicketOfficeUrl: 'https://chuck.no',
+    extraData: {
+      author: 'Chuck Norris',
+      performer: 'Le Poing de Chuck',
+      ean: '1234567891234',
+      showType: 'Cinéma',
+      showSubType: 'PEGI 18',
+      stageDirector: 'JCVD',
+      speaker: "Chuck Norris n'a pas besoin de doubleur",
+      visa: 'USA',
+    },
+    videoData: {
+      videoUrl: undefined,
+    },
+    highlightRequests: [],
+    artistOfferLinks: [],
+    ...customGetIndividualOffer,
+  }
+}
+
+export const priceCategoryFactory = (
+  customPriceCategory: Partial<PriceCategoryResponseModel> = {}
+): PriceCategoryResponseModel => ({
+  id: priceCategoryId++,
+  hasStocks: false,
+  label: 'mon label',
+  price: 66.6,
+  ...customPriceCategory,
+})
+
+export const getOfferVenueFactory = (
+  customGetOfferVenue: Partial<GetOfferVenueResponseModel> = {}
+): GetOfferVenueResponseModel => {
+  const currentVenueId = customGetOfferVenue.id ?? venueId++
+
+  return {
+    id: currentVenueId,
+    street: 'Ma Rue',
+    city: 'Ma Ville',
+    name: `Nom de la structure ${currentVenueId}`,
+    postalCode: '11100',
+    publicName: `Nom public de la structure ${currentVenueId}`,
+    departementCode: '78',
+    visualDisabilityCompliant: true,
+    mentalDisabilityCompliant: true,
+    motorDisabilityCompliant: true,
+    audioDisabilityCompliant: true,
+    managingOfferer: getOfferManagingOffererFactory(),
+    ...customGetOfferVenue,
+  }
+}
+
+export const getOfferManagingOffererFactory = (
+  customGetOfferManagingOfferer: Partial<GetOfferManagingOffererResponseModel> = {}
+): GetOfferManagingOffererResponseModel => {
+  const currentOffererId = customGetOfferManagingOfferer.id ?? offererId++
+
+  return {
+    id: 3,
+    name: `Le nom de l'entité ${currentOffererId}`,
+    ...customGetOfferManagingOfferer,
+  }
+}
+
+export const individualOfferContextValuesFactory = (
+  customIndividualOfferContextValues: Partial<IndividualOfferContextValues> = {}
+): IndividualOfferContextValues => {
+  const offer = getIndividualOfferFactory()
+
+  return {
+    offer,
+    offerId: offer.id,
+    categories: [],
+    hasPublishedOfferWithSameEan: false,
+    subCategories: [],
+    isEvent: null,
+    setIsControlledEvent: () => {},
+    ...customIndividualOfferContextValues,
+  }
+}
+
+export const bookingRecapStockFactory = (
+  customBookingRecapStock: Partial<BookingRecapResponseStockModel> = {}
+): BookingRecapResponseStockModel => {
+  const offer = getIndividualOfferFactory()
+
+  return {
+    offerId: offer.id,
+    offerName: offer.name,
+    offerIsEducational: false,
+    offerEan: '123456789',
+    ...customBookingRecapStock,
+  }
+}
+export const bookingRecapFactory = (
+  customBookingRecap: Partial<BookingRecapResponseModel> = {}
+): BookingRecapResponseModel => {
+  return {
+    beneficiary: {
+      email: 'user@example.com',
+      firstname: 'First',
+      lastname: 'Last',
+      phonenumber: '0606060606',
+    },
+    bookingAmount: 0,
+    bookingDate: '2020-04-12T19:31:12Z',
+    bookingIsDuo: false,
+    bookingStatus: BookingRecapStatus.BOOKED,
+    bookingStatusHistory: [
+      {
+        date: '2020-04-12T19:31:12Z',
+        status: BookingRecapStatus.BOOKED,
+      },
+    ],
+    bookingToken: `TOKEN${bookingId++}`,
+    stock: bookingRecapStockFactory(),
+    ...customBookingRecap,
+  }
+}
+
+export const categoryFactory = (
+  customCategory: Partial<CategoryResponseModel> = {}
+): CategoryResponseModel => ({
+  id: String(offerCategoryId++),
+  proLabel: `catégorie ${offerCategoryId}`,
+  isSelectable: true,
+  ...customCategory,
+})
+
+export const subcategoryFactory = (
+  customSubcategory: Partial<SubcategoryResponseModel> = {}
+): SubcategoryResponseModel => ({
+  id: String(offerSubCategoryId++),
+  categoryId: 'A',
+  appLabel: `sous catégorie ${offerSubCategoryId}`,
+  proLabel: `sous catégorie ${offerSubCategoryId}`,
+  isEvent: false,
+  conditionalFields: [],
+  canBeDuo: false,
+  canBeWithdrawable: false,
+  canHaveOpeningHours: false,
+  onlineOfflinePlatform: CATEGORY_STATUS.ONLINE,
+  reimbursementRule: REIMBURSEMENT_RULES.STANDARD,
+  isSelectable: true,
+  canExpire: true,
+  isDigitalDeposit: false,
+  isPhysicalDeposit: true,
+  ...customSubcategory,
+})
+
+export const StocksEventFactory = (
+  customStocksEvent: Partial<StocksEvent> = {}
+): StocksEvent => {
+  return {
+    id: stockId++,
+    beginningDatetime: '2021-10-15T12:00:00.000Z',
+    bookingLimitDatetime: '2021-09-15T12:00:00.000Z',
+    priceCategoryId: 2,
+    quantity: 18,
+    bookingsQuantity: 0,
+    isEventDeletable: true,
+    ...customStocksEvent,
+  }
+}
+
+export const getOfferStockFactory = (
+  customGetOfferStock: Partial<GetOfferStockResponseModel> = {}
+): GetOfferStockResponseModel => {
+  return {
+    id: stockResponseId++,
+    price: 10,
+    // @ts-expect-error - to remove when GetStockResponseModel will be migrated to pydanticV2
+    activationCodesExpirationDatetime: null,
+    hasActivationCode: false,
+    beginningDatetime: new Date('2021-10-15T12:00:00Z').toISOString(),
+    bookingLimitDatetime: new Date('2021-09-15T12:00:00Z').toISOString(),
+    priceCategoryId: 2,
+    quantity: 18,
+    bookingsQuantity: 0,
+    isEventDeletable: true,
+    ...customGetOfferStock,
+  }
+}
+
+export function getOffererNameFactory(
+  customGetOfferer: Partial<GetOffererNameResponseModel> = {}
+): GetOffererNameResponseModel {
+  return {
+    id: getOffererNameId++,
+    name: 'Ma super structure',
+    validated: true,
+    ...customGetOfferer,
+  }
+}
+
+export const defaultGetOffererResponseModel: GetOffererResponseModel = {
+  hasValidBankAccount: true,
+  hasPendingBankAccount: false,
+  hasNonFreeOffer: true,
+  hasBankAccountWithPendingCorrections: false,
+  venuesWithNonFreeOffersWithoutBankAccounts: [],
+  isActive: false,
+  isClosed: false,
+  isValidated: false,
+  managedVenues: [],
+  siren: '123456789',
+  name: 'Ma super structure',
+  id: 1,
+  allowedOnAdage: true,
+  isOnboarded: true,
+  isCaledonian: false,
+  canDisplayHighlights: true,
+}
+
+export const defaultGetOffererVenueResponseModel: GetOffererVenueResponseModel =
+  {
+    activity: DisplayableActivity.OTHER,
+    lastCollectiveDmsApplication: null,
+    hasAdageId: false,
+    hasCreatedOffer: false,
+    name: 'Nom de la structure',
+    publicName: 'Nom public de la structure',
+    id: 1,
+    hasVenueProviders: false,
+    isPermanent: true,
+    bannerUrl: null,
+    bannerMeta: null,
+    siret: null,
+    bookingEmail: null,
+    withdrawalDetails: null,
+    state: null,
+  }
+
+export const defaultGetOffererVenueResponseModelNew: GetOffererVenueResponseModelNew =
+  {
+    activity: DisplayableActivity.OTHER,
+    lastCollectiveDmsApplication: null,
+    hasAdageId: false,
+    hasCreatedOffer: false,
+    name: 'Nom de la structure',
+    publicName: 'Nom public de la structure',
+    id: 1,
+    hasVenueProviders: false,
+    isPermanent: true,
+    bannerUrl: null,
+    bannerMeta: null,
+    siret: null,
+    bookingEmail: null,
+    withdrawalDetails: null,
+    state: null,
+  }
+
+export const defaultGetVenueResponseModel: GetVenueResponseModel = {
+  audioDisabilityCompliant: false,
+  mentalDisabilityCompliant: true,
+  motorDisabilityCompliant: true,
+  visualDisabilityCompliant: true,
+  name: 'my venue',
+  bannerUrl: null,
+  contact: {
+    email: 'contact@venue.com',
+    website: 'https://my.website.com',
+    phoneNumber: '+33102030405',
+    socialMedias: {
+      instagram: 'https://instagram.com/@venue',
+    },
+  },
+  description: 'desc',
+  externalAccessibilityData: null,
+  externalAccessibilityId: null,
+  isOnboarded: false,
+  isOpenToPublic: false,
+  isPermanent: false,
+  isPricingPoint: false,
+  publicName: 'Venue',
+  withdrawalDetails: null,
+  activity: null,
+  dateCreated: '2026-03-16T23:10:47.874496Z',
+  id: 878,
+  bannerMeta: null,
+  bookingEmail: 'venue877@example.net',
+  comment: 'No SIRET',
+  managingOfferer: {
+    id: 878,
+    isClosed: false,
+    isValidated: true,
+    name: 'Venue Entreprise',
+    siren: '123456789',
+  },
+  pricingPoint: null,
+  siret: null,
+  collectiveDescription: null,
+  collectiveStudents: [],
+  collectiveWebsite: null,
+  collectiveDomains: [
+    {
+      id: 1,
+      name: 'Architecture',
+    },
+  ],
+  collectiveInterventionArea: null,
+  collectiveLegalStatus: null,
+  collectivePhone: null,
+  collectiveEmail: null,
+  lastCollectiveDmsApplication: null,
+  hasAdageId: false,
+  adageInscriptionDate: null,
+  hasOffers: true,
+  location: {
+    id: 2,
+    banId: null,
+    city: 'Paris',
+    departmentCode: null,
+    inseeCode: null,
+    isManualEdition: false,
+    isVenueLocation: false,
+    label: null,
+    latitude: 0,
+    longitude: 0,
+    postalCode: '75001',
+    street: null,
+  },
+  hasActiveIndividualOffer: true,
+  hasAtLeastOneBookableOffer: true,
+  hasHighlightRequest: false,
+  isCaledonian: false,
+  isValidated: true,
+  allowedOnAdage: true,
+  bankAccountStatus: null,
+  hasNonFreeOffers: true,
+  canDisplayHighlights: true,
+  hasNonDraftOffers: true,
+  volunteeringUrl: null,
+  openingHours: null,
+  state: null,
+}
+
+export const defaultGetBookingResponse: GetBookingResponse = {
+  bookingId: 'test_booking_id',
+  dateOfBirth: '1980-02-01T20:00:00Z',
+  email: 'test@email.com',
+  isUsed: false,
+  offerId: 12345,
+  offerType: BookingOfferType.EVENEMENT,
+  phoneNumber: '0100000000',
+  publicOfferId: 'test_public_offer_id',
+  offerAddress: '5 rue des legos',
+  venueName: 'mon lieu',
+  datetime: '2001-02-01T20:00:00Z',
+  ean13: 'test ean113',
+  offerName: 'Nom de la structure',
+  price: 13,
+  quantity: 1,
+  userName: 'USER',
+  firstName: 'john',
+  lastName: 'doe',
+  offerDepartmentCode: '75',
+  priceCategoryLabel: 'price label',
+}
+
+export const defaultBankAccount: BankAccountResponseModel = {
+  dateCreated: '2020-05-07',
+  dsApplicationId: 1,
+  id: 1,
+  isActive: true,
+  label: 'Mon compte bancaire',
+  linkedVenues: [
+    {
+      commonName: 'Mon super lieu',
+      id: 1,
+      state: null,
+    },
+  ],
+  obfuscatedIban: 'XXXX-123',
+  status: BankAccountApplicationStatus.ACCEPTE,
+}
+
+export const defaultManagedVenue: ManagedVenue = {
+  commonName: 'Mon super lieu',
+  name: 'RAISON SOCIALE',
+  id: 1,
+  siret: '123456789',
+  bankAccountId: null,
+  hasPricingPoint: true,
+  state: null,
+}
+
+export const defaultVenueProvider: VenueProviderResponse = {
+  id: 1,
+  isActive: true,
+  isFromAllocineProvider: false,
+  lastSyncDate: null,
+  venueId: 2,
+  dateCreated: '2021-08-15T00:00:00Z',
+  venueIdAtOfferProvider: 'cdsdemorc1',
+  provider: {
+    name: 'Ciné Office',
+    id: 12,
+    hasOffererProvider: false,
+    isActive: true,
+    enabledForPro: true,
+  },
+  quantity: 0,
+  isDuo: true,
+  price: 0,
+}
+
+export function getStocksResponseFactory<
+  T extends Partial<GetStocksResponseModel>,
+>(override: T): Omit<GetStocksResponseModel, keyof T> & T {
+  return {
+    stocks: [
+      {
+        bookingsQuantity: 0,
+        hasActivationCode: false,
+        id: 1,
+        isEventDeletable: true,
+        price: 666,
+      },
+    ],
+    totalStockCount: 1,
+    editedStockCount: 1,
+    ...override,
+  }
+}
+
+export const defaultOfferHomeResponseModel: OfferHomeResponseModel = {
+  id: 144,
+  bookingsCount: 12,
+  isEvent: true,
+  name: 'Mon offre indivuduelle sur la home',
+  status: OfferStatus.PUBLISHED,
+  thumbUrl: '',
+  stocks: [{ beginningDatetime: '2021-10-15T12:00:00.000Z' }],
+  departmentCode: '75',
+  publicationDatetime: '2021-10-15T12:00:00.000Z',
+}

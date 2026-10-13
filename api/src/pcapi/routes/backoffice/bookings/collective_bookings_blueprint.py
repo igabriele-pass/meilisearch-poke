@@ -1,0 +1,383 @@
+from functools import partial
+
+import sqlalchemy as sa
+import sqlalchemy.dialects.postgresql as sa_dialects_psql
+import sqlalchemy.orm as sa_orm
+from flask import flash
+from flask import render_template
+from flask import url_for
+from flask_login import current_user
+from markupsafe import Markup
+from werkzeug.exceptions import NotFound
+
+from pcapi.core.educational import exceptions as educational_exceptions
+from pcapi.core.educational import models as educational_models
+from pcapi.core.educational.api import booking as educational_api_booking
+from pcapi.core.finance import models as finance_models
+from pcapi.core.geography import models as geography_models
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.permissions import models as perm_models
+from pcapi.models import db
+from pcapi.routes.backoffice import autocomplete
+from pcapi.routes.backoffice import blueprint as backoffice_blueprint
+from pcapi.routes.backoffice.bookings import forms as booking_forms
+from pcapi.routes.backoffice.bookings import helpers as booking_helpers
+from pcapi.routes.backoffice.forms import empty as empty_forms
+from pcapi.routes.backoffice.pro.utils import get_connect_as
+from pcapi.routes.backoffice.utils import access_control
+from pcapi.routes.backoffice.utils import request as request_utils
+from pcapi.routes.backoffice.utils import response as response_utils
+from pcapi.routes.backoffice.utils import search as search_utils
+from pcapi.utils import urls
+from pcapi.utils.transaction_manager import mark_transaction_as_invalid
+
+
+collective_bookings_blueprint = backoffice_blueprint.child_backoffice_blueprint(
+    "collective_bookings",
+    __name__,
+    url_prefix="/collective-bookings",
+    permission=perm_models.Permissions.READ_BOOKINGS,
+)
+
+
+def _get_collective_bookings_query() -> sa_orm.Query:
+    return (
+        db.session.query(educational_models.CollectiveBooking)
+        .join(educational_models.CollectiveBooking.collectiveStock)
+        .join(educational_models.CollectiveStock.collectiveOffer)
+        .join(educational_models.CollectiveBooking.educationalInstitution)
+        .outerjoin(
+            educational_models.EducationalInstitutionProgramAssociation,
+            sa.and_(
+                educational_models.EducationalInstitutionProgramAssociation.institutionId
+                == educational_models.EducationalInstitution.id,
+                educational_models.EducationalInstitutionProgramAssociation.timespan.contains(
+                    educational_models.CollectiveStock.startDatetime
+                ),
+            ),
+        )
+        .outerjoin(educational_models.EducationalInstitutionProgramAssociation.program)
+        .outerjoin(educational_models.CollectiveBooking.educationalDeposit)
+        .options(
+            sa_orm.contains_eager(educational_models.CollectiveBooking.collectiveStock)
+            .load_only(
+                educational_models.CollectiveStock.collectiveOfferId,
+                educational_models.CollectiveStock.startDatetime,
+                educational_models.CollectiveStock.endDatetime,
+                educational_models.CollectiveStock.bookingLimitDatetime,
+                # needed by total_amount:
+                educational_models.CollectiveStock.price,
+                educational_models.CollectiveStock.numberOfTickets,
+            )
+            .contains_eager(educational_models.CollectiveStock.collectiveOffer)
+            .load_only(
+                educational_models.CollectiveOffer.id,
+                educational_models.CollectiveOffer.name,
+                educational_models.CollectiveOffer.formats,
+            )
+            .selectinload(educational_models.CollectiveOffer.offererAddress)
+            .load_only()
+            .joinedload(offerers_models.OffererAddress.address)
+            .load_only(geography_models.Address.timezone),
+            sa_orm.contains_eager(educational_models.CollectiveBooking.educationalInstitution)
+            .load_only(
+                educational_models.EducationalInstitution.id,
+                educational_models.EducationalInstitution.name,
+                educational_models.EducationalInstitution.institutionId,
+                educational_models.EducationalInstitution.institutionType,
+                educational_models.EducationalInstitution.city,
+            )
+            .contains_eager(educational_models.EducationalInstitution.programAssociations)
+            .load_only()
+            .contains_eager(educational_models.EducationalInstitutionProgramAssociation.program)
+            .load_only(educational_models.EducationalInstitutionProgram.label),
+            sa_orm.contains_eager(educational_models.CollectiveBooking.educationalDeposit).load_only(
+                educational_models.EducationalDeposit.ministry
+            ),
+            sa_orm.selectinload(educational_models.CollectiveBooking.educationalRedactor).load_only(
+                educational_models.EducationalRedactor.firstName, educational_models.EducationalRedactor.lastName
+            ),
+            sa_orm.selectinload(educational_models.CollectiveBooking.offerer).load_only(
+                offerers_models.Offerer.id, offerers_models.Offerer.name
+            ),
+            sa_orm.selectinload(educational_models.CollectiveBooking.venue).load_only(
+                # for name and link (build_pc_pro_venue_link)
+                offerers_models.Venue.id,
+                offerers_models.Venue.isSoftDeleted,
+                offerers_models.Venue.name,
+                offerers_models.Venue.publicName,
+            ),
+            sa_orm.selectinload(educational_models.CollectiveBooking.pricings)
+            .load_only(
+                finance_models.Pricing.amount, finance_models.Pricing.status, finance_models.Pricing.creationDate
+            )
+            .joinedload(finance_models.Pricing.cashflows)
+            .load_only(finance_models.Cashflow.batchId)
+            .joinedload(finance_models.Cashflow.batch)
+            .load_only(finance_models.CashflowBatch.label),
+            sa_orm.selectinload(educational_models.CollectiveBooking.incidents)
+            .load_only(finance_models.BookingFinanceIncident.incidentId)
+            .joinedload(finance_models.BookingFinanceIncident.incident)
+            .load_only(
+                finance_models.FinanceIncident.id,
+                finance_models.FinanceIncident.kind,
+                finance_models.FinanceIncident.status,
+            ),
+        )
+    )
+
+
+def _get_ministry_filters(selected_ministries: list[str]) -> list[sa.ColumnElement]:
+    ministry_filters: list[sa.ColumnElement] = []
+    meg_program_filter = (
+        sa.exists()
+        .where(
+            sa.and_(
+                educational_models.EducationalInstitutionProgramAssociation.institutionId
+                == educational_models.CollectiveBooking.educationalInstitutionId,
+                educational_models.EducationalInstitutionProgram.id
+                == educational_models.EducationalInstitutionProgramAssociation.programId,
+                educational_models.EducationalInstitutionProgramAssociation.timespan.contains(
+                    educational_models.CollectiveStock.startDatetime
+                ),
+                educational_models.EducationalInstitutionProgram.name == educational_models.PROGRAM_MARSEILLE_EN_GRAND,
+            )
+        )
+        .correlate(educational_models.CollectiveBooking, educational_models.CollectiveStock)
+    )
+
+    ministries = [
+        ministry for ministry in selected_ministries if ministry != booking_forms.MinistryExtraChoice.MEG.name
+    ]
+    if ministries:
+        if (
+            educational_models.Ministry.EDUCATION_NATIONALE.name in ministries
+            and booking_forms.MinistryExtraChoice.MEG.name not in selected_ministries
+        ):
+            ministry_filters.append(
+                sa.and_(
+                    educational_models.EducationalDeposit.ministry.in_(ministries),
+                    sa.not_(meg_program_filter),
+                )
+            )
+        else:
+            ministry_filters.append(educational_models.EducationalDeposit.ministry.in_(ministries))
+
+    if booking_forms.MinistryExtraChoice.MEG.name in selected_ministries:
+        ministry_filters.append(meg_program_filter)
+
+    return ministry_filters
+
+
+def _get_collective_booking_ids_query(form: booking_forms.GetCollectiveBookingListForm) -> sa_orm.Query:
+    base_query = (
+        db.session.query(educational_models.CollectiveBooking.id)
+        .join(educational_models.CollectiveBooking.collectiveStock)
+        .join(educational_models.CollectiveStock.collectiveOffer)
+    )
+
+    if form.formats.data:
+        base_query = base_query.filter(
+            educational_models.CollectiveOffer.formats.overlap(sa_dialects_psql.array(fmt for fmt in form.formats.data))
+        )
+
+    if form.institution.data:
+        base_query = base_query.filter(
+            educational_models.CollectiveBooking.educationalInstitutionId.in_(form.institution.data)
+        )
+
+    if form.ministry.data:
+        base_query = base_query.join(educational_models.CollectiveBooking.educationalDeposit).filter(
+            sa.or_(*_get_ministry_filters(form.ministry.data))
+        )
+
+    return booking_helpers.get_filtered_booking_query(
+        base_query=base_query,
+        form=form,
+        stock_class=educational_models.CollectiveStock,
+        booking_class=educational_models.CollectiveBooking,
+        id_filters=[
+            educational_models.CollectiveBooking.id,
+            educational_models.CollectiveOffer.id,
+        ],
+        name_filters=[
+            educational_models.CollectiveOffer.name,
+        ],
+    )
+
+
+def _render_collective_bookings(collective_bookings_ids: list[int] | None = None) -> response_utils.BackofficeResponse:
+    bookings: list[educational_models.CollectiveBooking] = []
+
+    if collective_bookings_ids:
+        query = _get_collective_bookings_query()
+        bookings = query.filter(educational_models.CollectiveBooking.id.in_(collective_bookings_ids)).all()
+
+    connect_as = {}
+    for booking in bookings:
+        offer = booking.collectiveStock.collectiveOffer
+        connect_as[offer.id] = get_connect_as(
+            object_type="collective_offer",
+            object_id=offer.id,
+            pc_pro_path=urls.build_pc_pro_offer_path(offer),
+        )
+
+    return render_template(
+        "collective_bookings/rows.html",
+        rows=bookings,
+        mark_as_used_booking_form=empty_forms.EmptyForm(),
+        cancel_booking_form=booking_forms.CancelCollectiveBookingForm(),
+        connect_as=connect_as,
+    )
+
+
+@collective_bookings_blueprint.route("", methods=["GET"])
+def list_collective_bookings() -> response_utils.BackofficeResponse:
+    form = booking_forms.GetCollectiveBookingListForm(formdata=request_utils.get_query_params())
+    if not form.validate():
+        return render_template("collective_bookings/list.html", isEAC=True, rows=[], form=form), 400
+
+    if form.is_empty():
+        # Empty results when no filter is set
+        return render_template("collective_bookings/list.html", rows=[], form=form)
+
+    bookings = (
+        _get_collective_bookings_query()
+        .filter(educational_models.CollectiveBooking.id.in_(_get_collective_booking_ids_query(form)))
+        .all()
+    )
+
+    bookings = search_utils.limit_rows(
+        bookings,
+        form.limit.data,
+        sort_key=lambda booking: booking.collectiveStock.startDatetime,
+        sort_reverse=True,
+    )
+
+    autocomplete.prefill_offerers_choices(form.offerer)
+    autocomplete.prefill_venues_choices(form.venue)
+    autocomplete.prefill_institutions_choices(form.institution)
+    autocomplete.prefill_cashflow_batch_choices(form.cashflow_batches)
+
+    connect_as = {}
+
+    for booking in bookings:
+        offer = booking.collectiveStock.collectiveOffer
+        connect_as[offer.id] = get_connect_as(
+            object_type="collective_offer",
+            object_id=offer.id,
+            pc_pro_path=urls.build_pc_pro_offer_path(offer),
+        )
+
+    return render_template(
+        "collective_bookings/list.html",
+        rows=bookings,
+        form=form,
+        mark_as_used_booking_form=empty_forms.EmptyForm(),
+        cancel_booking_form=booking_forms.CancelCollectiveBookingForm(),
+        connect_as=connect_as,
+    )
+
+
+@collective_bookings_blueprint.route("/<int:collective_booking_id>/mark-as-used", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_BOOKINGS)
+def mark_booking_as_used(collective_booking_id: int) -> response_utils.BackofficeResponse:
+    collective_booking = (
+        db.session.query(educational_models.CollectiveBooking).filter_by(id=collective_booking_id).one_or_none()
+    )
+    if not collective_booking:
+        raise NotFound()
+
+    if collective_booking.status != educational_models.CollectiveBookingStatus.CANCELLED:
+        flash("Impossible de valider une réservation qui n'est pas annulée", "warning")
+        return request_utils.redirect_if_not_htmx(
+            route=url_for(
+                "backoffice.collective_offer.get_collective_offer_details",
+                collective_offer_id=collective_booking.collectiveStock.collectiveOfferId,
+            ),
+            render_function=partial(_render_collective_bookings, [collective_booking.id]),
+        )
+
+    if collective_booking.validated_incident_id:
+        flash("Impossible de valider une réservation annulée liée à un incident finance validé", "warning")
+        return request_utils.redirect_if_not_htmx(
+            route=url_for(
+                "backoffice.collective_offer.get_collective_offer_details",
+                collective_offer_id=collective_booking.collectiveStock.collectiveOfferId,
+            ),
+            render_function=partial(_render_collective_bookings, [collective_booking.id]),
+        )
+
+    try:
+        educational_api_booking.uncancel_collective_booking(collective_booking)
+    except Exception as exc:
+        mark_transaction_as_invalid()
+        flash(Markup("Une erreur s'est produite : {message}").format(message=str(exc)), "warning")
+    else:
+        flash(f"La réservation <b>{collective_booking.id}</b> a été validée", "success")
+
+    return request_utils.redirect_if_not_htmx(
+        route=url_for(
+            "backoffice.collective_offer.get_collective_offer_details",
+            collective_offer_id=collective_booking.collectiveStock.collectiveOfferId,
+        ),
+        render_function=partial(_render_collective_bookings, [collective_booking.id]),
+    )
+
+
+@collective_bookings_blueprint.route("/<int:collective_booking_id>/cancel", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_BOOKINGS)
+def mark_booking_as_cancelled(collective_booking_id: int) -> response_utils.BackofficeResponse:
+    collective_booking = (
+        db.session.query(educational_models.CollectiveBooking)
+        .filter_by(id=collective_booking_id)
+        .options(
+            sa_orm.joinedload(
+                educational_models.CollectiveBooking.collectiveStock,
+            ).load_only(
+                educational_models.CollectiveStock.collectiveOfferId,
+            )
+        )
+        .one_or_none()
+    )
+
+    if not collective_booking:
+        raise NotFound()
+
+    form = booking_forms.CancelCollectiveBookingForm()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.redirect_if_not_htmx(
+            route=url_for(
+                "backoffice.collective_offer.get_collective_offer_details",
+                collective_offer_id=collective_booking.collectiveStock.collectiveOfferId,
+            ),
+            render_function=partial(_render_collective_bookings, [collective_booking.id]),
+        )
+
+    try:
+        educational_api_booking.cancel_collective_booking(
+            collective_booking,
+            educational_models.CollectiveBookingCancellationReasons(form.reason.data),
+            _from="support",
+            author_id=current_user.id,
+        )
+    except educational_exceptions.CollectiveBookingAlreadyCancelled:
+        mark_transaction_as_invalid()
+        flash("Impossible d'annuler une réservation déjà annulée", "warning")
+    except educational_exceptions.BookingIsAlreadyRefunded:
+        mark_transaction_as_invalid()
+        flash("Cette réservation est en train d’être remboursée, il est impossible de l’invalider", "warning")
+    except Exception as exc:
+        mark_transaction_as_invalid()
+        flash(Markup("Une erreur s'est produite : {message}").format(message=str(exc)), "warning")
+    else:
+        flash(f"La réservation <b>{collective_booking.id}</b> a été annulée", "success")
+
+    return request_utils.redirect_if_not_htmx(
+        route=url_for(
+            "backoffice.collective_offer.get_collective_offer_details",
+            collective_offer_id=collective_booking.collectiveStock.collectiveOfferId,
+        ),
+        render_function=partial(_render_collective_bookings, [collective_booking.id]),
+    )

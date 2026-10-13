@@ -1,0 +1,54 @@
+import type { PropsWithChildren } from 'react'
+import { FormProvider, useForm, useFormContext } from 'react-hook-form'
+
+import { DatePicker } from './DatePicker'
+import { Meta, StoryObj } from '@storybook/react-vite';
+
+const Wrapper = ({ children }: PropsWithChildren) => {
+  const hookForm = useForm<{ group: string }>({
+    defaultValues: { group: 'option1' },
+  })
+
+  return (
+    <FormProvider {...hookForm}>
+      <form>{children}</form>
+    </FormProvider>
+  )
+}
+
+const meta: Meta<typeof DatePicker> = {
+  title: '@/ui-kit/forms/DatePicker',
+  component: DatePicker,
+}
+
+export default meta
+type Story = StoryObj<typeof DatePicker>
+
+export const Default: Story = {
+  args: {
+    name: 'date',
+    label: 'Date',
+    value: '2025-11-22',
+    onChange: () => {
+      //    Control changes
+    },
+  },
+}
+
+export const WithinForm: Story = {
+  args: {
+    label: 'Date',
+  },
+  decorators: [
+    (Story: any) => (
+      <Wrapper>
+        <Story />
+      </Wrapper>
+    ),
+  ],
+  render: (args: any) => {
+    const { register } = useFormContext<{ date: string }>()
+
+    return <DatePicker {...args} {...register('date')} />
+  },
+}

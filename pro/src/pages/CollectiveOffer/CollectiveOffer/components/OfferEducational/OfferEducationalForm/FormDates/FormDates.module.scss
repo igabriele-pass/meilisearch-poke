@@ -1,0 +1,25 @@
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.radio-group-title {
+  @include fonts.title2;
+}
+
+.container {
+  margin: var(--size-spacing-xxxxl) 0;
+}
+
+.banner {
+  margin: var(--size-spacing-l) 0;
+}
+
+.row-container {
+  gap: var(--size-spacing-s);
+  margin-bottom: var(--size-spacing-s);
+}
+
+@media (min-width: size.$tablet) {
+  .row-container {
+    display: flex;
+  }
+}

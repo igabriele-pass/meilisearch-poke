@@ -1,0 +1,1024 @@
+import datetime
+import decimal
+import enum
+import logging
+import re
+import typing
+from collections import defaultdict
+from functools import partial
+from io import BytesIO
+
+import sqlalchemy as sa
+import sqlalchemy.exc as sa_exc
+import sqlalchemy.orm as sa_orm
+from flask import flash
+from flask import render_template
+from flask import request
+from flask import send_file
+from flask import url_for
+from flask_login import current_user
+from markupsafe import Markup
+from werkzeug.exceptions import BadRequest
+from werkzeug.exceptions import NotFound
+
+from pcapi import settings
+from pcapi.connectors import ems
+from pcapi.core.bookings import api as bookings_api
+from pcapi.core.bookings import exceptions as bookings_exceptions
+from pcapi.core.bookings import exports as bookings_exports
+from pcapi.core.bookings import models as bookings_models
+from pcapi.core.categories import subcategories
+from pcapi.core.finance import models as finance_models
+from pcapi.core.finance import repository as finance_repository
+from pcapi.core.geography import models as geography_models
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offers import models as offers_models
+from pcapi.core.permissions import models as perm_models
+from pcapi.core.providers.clients import cgr_client
+from pcapi.core.providers.clients import cine_office_client
+from pcapi.core.users import models as users_models
+from pcapi.models import db
+from pcapi.routes.backoffice import autocomplete
+from pcapi.routes.backoffice import blueprint as backoffice_blueprint
+from pcapi.routes.backoffice import filters as template_filters
+from pcapi.routes.backoffice.bookings import forms as booking_forms
+from pcapi.routes.backoffice.bookings import helpers as booking_helpers
+from pcapi.routes.backoffice.filters import pluralize
+from pcapi.routes.backoffice.finance import forms as finance_forms
+from pcapi.routes.backoffice.finance import validation as finance_validation
+from pcapi.routes.backoffice.forms import empty as empty_forms
+from pcapi.routes.backoffice.pro.utils import get_connect_as
+from pcapi.routes.backoffice.utils import access_control
+from pcapi.routes.backoffice.utils import request as request_utils
+from pcapi.routes.backoffice.utils import response as response_utils
+from pcapi.routes.backoffice.utils import search as search_utils
+from pcapi.routes.backoffice.utils.details_actions import DetailsActions
+from pcapi.utils import date as date_utils
+from pcapi.utils import urls
+from pcapi.utils.transaction_manager import atomic
+from pcapi.utils.transaction_manager import mark_transaction_as_invalid
+
+
+logger = logging.getLogger(__name__)
+
+individual_bookings_blueprint = backoffice_blueprint.child_backoffice_blueprint(
+    "individual_bookings",
+    __name__,
+    url_prefix="/individual-bookings",
+    permission=perm_models.Permissions.READ_BOOKINGS,
+)
+
+
+BOOKING_TOKEN_RE = re.compile(r"^[A-Za-z0-9]{6}$")
+NO_DIGIT_RE = re.compile(r"[^\d]+$")
+
+
+def _get_individual_bookings_query() -> sa_orm.Query:
+    return (
+        db.session.query(bookings_models.Booking)
+        .join(offers_models.Stock)
+        .join(offers_models.Offer)
+        .join(users_models.User, bookings_models.Booking.user)
+        .options(
+            sa_orm.joinedload(bookings_models.Booking.stock)
+            .load_only(
+                offers_models.Stock.id,
+                offers_models.Stock.quantity,
+                offers_models.Stock.offerId,
+                offers_models.Stock.beginningDatetime,
+                offers_models.Stock.bookingLimitDatetime,
+            )
+            .joinedload(offers_models.Stock.offer)
+            .load_only(
+                offers_models.Offer.id,
+                offers_models.Offer.name,
+                offers_models.Offer.isDuo,
+                offers_models.Offer.subcategoryId,
+                offers_models.Offer.withdrawalType,
+            )
+            .joinedload(offers_models.Offer.offererAddress)
+            .load_only()
+            .joinedload(offerers_models.OffererAddress.address)
+            .load_only(geography_models.Address.timezone),
+            sa_orm.joinedload(bookings_models.Booking.user).load_only(
+                users_models.User.id,
+                users_models.User.firstName,
+                users_models.User.lastName,
+                users_models.User.postalCode,
+            ),
+            sa_orm.joinedload(bookings_models.Booking.offerer, innerjoin=True).load_only(
+                offerers_models.Offerer.id, offerers_models.Offerer.name
+            ),
+            sa_orm.joinedload(bookings_models.Booking.venue, innerjoin=True).load_only(
+                # for name and link (build_pc_pro_venue_link)
+                offerers_models.Venue.id,
+                offerers_models.Venue.isSoftDeleted,
+                offerers_models.Venue.name,
+                offerers_models.Venue.publicName,
+            ),
+            sa_orm.joinedload(bookings_models.Booking.pricings)
+            .load_only(
+                finance_models.Pricing.amount, finance_models.Pricing.status, finance_models.Pricing.creationDate
+            )
+            .joinedload(finance_models.Pricing.cashflows)
+            .load_only(finance_models.Cashflow.batchId)
+            .joinedload(finance_models.Cashflow.batch)
+            .load_only(finance_models.CashflowBatch.label),
+            sa_orm.joinedload(bookings_models.Booking.incidents)
+            .load_only(finance_models.BookingFinanceIncident.incidentId)
+            .joinedload(finance_models.BookingFinanceIncident.incident)
+            .load_only(
+                finance_models.FinanceIncident.id,
+                finance_models.FinanceIncident.kind,
+                finance_models.FinanceIncident.status,
+            ),
+            sa_orm.joinedload(bookings_models.Booking.deposit).load_only(finance_models.Deposit.expirationDate),
+            sa_orm.joinedload(bookings_models.Booking.fraudulentBookingTag)
+            .joinedload(bookings_models.FraudulentBookingTag.author)
+            .load_only(
+                users_models.User.id,
+                users_models.User.firstName,
+                users_models.User.lastName,
+            ),
+        )
+    )
+
+
+def _get_individual_bookings(
+    form: booking_forms.GetIndividualBookingListForm,
+) -> list[bookings_models.Booking]:
+    base_query = _get_individual_bookings_query()
+
+    if form.is_free.data and len(form.is_free.data) == 1:
+        if form.is_free.data[0] == "true":
+            base_query = base_query.filter(bookings_models.Booking.amount == decimal.Decimal(0))
+        else:
+            base_query = base_query.filter(bookings_models.Booking.amount > decimal.Decimal(0))
+
+    if form.deposit.data and form.deposit.data != booking_forms.DEPOSIT_DEFAULT_VALUE:
+        base_query = base_query.join(finance_models.Deposit, bookings_models.Booking.deposit)
+        if form.deposit.data == "active":
+            base_query = base_query.filter(finance_models.Deposit.expirationDate > sa.func.now())
+        elif form.deposit.data == "expired":
+            base_query = base_query.filter(finance_models.Deposit.expirationDate <= sa.func.now())
+
+    if len(form.is_duo.data) == 1:
+        base_query = base_query.filter(bookings_models.Booking.quantity == form.is_duo.data[0])
+
+    if form.is_fraudulent.data and len(form.is_fraudulent.data) == 1:
+        if form.is_fraudulent.data[0] == "true":
+            base_query = base_query.filter(bookings_models.Booking.fraudulentBookingTag != None)  # noqa: E711
+        else:
+            base_query = base_query.filter(bookings_models.Booking.fraudulentBookingTag == None)  # noqa: E711
+
+    if form.category.data:
+        base_query = base_query.filter(
+            offers_models.Offer.subcategoryId.in_(
+                subcategory.id
+                for subcategory in subcategories.ALL_SUBCATEGORIES
+                if subcategory.category.id in form.category.data
+            )
+        )
+
+    if form.cancellation_reason.data:
+        base_query = base_query.filter(bookings_models.Booking.cancellationReason.in_(form.cancellation_reason.data))
+
+    or_filters = []
+    if form.q.data:
+        search_query = form.q.data
+
+        terms = search_utils.split_terms(search_query)
+        if all(BOOKING_TOKEN_RE.match(term) for term in terms):
+            or_filters += [bookings_models.Booking.token == term.upper() for term in terms]
+
+            if all(NO_DIGIT_RE.match(term) for term in terms):
+                flash(
+                    Markup(
+                        "Le critère de recherche « {search_query} » peut correspondre à un nom. Cependant, la recherche "
+                        "n'a porté que sur les codes contremarques afin de répondre rapidement. Veuillez inclure prénom et "
+                        "nom dans le cas d'un nom de 6 lettres."
+                    ).format(search_query=search_query),
+                    "info",
+                )
+
+    base_query = booking_helpers.get_filtered_booking_query(
+        base_query=base_query,
+        form=form,
+        stock_class=offers_models.Stock,
+        booking_class=bookings_models.Booking,
+        search_by_email=True,
+        id_filters=[
+            bookings_models.Booking.id,
+            offers_models.Offer.id,
+            offers_models.Stock.id,
+            users_models.User.id,
+        ],
+        name_filters=[
+            offers_models.Offer.name,
+        ],
+        or_filters=or_filters,
+    )
+    return base_query.all()
+
+
+def _render_individual_bookings(bookings_ids: list[int] | None = None) -> response_utils.BackofficeResponse:
+    rows = []
+    connect_as = {}
+    if bookings_ids:
+        query = _get_individual_bookings_query()
+        rows = query.filter(bookings_models.Booking.id.in_(bookings_ids)).all()
+        for booking in rows:
+            offer = booking.stock.offer
+            connect_as[booking.id] = get_connect_as(
+                object_id=offer.id,
+                object_type="offer",
+                pc_pro_path=urls.build_pc_pro_offer_path(offer),
+            )
+    return render_template(
+        "individual_bookings/list_rows.html",
+        connect_as=connect_as,
+        rows=rows,
+    )
+
+
+@individual_bookings_blueprint.route("", methods=["GET"])
+def list_individual_bookings() -> response_utils.BackofficeResponse:
+    form = booking_forms.GetIndividualBookingListForm(formdata=request_utils.get_query_params())
+    if not form.validate():
+        return render_template("individual_bookings/list.html", rows=[], form=form), 400
+
+    if form.is_empty():
+        # Empty results when no filter is set
+        return render_template("individual_bookings/list.html", rows=[], form=form)
+
+    bookings = _get_individual_bookings(form)
+
+    pro_visualisation_link = f"{settings.PRO_URL}/reservations{form.pro_view_args}" if form.pro_view_args else ""
+
+    bookings = search_utils.limit_rows(
+        bookings,
+        form.limit.data,
+        sort_key=lambda booking: (
+            (booking.stock.beginningDatetime or booking.dateUsed or datetime.datetime.max),
+            booking.dateCreated,
+        ),
+        sort_reverse=True,
+    )
+
+    autocomplete.prefill_offerers_choices(form.offerer)
+    autocomplete.prefill_venues_choices(form.venue)
+    autocomplete.prefill_cashflow_batch_choices(form.cashflow_batches)
+
+    connect_as = {}
+
+    for booking in bookings:
+        offer = booking.stock.offer
+        connect_as[booking.id] = get_connect_as(
+            object_id=offer.id,
+            object_type="offer",
+            pc_pro_path=urls.build_pc_pro_offer_path(offer),
+        )
+
+    return render_template(
+        "individual_bookings/list.html",
+        rows=bookings,
+        form=form,
+        connect_as=connect_as,
+        mark_as_used_booking_form=empty_forms.EmptyForm(),
+        cancel_booking_form=booking_forms.CancelIndividualBookingForm(),
+        pro_visualisation_link=pro_visualisation_link,
+    )
+
+
+@individual_bookings_blueprint.route("/download-csv", methods=["GET"])
+def get_individual_booking_csv_download() -> response_utils.BackofficeResponse:
+    form = booking_forms.GetDownloadBookingsForm(formdata=request_utils.get_query_params())
+    if not form.validate():
+        raise BadRequest()
+
+    export_data = bookings_exports.get_export(
+        pro_user_id=current_user.id,
+        booking_period=typing.cast(tuple[datetime.date, datetime.date], form.from_to_date.data),
+        venue_ids=[form.venue.data],
+        export_type=bookings_models.BookingExportType.CSV,
+    )
+    buffer = BytesIO(typing.cast(str, export_data).encode("utf-8-sig"))
+    return send_file(buffer, as_attachment=True, download_name="reservations_pass_culture.csv", mimetype="text/csv")
+
+
+@individual_bookings_blueprint.route("/download-xlsx", methods=["GET"])
+def get_individual_booking_xlsx_download() -> response_utils.BackofficeResponse:
+    form = booking_forms.GetDownloadBookingsForm(formdata=request_utils.get_query_params())
+    if not form.validate():
+        raise BadRequest()
+
+    export_data = bookings_exports.get_export(
+        pro_user_id=current_user.id,
+        booking_period=typing.cast(tuple[datetime.date, datetime.date], form.from_to_date.data),
+        venue_ids=[form.venue.data],
+        export_type=bookings_models.BookingExportType.EXCEL,
+    )
+    buffer = BytesIO(typing.cast(bytes, export_data))
+    return send_file(
+        buffer,
+        as_attachment=True,
+        download_name="reservations_pass_culture.xlsx",
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+def _get_booking_query_for_validation() -> sa_orm.Query:
+    return (
+        db.session.query(bookings_models.Booking)
+        .options(sa_orm.joinedload(bookings_models.Booking.user).selectinload(users_models.User.achievements))
+        .options(sa_orm.joinedload(bookings_models.Booking.stock).joinedload(offers_models.Stock.offer))
+    )
+
+
+@individual_bookings_blueprint.route("/<int:booking_id>/mark-as-used", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_BOOKINGS)
+def mark_booking_as_used(booking_id: int) -> response_utils.BackofficeResponse:
+    booking = _get_booking_query_for_validation().filter_by(id=booking_id).one_or_none()
+    if not booking:
+        raise NotFound()
+    _batch_validate_bookings([booking])
+
+    return request_utils.redirect_if_not_htmx(
+        route=url_for("backoffice.individual_bookings.get_individual_booking", booking_id=booking_id),
+        render_function=partial(_render_individual_bookings, [booking_id]),
+    )
+
+
+@individual_bookings_blueprint.route("/<int:booking_id>/cancel", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_BOOKINGS)
+def mark_booking_as_cancelled(booking_id: int) -> response_utils.BackofficeResponse:
+    booking = (
+        db.session.query(bookings_models.Booking)
+        .filter_by(id=booking_id)
+        .options(
+            sa_orm.joinedload(bookings_models.Booking.stock)
+            .load_only(offers_models.Stock.id)
+            .joinedload(offers_models.Stock.offer)
+            .load_only(offers_models.Offer.id)
+            .joinedload(offers_models.Offer.offererAddress)
+            .load_only(offerers_models.OffererAddress.label)
+            .joinedload(offerers_models.OffererAddress.address)
+            .load_only(
+                geography_models.Address.street, geography_models.Address.postalCode, geography_models.Address.city
+            )
+        )
+        .one_or_none()
+    )
+
+    if not booking:
+        raise NotFound()
+
+    form = booking_forms.CancelIndividualBookingForm()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.redirect_if_not_htmx(
+            route=url_for("backoffice.individual_bookings.get_individual_booking", booking_id=booking_id),
+            render_function=_render_individual_bookings,
+        )
+
+    _batch_cancel_bookings([booking], bookings_models.BookingCancellationReasons(form.reason.data))
+
+    return request_utils.redirect_if_not_htmx(
+        route=url_for("backoffice.individual_bookings.get_individual_booking", booking_id=booking_id),
+        render_function=partial(_render_individual_bookings, [booking_id]),
+    )
+
+
+@individual_bookings_blueprint.route("/batch-validate", methods=["GET"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_BOOKINGS)
+def get_batch_validate_individual_bookings_form() -> response_utils.BackofficeResponse:
+    form = empty_forms.BatchForm(request.args)
+    return render_template(
+        "components/dynamic/modal_form.html",
+        target_id="#booking-table",
+        form=form,
+        dst=url_for("backoffice.individual_bookings.batch_validate_individual_bookings"),
+        div_id="batch-validate-booking-modal",
+        title="Voulez-vous vraiment valider les réservations ?",
+        button_text="Valider les réservations",
+    )
+
+
+@individual_bookings_blueprint.route("/batch-validate", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_BOOKINGS)
+def batch_validate_individual_bookings() -> response_utils.BackofficeResponse:
+    form = empty_forms.BatchForm()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return _render_individual_bookings()
+
+    bookings = _get_booking_query_for_validation().filter(bookings_models.Booking.id.in_(form.object_ids_list)).all()
+    _batch_validate_bookings(bookings)
+
+    return _render_individual_bookings(form.object_ids_list)
+
+
+@individual_bookings_blueprint.route("/batch-cancel", methods=["GET"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_BOOKINGS)
+def get_batch_cancel_individual_bookings_form() -> response_utils.BackofficeResponse:
+    form = booking_forms.BatchCancelIndividualBookingsForm(request.args)
+    return render_template(
+        "components/dynamic/modal_form.html",
+        target_id="#booking-table",
+        form=form,
+        dst=url_for("backoffice.individual_bookings.batch_cancel_individual_bookings"),
+        div_id="batch-cancel-booking-modal",
+        title="Annuler les réservations",
+        button_text="Annuler les réservations",
+    )
+
+
+@individual_bookings_blueprint.route("/batch-cancel", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_BOOKINGS)
+def batch_cancel_individual_bookings() -> response_utils.BackofficeResponse:
+    form = booking_forms.BatchCancelIndividualBookingsForm()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return _render_individual_bookings()
+
+    bookings = (
+        db.session.query(bookings_models.Booking).filter(bookings_models.Booking.id.in_(form.object_ids_list)).all()
+    )
+    _batch_cancel_bookings(bookings, bookings_models.BookingCancellationReasons(form.reason.data))
+
+    return _render_individual_bookings(form.object_ids_list)
+
+
+def _batch_validate_bookings(bookings: list[bookings_models.Booking]) -> None:
+    error_dict = defaultdict(list)
+    success_count = 0
+
+    for booking in bookings:
+        with atomic():
+            token = booking.token
+            try:
+                if booking.status == bookings_models.BookingStatus.CANCELLED:
+                    bookings_api.mark_as_used_with_uncancelling(
+                        booking, bookings_models.BookingValidationAuthorType.BACKOFFICE
+                    )
+                else:
+                    bookings_api.mark_as_used(booking, bookings_models.BookingValidationAuthorType.BACKOFFICE)
+                success_count += 1
+            except (
+                bookings_exceptions.BookingIsAlreadyUsed,
+                bookings_exceptions.BookingIsAlreadyRefunded,
+                bookings_exceptions.BookingDepositCreditExpired,
+                bookings_exceptions.BookingIsLinkedToValidatedFinanceIncident,
+            ) as exc:
+                error_dict[exc.__class__.__name__].append(token)
+                mark_transaction_as_invalid()
+            except sa_exc.InternalError as exc:
+                if exc.orig and "tooManyBookings" in str(exc.orig):
+                    error_dict["tooManyBookings"].append(token)
+                elif exc.orig and "insufficientFunds" in str(exc.orig):
+                    error_dict["insufficientFunds"].append(token)
+                else:
+                    flash(
+                        Markup(
+                            "Une erreur s'est produite pour la réservation (<a class='link-primary' href='{url}'>{token}</a>) : {message}"
+                        ).format(
+                            token=token,
+                            url=url_for(
+                                "backoffice.individual_bookings.list_individual_bookings",
+                                q=token,
+                            ),
+                            message=str(exc) or exc.__class__.__name__,
+                        ),
+                        "warning",
+                    )
+                mark_transaction_as_invalid()
+            except Exception as exc:
+                flash(
+                    Markup(
+                        "Une erreur s'est produite pour la réservation (<a class='link-primary' href='{url}'>{token}</a>) : {message}"
+                    ).format(
+                        token=token,
+                        url=url_for(
+                            "backoffice.individual_bookings.list_individual_bookings",
+                            q=token,
+                        ),
+                        message=str(exc) or exc.__class__.__name__,
+                    ),
+                    "warning",
+                )
+                mark_transaction_as_invalid()
+
+    _flash_success_and_error_messages(success_count, error_dict, True)
+
+
+def _batch_cancel_bookings(
+    bookings: list[bookings_models.Booking], reason: bookings_models.BookingCancellationReasons
+) -> None:
+    error_dict = defaultdict(list)
+    success_count = 0
+
+    for booking in bookings:
+        with atomic():
+            token = booking.token
+            try:
+                bookings_api.mark_as_cancelled(
+                    booking=booking,
+                    reason=reason,
+                    author_id=current_user.id,
+                )
+                success_count += 1
+            except (
+                bookings_exceptions.BookingIsAlreadyUsed,
+                bookings_exceptions.BookingIsAlreadyRefunded,
+                bookings_exceptions.BookingIsAlreadyCancelled,
+            ) as exc:
+                error_dict[exc.__class__.__name__].append(token)
+                mark_transaction_as_invalid()
+            except (
+                cgr_client.CGRAPIException,
+                cine_office_client.CineOfficeAPIException,
+                ems.EMSAPIException,
+            ) as exc:
+                logger.info(
+                    "API error for cancelling external booking, the booking will be cancelled unilaterally",
+                    extra={"booking_id": booking.id, "exc": str(exc)},
+                )
+                try:
+                    bookings_api.mark_as_cancelled(
+                        booking=booking,
+                        reason=reason,
+                        one_side_cancellation=True,
+                        author_id=current_user.id,
+                    )
+                    success_count += 1
+                except Exception as exception:
+                    mark_transaction_as_invalid()
+                    flash(
+                        Markup(
+                            "Une erreur s'est produite pour la réservation (<a class='link-primary' href='{url}'>{token}</a>) : {message}"
+                        ).format(
+                            token=token,
+                            url=url_for(
+                                "backoffice.individual_bookings.list_individual_bookings",
+                                q=token,
+                            ),
+                            message=str(exception) or exception.__class__.__name__,
+                        ),
+                        "warning",
+                    )
+            except Exception as exc:
+                mark_transaction_as_invalid()
+                flash(
+                    Markup(
+                        "Une erreur s'est produite pour la réservation (<a class='link-primary' href='{url}'>{token}</a>) : {message}"
+                    ).format(
+                        token=token,
+                        url=url_for(
+                            "backoffice.individual_bookings.list_individual_bookings",
+                            q=token,
+                        ),
+                        message=str(exc) or exc.__class__.__name__,
+                    ),
+                    "warning",
+                )
+
+    _flash_success_and_error_messages(success_count, error_dict, False)
+
+
+def _flash_success_and_error_messages(
+    success_count: int, error_dict: dict[str, list[str]], is_validating: bool
+) -> None:
+    if success_count > 0:
+        flash(
+            f"{success_count} {pluralize(success_count, 'réservation a', 'réservations ont')} été {'validée' if is_validating else 'annulée'}{pluralize(success_count)}",
+            "success",
+        )
+
+    if error_dict:
+        if success_count > 0:
+            error_text = Markup("Certaines réservations n'ont pas pu être {action} et ont été ignorées :<br> ").format(
+                action="validées" if is_validating else "annulées"
+            )
+        else:
+            error_text = Markup("Impossible {action} ces réservations : <br>").format(
+                action="de valider" if is_validating else "d'annuler"
+            )
+        for key, tokens in error_dict.items():
+            match key:
+                case "BookingIsAlreadyCancelled":
+                    error_text += _build_booking_error_str(
+                        tokens,
+                        f"réservation{pluralize(len(tokens))} déjà annulée{pluralize(len(tokens))}",
+                    )
+                case "BookingIsAlreadyUsed":
+                    error_text += _build_booking_error_str(
+                        tokens,
+                        f"réservation{pluralize(len(tokens))} déjà validée{pluralize(len(tokens))}",
+                    )
+                case "BookingIsAlreadyRefunded":
+                    error_text += _build_booking_error_str(
+                        tokens,
+                        f"réservation{pluralize(len(tokens))} déjà remboursée{pluralize(len(tokens))}",
+                    )
+                case "BookingIsLinkedToValidatedFinanceIncident":
+                    error_text += _build_booking_error_str(
+                        tokens,
+                        f"réservation{pluralize(len(tokens))} liée{pluralize(len(tokens))} à un ou plusieurs incidents finance validés",
+                    )
+                case "BookingDepositCreditExpired":
+                    error_text += _build_booking_error_str(
+                        tokens,
+                        f"réservation{pluralize(len(tokens))} dont le crédit associé est expiré",
+                    )
+                case "tooManyBookings":
+                    error_text += _build_booking_error_str(
+                        tokens,
+                        f"réservation{pluralize(len(tokens))} dont l'offre n'a plus assez de stock disponible",
+                    )
+                case "insufficientFunds":
+                    error_text += _build_booking_error_str(
+                        tokens,
+                        f"réservation{pluralize(len(tokens))} dont le crédit associé est insuffisant",
+                    )
+        flash(error_text, "warning")
+
+
+def _build_booking_error_str(tokens: list[str], message: str) -> str:
+    return Markup("- {count} {message} (<a class='link-primary' href='{url}'>{tokens}</a>)<br>").format(
+        count=len(tokens),
+        message=message,
+        url=url_for(
+            "backoffice.individual_bookings.list_individual_bookings",
+            q=", ".join(tokens),
+        ),
+        tokens=", ".join(tokens),
+    )
+
+
+@individual_bookings_blueprint.route("/batch-tag-fraudulent-form", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.PRO_FRAUD_ACTIONS)
+def get_batch_tag_fraudulent_bookings_form() -> response_utils.BackofficeResponse:
+    form = booking_forms.BatchTagFraudulentBookingsForms()
+    if form.object_ids.data:
+        tags_count = (
+            db.session.query(bookings_models.FraudulentBookingTag)
+            .filter(
+                bookings_models.FraudulentBookingTag.bookingId.in_(form.object_ids_list),
+            )
+            .count()
+        )
+
+        if tags_count == len(form.object_ids_list):
+            mark_transaction_as_invalid()
+            return render_template(
+                "components/dynamic/modal_empty_form.html",
+                messages=["Toutes les réservations sélectionnées sont déjà frauduleuses."],
+            )
+    return render_template(
+        "components/dynamic/modal_form.html",
+        target_id="#booking-table",
+        form=form,
+        dst=url_for("backoffice.individual_bookings.batch_tag_fraudulent_bookings"),
+        div_id="batch-tag-fraudulent-booking-modal",
+        title="Voulez-vous vraiment marquer ces réservations comme frauduleuses ?",
+        button_text="Marquer ces réservations comme frauduleuses",
+    )
+
+
+@individual_bookings_blueprint.route("/batch-tag-fraudulent", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.PRO_FRAUD_ACTIONS)
+def batch_tag_fraudulent_bookings() -> response_utils.BackofficeResponse:
+    form = booking_forms.BatchTagFraudulentBookingsForms()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.redirect_if_not_htmx(
+            route=url_for("backoffice.individual_bookings.list_individual_bookings"),
+            render_function=_render_individual_bookings,
+        )
+
+    booking_helpers.tag_bookings_as_fraudulent(bookings_ids=form.object_ids_list, send_emails=form.send_mails.data)
+
+    return request_utils.redirect_if_not_htmx(
+        route=url_for("backoffice.individual_bookings.get_individual_booking", booking_id=form.object_ids_list[0]),
+        render_function=partial(_render_individual_bookings, form.object_ids_list),
+    )
+
+
+@individual_bookings_blueprint.route("/batch-remove-fraudulent-form", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.PRO_FRAUD_ACTIONS)
+def get_batch_remove_fraudulent_booking_tag_form() -> response_utils.BackofficeResponse:
+    form = empty_forms.BatchForm()
+    if form.object_ids.data:
+        tags_count = (
+            db.session.query(bookings_models.FraudulentBookingTag)
+            .filter(
+                bookings_models.FraudulentBookingTag.bookingId.in_(form.object_ids_list),
+            )
+            .count()
+        )
+
+        if tags_count == 0:
+            mark_transaction_as_invalid()
+            return render_template(
+                "components/dynamic/modal_empty_form.html",
+                messages=["Aucune réservation sélectionnée n'a de marquage frauduleux."],
+            )
+    return render_template(
+        "components/dynamic/modal_form.html",
+        target_id="#booking-table",
+        form=form,
+        dst=url_for("backoffice.individual_bookings.batch_remove_fraudulent_booking_tag"),
+        div_id="batch-remove-fraudulent-booking-tag-modal",
+        title="Voulez-vous vraiment ne plus marquer ces réservations comme frauduleuses ?",
+        button_text="Supprimer le tag frauduleux de ces réservations",
+    )
+
+
+@individual_bookings_blueprint.route("/batch-remove-fraudulent", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.PRO_FRAUD_ACTIONS)
+def batch_remove_fraudulent_booking_tag() -> response_utils.BackofficeResponse:
+    form = empty_forms.BatchForm()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.redirect_if_not_htmx(
+            route=url_for("backoffice.individual_bookings.list_individual_bookings"),
+            render_function=_render_individual_bookings,
+        )
+
+    db.session.query(bookings_models.FraudulentBookingTag).filter(
+        bookings_models.FraudulentBookingTag.bookingId.in_(form.object_ids_list)
+    ).delete(synchronize_session=False)
+    db.session.flush()
+
+    return request_utils.redirect_if_not_htmx(
+        route=url_for("backoffice.individual_bookings.get_individual_booking", booking_id=form.object_ids_list[0]),
+        render_function=partial(_render_individual_bookings, form.object_ids_list),
+    )
+
+
+class BookingDetailsActionType(enum.StrEnum):
+    VALIDATE = enum.auto()
+    INVALIDATE = enum.auto()
+    CREATE_INCIDENT = enum.auto()
+    CREATE_COMMERCIAL_GESTURE = enum.auto()
+    MARK_FRAUDULENT = enum.auto()
+    MARK_NON_FRAUDULENT = enum.auto()
+    MOVE_BOOKING = enum.auto()
+
+
+def _get_booking_details_actions(booking: bookings_models.Booking) -> DetailsActions:
+    booking_details_actions = DetailsActions(BookingDetailsActionType)
+    if access_control.has_current_user_permission(perm_models.Permissions.MANAGE_BOOKINGS):
+        if booking.isCancelled:
+            booking_details_actions.add_action(BookingDetailsActionType.VALIDATE)
+        elif not booking.is_pending_reimbursement_or_reimbursed:
+            booking_details_actions.add_action(BookingDetailsActionType.INVALIDATE)
+    if access_control.has_current_user_permission(perm_models.Permissions.CREATE_INCIDENTS):
+        if booking.status == bookings_models.BookingStatus.REIMBURSED and finance_validation.check_incident_bookings(
+            [booking]
+        ):
+            booking_details_actions.add_action(BookingDetailsActionType.CREATE_INCIDENT)
+        if booking.status in (
+            bookings_models.BookingStatus.CANCELLED,
+            bookings_models.BookingStatus.REIMBURSED,
+        ) and finance_validation.check_commercial_gesture_bookings([booking]):
+            booking_details_actions.add_action(BookingDetailsActionType.CREATE_COMMERCIAL_GESTURE)
+    if access_control.has_current_user_permission(perm_models.Permissions.PRO_FRAUD_ACTIONS):
+        if booking.fraudulentBookingTag:
+            booking_details_actions.add_action(BookingDetailsActionType.MARK_NON_FRAUDULENT)
+        else:
+            booking_details_actions.add_action(BookingDetailsActionType.MARK_FRAUDULENT)
+    if (
+        access_control.has_current_user_permission(perm_models.Permissions.MOVE_BOOKING)
+        and booking.status
+        in (
+            bookings_models.BookingStatus.CONFIRMED,
+            bookings_models.BookingStatus.USED,
+        )
+        and not finance_repository.has_reimbursement(booking)
+    ):
+        booking_details_actions.add_action(BookingDetailsActionType.MOVE_BOOKING)
+
+    return booking_details_actions
+
+
+def _get_cancellation_step(
+    booking: bookings_models.Booking,
+    next_date: datetime.datetime | None,
+) -> dict | None:
+    if not booking.cancellationDate:
+        return None
+
+    if next_date and next_date < booking.cancellationDate:
+        return None
+
+    return {
+        "datetime": booking.cancellationDate,
+        "tooltip": template_filters.format_booking_cancellation(
+            booking.cancellationReason, booking.cancellationUser, use_html=False
+        ),
+        "icon": "x-circle",
+        "status": "error",
+        "text": "Réservation annulée",
+    }
+
+
+def _format_booking_history(booking: bookings_models.Booking) -> dict[str, typing.Any]:
+    is_passed = True
+
+    steps: list[dict[str, typing.Any]] = [
+        {
+            "datetime": booking.dateCreated,
+            "tooltip": "",
+            "icon": "check-circle",
+            "status": "success",
+            "text": "Réservation effectuée",
+        }
+    ]
+
+    if cancellation := _get_cancellation_step(booking, booking.cancellationLimitDate):
+        steps.append(cancellation)
+
+    if booking.cancellationLimitDate:
+        is_passed = booking.cancellationLimitDate < date_utils.get_naive_utc_now() and not cancellation
+    else:
+        is_passed = bool(booking.dateUsed and booking.dateUsed < date_utils.get_naive_utc_now() and not cancellation)
+
+    steps.append(
+        {
+            "datetime": booking.cancellationLimitDate if booking.cancellationLimitDate else booking.dateUsed,
+            "tooltip": "",
+            "icon": "check-circle" if is_passed else "clock",
+            "status": "success" if is_passed else "secondary",
+            "text": "Réservation confirmée",
+        }
+    )
+
+    if is_passed and (cancellation := _get_cancellation_step(booking, booking.dateUsed)):
+        steps.append(cancellation)
+
+    is_passed = bool(
+        is_passed and booking.dateUsed and booking.dateUsed < date_utils.get_naive_utc_now() and not cancellation
+    )
+
+    steps.append(
+        {
+            "datetime": booking.dateUsed,
+            "tooltip": "",
+            "icon": "check-circle" if is_passed else "clock",
+            "status": "success" if is_passed else "secondary",
+            "text": "Réservation consommée",
+        }
+    )
+
+    if is_passed and (cancellation := _get_cancellation_step(booking, booking.reimbursementDate)):
+        steps.append(cancellation)
+
+    is_passed = bool(
+        is_passed
+        and booking.reimbursementDate
+        and booking.reimbursementDate < date_utils.get_naive_utc_now()
+        and not cancellation
+    )
+
+    steps.append(
+        {
+            "datetime": booking.reimbursementDate,
+            "tooltip": "",
+            "icon": "check-circle" if is_passed else "clock",
+            "status": "success" if is_passed else "secondary",
+            "text": "Réservation remboursée",
+        }
+    )
+
+    passed_steps = len([s for s in steps if s["status"] != "secondary"])
+
+    progress = ((passed_steps - 1) / (len(steps) - 1)) * 100
+
+    history = {
+        "steps": steps,
+        "progress": progress,
+    }
+    return history
+
+
+@individual_bookings_blueprint.route("/<int:booking_id>", methods=["GET"])
+def get_individual_booking(booking_id: int) -> response_utils.BackofficeResponse:
+    booking = (
+        db.session.query(bookings_models.Booking)
+        .options(
+            sa_orm.joinedload(bookings_models.Booking.stock)
+            .load_only(
+                offers_models.Stock.quantity,
+                offers_models.Stock.offerId,
+                offers_models.Stock.beginningDatetime,
+                offers_models.Stock.bookingLimitDatetime,
+            )
+            .joinedload(offers_models.Stock.offer)
+            .load_only(
+                offers_models.Offer.id,
+                offers_models.Offer.name,
+                offers_models.Offer.isDuo,
+                offers_models.Offer.subcategoryId,
+                offers_models.Offer.withdrawalType,
+                offers_models.Offer.productId,
+            )
+            .joinedload(offers_models.Offer.offererAddress)
+            .joinedload(offerers_models.OffererAddress.address),
+            sa_orm.joinedload(bookings_models.Booking.fraudulentBookingTag).load_only(
+                bookings_models.FraudulentBookingTag.id
+            ),
+            sa_orm.joinedload(bookings_models.Booking.user).load_only(
+                users_models.User.id,
+                users_models.User.firstName,
+                users_models.User.lastName,
+                users_models.User.postalCode,
+            ),
+            sa_orm.joinedload(bookings_models.Booking.pricings)
+            .load_only(
+                finance_models.Pricing.amount, finance_models.Pricing.status, finance_models.Pricing.creationDate
+            )
+            .joinedload(finance_models.Pricing.cashflows)
+            .load_only(finance_models.Cashflow.batchId)
+            .joinedload(finance_models.Cashflow.batch)
+            .load_only(finance_models.CashflowBatch.label),
+            sa_orm.joinedload(bookings_models.Booking.venue).joinedload(offerers_models.Venue.managingOfferer),
+            sa_orm.joinedload(bookings_models.Booking.incidents),
+            sa_orm.joinedload(bookings_models.Booking.deposit),
+        )
+        .filter(bookings_models.Booking.id == booking_id)
+        .one_or_none()
+    )
+
+    if not booking:
+        raise NotFound()
+
+    actions = _get_booking_details_actions(booking)
+    forms = {}
+
+    if BookingDetailsActionType.VALIDATE in actions:
+        forms["mark_as_used_booking_form"] = empty_forms.EmptyForm()
+    elif BookingDetailsActionType.INVALIDATE in actions:
+        forms["cancel_booking_form"] = booking_forms.CancelIndividualBookingForm()
+    if BookingDetailsActionType.CREATE_INCIDENT in actions:
+        forms["create_incident_form"] = finance_forms.BookingOverPaymentIncidentForm()
+        forms["create_incident_form"].object_ids.data = booking_id
+    if BookingDetailsActionType.CREATE_COMMERCIAL_GESTURE in actions:
+        forms["create_commercial_gesture_form"] = finance_forms.CommercialGestureCreationForm()
+        forms["create_commercial_gesture_form"].object_ids.data = booking_id
+    if BookingDetailsActionType.MARK_FRAUDULENT in actions:
+        forms["mark_fraudulent_form"] = booking_forms.BatchTagFraudulentBookingsForms()
+        forms["mark_fraudulent_form"].object_ids.data = booking_id
+    elif BookingDetailsActionType.MARK_NON_FRAUDULENT in actions:
+        forms["mark_non_fraudulent_form"] = empty_forms.BatchForm()
+        forms["mark_non_fraudulent_form"].object_ids.data = booking_id
+    if BookingDetailsActionType.MOVE_BOOKING in actions:
+        forms["move_booking_form"] = booking_forms.MoveBookingForm()
+
+    connect_as = get_connect_as(
+        object_id=booking.stock.offer.id,
+        object_type="offer",
+        pc_pro_path=urls.build_pc_pro_offer_path(booking.stock.offer),
+    )
+
+    return render_template(
+        "individual_bookings/get.html",
+        booking=booking,
+        connect_as=connect_as,
+        allowed_actions=actions,
+        history=_format_booking_history(booking),
+        **forms,
+    )
+
+
+@individual_bookings_blueprint.route("/<int:booking_id>/move", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MOVE_BOOKING)
+def move_booking(booking_id: int) -> response_utils.BackofficeResponse:
+    redirect_url = url_for("backoffice.individual_bookings.get_individual_booking", booking_id=booking_id)
+
+    booking = (
+        db.session.query(bookings_models.Booking)
+        .filter(bookings_models.Booking.id == booking_id)
+        .options(sa_orm.joinedload(bookings_models.Booking.venue).load_only(offerers_models.Venue.bookingEmail))
+        .one_or_none()
+    )
+    if not booking:
+        raise NotFound()
+
+    form = booking_forms.MoveBookingForm()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.safe_redirect_back(request, redirect_url)
+
+    try:
+        bookings_api.move_booking(booking, int(form.venue.data[0]))
+    except bookings_exceptions.VenueIsNotActive:
+        flash("Le partenaire culturel sélectionné n'est pas actif", "warning")
+    except bookings_exceptions.BookingIsCancelled:
+        flash("Une réservation annulée ne peut pas être déplacée", "warning")
+    except bookings_exceptions.BookingIsAlreadyRefunded:
+        flash("Une réservation remboursée ne peut pas être déplacée", "warning")
+    else:
+        flash("La réservation a été transférée vers le nouveau partenaire culturel", "success")
+
+    return request_utils.safe_redirect_back(request, redirect_url)

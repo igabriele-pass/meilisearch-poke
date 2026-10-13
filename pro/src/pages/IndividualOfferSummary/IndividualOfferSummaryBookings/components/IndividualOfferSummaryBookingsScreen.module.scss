@@ -1,0 +1,14 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--size-spacing-l);
+  flex-wrap: wrap;
+  margin-bottom: var(--size-spacing-l);
+
+  &-title {
+    @include fonts.title2;
+  }
+}

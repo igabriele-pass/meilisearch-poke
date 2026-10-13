@@ -1,0 +1,43 @@
+import type { GetVenueResponseModel } from '@/apiClient/v1'
+import { getAccessibilityInfoFromVenue } from '@/commons/utils/getAccessibilityInfoFromVenue'
+import { humanizeSiret, unhumanizeRidet } from '@/commons/utils/siren'
+
+import type { VenueSettingsFormValues } from '../types'
+
+export const toFormValues = ({
+  venue,
+}: {
+  venue: GetVenueResponseModel
+}): VenueSettingsFormValues => {
+  const autoCompleteStreet = venue.location?.street
+    ? `${venue.location.street} `
+    : ''
+
+  return {
+    street: venue.location?.street ?? '',
+    postalCode: venue.location?.postalCode ?? '',
+    inseeCode: venue.location?.inseeCode ?? null,
+    city: venue.location?.city ?? '',
+    addressAutocomplete: `${autoCompleteStreet}${venue.location?.postalCode} ${venue.location?.city}`,
+    'search-addressAutocomplete': `${autoCompleteStreet}${venue.location?.postalCode} ${venue.location?.city}`,
+    coords: `${venue.location?.latitude}, ${venue.location?.longitude}`,
+    latitude: String(venue.location?.latitude ?? ''),
+    longitude: String(venue.location?.longitude ?? ''),
+    banId: venue.location?.banId ?? null,
+    manuallySetAddress: venue.location?.isManualEdition,
+    comment: venue.comment ?? '',
+    name: venue.name,
+    venueSiret: venue.pricingPoint?.id ?? '',
+    publicName: venue.publicName,
+    siret: venue.isCaledonian
+      ? unhumanizeRidet(venue.siret ?? '', false, false)
+      : humanizeSiret(venue.siret ?? ''),
+    withdrawalDetails: venue.withdrawalDetails ?? '',
+    isOpenToPublic: venue.isOpenToPublic.toString(),
+    activity: venue.activity as VenueSettingsFormValues['activity'], // Force is needed because of "GAMES_CENTRE" which is present in `DisplayableActivity`, but not in `ActivityOpenToPublic`
+    culturalDomains: venue.collectiveDomains.map((domain) => domain.name),
+    description: venue.description ?? '',
+    accessibility: getAccessibilityInfoFromVenue(venue).accessibility,
+    isAccessibilityAppliedOnAllOffers: false,
+  }
+}

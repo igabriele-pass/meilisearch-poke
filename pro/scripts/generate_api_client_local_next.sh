@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -e
+
+export PCAPI_HOST=${PCAPI_HOST:-"localhost:5001"}
+
+echo "Generating v1 (Pro) API client from http://${PCAPI_HOST}/pro/openapi.json..."
+./node_modules/.bin/openapi-ts -f config/openapi-ts.v1.config.ts
+
+echo "Generating adage API client from http://${PCAPI_HOST}/adage-iframe/openapi.json..."
+./node_modules/.bin/openapi-ts -f config/openapi-ts.adage.config.ts
+
+echo "Sanitizing enum keys..."
+node scripts/sanitize_enum_keys.js src/apiClient/v1/types.gen.ts src/apiClient/adage/types.gen.ts
+
+echo "Formatting generated index files..."
+node scripts/format_generated_index_exports.js src/apiClient/v1/index.ts src/apiClient/adage/index.ts
+
+echo "Done."

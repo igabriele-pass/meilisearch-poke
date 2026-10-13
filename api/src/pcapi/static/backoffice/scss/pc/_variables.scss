@@ -1,0 +1,217 @@
+// Bootstrap 5 requirements
+@import "../bootstrap/functions";
+@import "../bootstrap/variables";
+
+@font-face {
+    font-family: "Inter";
+    src: url("/static/backoffice/fonts/Inter-VariableFont_opsz,wght.ttf") format("truetype");
+}
+
+$purple: #320096;
+
+// scss-docs-start theme-color-variables
+$primary:   $purple;
+$secondary: $gray-600;
+$old-secondary: #320096;
+$success:   $green-700;
+$info:      $blue-700;
+$warning:   $yellow-800;
+$danger:    $red-700;
+$light:     $white;
+$dark:      $black;
+// scss-docs-end theme-color-variables
+
+// scss-docs-start border-radius-variables
+$border-radius:               0.5rem;
+$border-radius-sm:            $border-radius;
+$border-radius-lg:            1.5rem;
+$border-radius-xl:            $border-radius;
+$border-radius-2xl:           $border-radius;
+$border-radius-pill:          50rem;
+// scss-docs-end border-radius-variables
+
+// scss-docs-start theme-text-variables
+$primary-text-emphasis:   $purple-400;
+$secondary-text-emphasis: shade-color($secondary, 60%);
+$success-text-emphasis:   shade-color($success, 60%);
+$info-text-emphasis:      shade-color($info, 60%);
+$warning-text-emphasis:   shade-color($warning, 60%);
+$danger-text-emphasis:    shade-color($danger, 60%);
+$light-text-emphasis:     $gray-700;
+$dark-text-emphasis:      $gray-700;
+// scss-docs-end theme-text-variables
+
+// scss-docs-start theme-bg-subtle-variables
+$primary-bg-subtle:       #f3edff;
+$secondary-bg-subtle:     $gray-200;
+$success-bg-subtle:       $green-100;
+$info-bg-subtle:          $blue-100;
+$warning-bg-subtle:       $yellow-100;
+$danger-bg-subtle:        $red-100;
+$light-bg-subtle:         mix($gray-100, $white);
+$dark-bg-subtle:          $gray-400;
+// scss-docs-end theme-bg-subtle-variables
+
+// scss-docs-start theme-border-subtle-variables
+$primary-border-subtle:   $purple-400;
+$secondary-border-subtle: $gray-200;
+$success-border-subtle:   tint-color($success, 60%);
+$info-border-subtle:      tint-color($info, 60%);
+$warning-border-subtle:   tint-color($warning, 60%);
+$danger-border-subtle:    tint-color($danger, 60%);
+$light-border-subtle:     $gray-200;
+$dark-border-subtle:      $gray-500;
+// scss-docs-end theme-border-subtle-variables
+
+// merge with existing $theme-colors map
+$theme-colors: map-merge($theme-colors, (
+  "primary": $primary,
+  "secondary": $secondary,
+  "old-secondary": $old-secondary,
+  "success": $success,
+  "info": $info,
+  "warning": $warning,
+  "danger": $danger,
+  "light": $light,
+  "dark": $dark
+));
+
+// redefine color to match old theme
+$body-bg: $white;
+$link-color: $primary;
+$input-bg: $white;
+$form-select-bg: $white;
+$form-select-focus-border-color: rgba($primary, $focus-ring-opacity);
+$form-select-focus-box-shadow: 0 0 0 $form-select-focus-width rgba($primary, $focus-ring-opacity);
+$form-floating-height: 100%;
+$form-check-input-bg: $white;
+$form-check-input-checked-bg-color: $primary;
+$form-check-input-checked-border-color: $primary;
+$form-check-input-indeterminate-bg-color: $primary;
+$form-check-input-indeterminate-border-color: $primary;
+$link-hover-color: $primary;
+$pagination-bg: $white;
+$dropdown-bg: $white;
+$progress-bar-bg: $primary;
+$component-active-bg: $primary;
+$table-hover-bg: $gray-100;
+$table-border-color: $gray-200;
+
+// form shadow redefinition
+$focus-ring-blur:                   0;
+$focus-ring-width:                  .25rem;
+$focus-ring-opacity:                .25;
+$focus-ring-color:                  rgba($primary, $focus-ring-opacity);
+$focus-ring-box-shadow:             0 0 $focus-ring-blur $focus-ring-width $focus-ring-color;
+$form-switch-focus-color:           rgba($primary, .5);
+$input-focus-border-color:          tint-color($component-active-bg, 50%);
+$form-check-input-focus-border:     $input-focus-border-color;
+$form-check-input-focus-box-shadow: $focus-ring-box-shadow;
+$input-focus-box-shadow:            $focus-ring-box-shadow;
+$form-switch-focus-bg-image:        url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='-4 -4 8 8'><circle r='3' fill='#{$form-switch-focus-color}'/></svg>");
+
+// scss-docs-start headings-variables
+$headings-color:              $gray-700;
+$headings-font-weight:        $font-weight-medium;
+$headings-margin-bottom:      16px;
+// scss-docs-end headings-variables
+
+// stylelint-disable value-keyword-case
+$font-family-sans-serif:      "Inter";
+$font-family-monospace:       SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+// stylelint-enable value-keyword-case
+
+// scss-docs-start card-variables
+$card-bg:                           $white;
+$card-cap-bg:                       $card-bg;
+// scss-docs-end card-variables
+
+//drop down
+$dropdown-link-active-bg: inherited;
+$dropdown-link-active-color: inherited;
+
+//scss-docs-start tab management
+$nav-tabs-link-active-bg: $white;
+// scss-docs-end tag management
+
+// scss-docs-start nav-variables
+$nav-underline-gap:                 0;
+$nav-underline-link-active-color:   $primary;
+
+$nav-pills-link-active-color:       inherit;
+$nav-pills-link-active-bg:          $primary-bg-subtle;
+// scss-docs-end nav-variables
+
+$table-bg: inherit;
+
+// scss-docs-start alert-variables
+$alert-margin-bottom:           0;
+$alert-padding-y:               0.5rem;
+// scss-docs-end alert-variables
+
+$zindex-levels: map-merge($zindex-levels, (
+  4: 4,
+  5: 5
+));
+
+// scss-docs-start font-sizes
+$font-sizes: (
+  1: $h1-font-size,
+  2: $h2-font-size,
+  3: $h3-font-size,
+  4: $h4-font-size,
+  5: $h5-font-size,
+  6: $h6-font-size,
+  7: $font-size-base * 0.75
+);
+// scss-docs-end font-sizes
+
+// scss-docs-start badge-variables
+$badge-font-weight:                 $font-weight-normal;
+$badge-font-size:                   $font-size-base;
+$badge-padding-y:                   4px;
+$badge-padding-x:                   6px;
+$badge-border-radius:               4px;
+// scss-docs-end badge-variables
+
+// scss-docs-start box-shadow-variables
+$box-shadow-sm:               0px 0px 12px 0px #0000000D;
+// scss-docs-end box-shadow-variables
+
+// scss-docs-start border-variables
+$border-color:                #cbcdd2;
+// scss-docs-end border-variables
+
+// scss-docs-start modal-variables
+$modal-content-border-radius:       var(--#{$prefix}border-radius-sm);
+$modal-footer-border-width:         0;
+// scss-docs-end modal-variables
+
+// scss-doc-start pagination
+$pagination-active-color:           var(--#{$prefix}link-color);
+$pagination-active-bg:              $primary-bg-subtle;
+$pagination-active-border-color:    var(--#{$prefix}pagination-border-color);
+// scss-doc-start pagination
+
+// base values for p and m classes
+$spacers: (
+  0: 0,
+  1:  $spacer * .25,
+  2:  $spacer * .5,
+  3:  $spacer,
+  4:  $spacer * 1.5,
+  5:  $spacer * 3,
+  12: $spacer * .75,
+  32: $spacer * 2,
+  40: $spacer * 2.5,
+  56: $spacer * 3.5,
+);
+
+
+// scss-doc-start colors
+$purple-200: #F3EDFF;
+$purple-300: #C1A3FF;
+$purple-400: #6123DF;
+$purple-500: #320096;
+$purple-600: #25026C;
+// scss-doc-end colors

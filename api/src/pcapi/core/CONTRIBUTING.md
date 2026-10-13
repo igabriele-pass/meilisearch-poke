@@ -1,0 +1,132 @@
+# Package `core`
+
+Le code métier est segmenté entre différents sous-packages.
+
+Chaque sous-package peut contenir les fichiers suivants :
+- api.py : logiques métier et méthodes appelées par les points d'entrée de l'api (ex: les routes).
+- commands.py : méthodes appelée via une commande flask
+- models.py : définitions des entités
+- repository.py : méthodes qui accèdent à la base de données
+- validation.py : méthodes de validation des données
+
+## Les fichiers `models`
+
+### Standards
+
+- Chaque modèle hérite de `pcapi.models.pc_object.PcObject` et `pcapi.models.Model`
+- On définit l'attribut `__tablename__` explicitement
+- Chaque colonne est définie avec `mapped_column` et on précise le type avec `Mapped[str | None]` par exemple pour une colonne `String` ou `Text` nullable
+- On précise le champ de chaque colonne `nullable=True/False` explicitement
+- On suit cet ordre de déclaration dans le modèle :
+  - `__tablename__`
+  - colonnes
+  - `__table_args__`
+  - propriétés
+- Quand on définit une `hybrid_property`, on écrit une version compatible avec la PEP-484 : voir la doc SQLA [ici](https://docs.sqlalchemy.org/en/20/orm/extensions/hybrid.html#using-inplace-to-create-pep-484-compliant-hybrid-properties)
+- Dans les `relationship`, on précise `foreign_keys` explicitement et on utilise `back_populates` et non `backref` si nécessaire 
+
+## Les fichiers `repository`
+
+Ces modules contiennent des fonctions qui implémentent des _queries_ SQL Alchemy basées sur les _Models_
+SQL Alchemy définis dans les fichiers `models.py`.
+
+### Standards
+
+Ces fonctions doivent contenir uniquement des requêtes vers la base de données qui retournent soit des tuples de données
+"primitives" (e.g. une liste d'adresses email), soit des instances de modèles SQL Alchemy. On pourra aussi avoir des
+fonctions qui retournent des "morceaux" de queries, c'est-à-dire des fonctions (privées) qui construisent des queries
+qui ne sont pas déclenchées (i.e. qui n'ont pas de `.all()` ou `.first()`).
+On utilisera des indications de type dans les signatures des fonctions pour indiquer quelles sont les données attendues
+en entrée et en sortie.
+
+Par exemple :
+
+```python
+def get_offerer_by_offer_id(offer_id: int) -> Offerer | None:
+    return db.session.query(Offerer).join(Venue).join(Offer).filter_by(id=offer_id).first()
+```
+
+Ces fonctions ne doivent pas contenir :
+
+- Des notions relatives au `routing` (e.g. _status codes_ HTTP, verbes HTTP) ;
+- Des règles de gestion ;
+- Des appels à des web services.
+
+Note sur le typing de `db.session.query` :
+
+```python
+# offerer est bien typé Offerer ✅
+for offerer in db.session.query(Offerer):
+    ...
+
+# idem pour .first() / .one(), offerer est correctement typé ✅
+offerer = db.session.query(Offerer).first()
+
+# ici en revanche, name et siren sont typés Any 🥺
+for name, siren in db.session.query(Offerer.name, Offerer.siren):
+    ...
+
+# ajouter .tuples() pour avoir un typing correct ✅
+for name, siren in db.session.query(Offerer.name, Offerer.siren).tuples():
+    ...
+```
+
+### Tests
+
+Pour que les données ne persistent pas en base de données après un test, la fixture `db_session`
+est utilisée. Elle permet d'englober les requêtes à la base de données dans une transaction qui se rollback à la fin du test.
+
+On doit parfois utiliser la fixture `clean_database` si on ne veut pas englober les requêtes dans une transaction.
+La fixture se chargera de réinitialiser les données à la fin du test.
+
+Cet exemple illustre un cas où l'on veut tester un `rollback` :
+
+```python
+import pytest
+
+from pcapi.core.offerers import models as offerers_models
+from pcapi.models import db
+
+from tests import conftest
+
+
+@pytest.mark.usefixtures("db_session")
+def test_flush_inside_transaction():
+    venue_type = offerers_models.VenueType(label="Test")
+    db.session.add(venue_type)
+    db.session.flush()
+    venue_type_id = venue_type.id
+    db.session.rollback()
+    assert db.session.get(offerers_models.VenueType, venue_type_id) is not None  # the object is still present
+
+
+@conftest.clean_database
+def test_flush_does_not_commit():
+    venue_type = offerers_models.VenueType(label="Test")
+    db.session.add(venue_type)
+    db.session.flush()
+    venue_type_id = venue_type.id
+    db.session.rollback()
+    assert db.session.query(offerers_models.VenueType).first() is None  # the object is no longer present
+```
+
+
+## Les fichiers `commands`
+
+Ces fichiers contiennent des commandes que l'on peut appeler depuis l'extérieur. C'est le cas notamment des tâches récurrentes.
+
+Par exemple la commande :
+```python
+@blueprint.cli.command("price_finance_events")
+@cron_decorators.log_cron_with_transaction
+@cron_decorators.cron_require_feature(FeatureToggle.PRICE_FINANCE_EVENTS)
+def price_finance_events() -> None:
+    finance_api.price_events()
+```
+
+peut être appelée en lançant : `flask price_finance_events` depuis le pod console.
+
+
+Le décorateur `@log_cron_with_transaction` permet de logguer l'exécution des crons sous un format standard afin de profiter des outils de monitoring.
+
+Le décorateur `@cron_require_feature` permet de vérifier que la fonctionnalité est activée avant l'exécution. Il doit être place le plus proche de la signature de la fonction.

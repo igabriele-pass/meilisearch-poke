@@ -1,0 +1,34 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.no-results {
+  padding-bottom: var(--size-spacing-xxl);
+  text-align: center;
+
+  &-svg {
+    color: var(--color-icon-subtle);
+  }
+
+  .no-results-title {
+    @include fonts.title2;
+
+    margin: var(--size-spacing-xxxl) 0 var(--size-spacing-xxl) 0;
+  }
+}
+
+.offers-list {
+  padding-bottom: var(--size-spacing-xxl);
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-l);
+}
+
+.banner-container {
+  margin-top: var(--size-spacing-l);
+  margin-bottom: var(--size-spacing-xl);
+}
+
+.title {
+  @include fonts.title1;
+
+  overflow-wrap: anywhere;
+}

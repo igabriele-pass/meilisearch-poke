@@ -1,0 +1,116 @@
+import { Link } from 'react-router'
+
+import { type ListOffersOfferResponseModel, OfferStatus } from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import {
+  Events,
+  INDIVIDUAL_OFFERS_NAVIGATION_SOURCE,
+} from '@/commons/core/FirebaseEvents/constants'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { FORMAT_DD_MM_YYYY_HH_mm } from '@/commons/utils/date'
+import { getDepartmentCode } from '@/commons/utils/getDepartmentCode'
+import { pluralizeFr } from '@/commons/utils/pluralize'
+import { formatLocalTimeDateString } from '@/commons/utils/timezone'
+import { Tag } from '@/design-system/Tag/Tag'
+import fullErrorIcon from '@/icons/full-error.svg'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+import { Thumb } from '@/ui-kit/Thumb/Thumb'
+import { Tooltip } from '@/ui-kit/Tooltip/Tooltip'
+
+import styles from './OfferNameCell.module.scss'
+
+export interface OfferNameCellProps {
+  offer: ListOffersOfferResponseModel
+  offerLink: string
+}
+
+export const OfferNameCell = ({ offer, offerLink }: OfferNameCellProps) => {
+  const { logEvent } = useAnalytics()
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+
+  const logOfferNavigation = (source: INDIVIDUAL_OFFERS_NAVIGATION_SOURCE) => {
+    logEvent(Events.CLICKED_OFFER_FORM_NAVIGATION, {
+      used: source,
+      offerId: offer.id,
+    })
+  }
+
+  const getDateInformations = () => {
+    const startDatetime = offer.stocks[0]
+      ? offer.stocks[0].beginningDatetime
+      : undefined
+
+    const departmentCode = getDepartmentCode(offer, selectedPartnerVenue)
+
+    /* istanbul ignore next: DEBT, TO FIX */
+    if (!startDatetime || !departmentCode) {
+      return null
+    }
+
+    /* istanbul ignore next: DEBT, TO FIX */
+    const stockSize = offer.stocks.length
+    return stockSize === 1
+      ? formatLocalTimeDateString(
+          startDatetime,
+          departmentCode,
+          FORMAT_DD_MM_YYYY_HH_mm
+        )
+      : `${stockSize} ${pluralizeFr(stockSize, 'date', 'dates')}`
+  }
+
+  const numberOfSoldOutStocks = offer.stocks.filter(
+    (stock) => stock.remainingQuantity === 0
+  ).length
+
+  const shouldShowIndividualWarning =
+    numberOfSoldOutStocks > 0 && offer.status !== OfferStatus.SOLD_OUT
+
+  const onOfferClick = () => {
+    logOfferNavigation(INDIVIDUAL_OFFERS_NAVIGATION_SOURCE.TITLE_LINK)
+  }
+
+  return (
+    <div className={styles['title-column']}>
+      <Link
+        className={styles['title-column-with-thumb']}
+        to={offerLink}
+        onClick={onOfferClick}
+      >
+        <div className={styles['title-column-thumb']}>
+          <Thumb url={offer.thumbUrl} />
+        </div>
+        <div>
+          {offer.highlightRequests.length > 0 && (
+            <Tag label={offer.highlightRequests[0].name} />
+          )}
+          <p className={styles['title-column-name']}>{offer.name}</p>
+          {offer.isEvent && (
+            <div className={styles['stocks']}>
+              {getDateInformations()}
+              {shouldShowIndividualWarning && (
+                <Tooltip
+                  content={`${numberOfSoldOutStocks} ${pluralizeFr(numberOfSoldOutStocks, 'date épuisée', 'dates épuisées')}`}
+                >
+                  <button type="button" className={styles['sold-out-button']}>
+                    <SvgIcon
+                      className={styles['sold-out-icon']}
+                      src={fullErrorIcon}
+                      alt="Attention"
+                      width="16"
+                    />
+                  </button>
+                </Tooltip>
+              )}
+            </div>
+          )}
+          {offer.productIsbn && (
+            <div className={styles['isbn']} data-testid="offer-isbn">
+              {offer.productIsbn}
+            </div>
+          )}
+        </div>
+      </Link>
+    </div>
+  )
+}

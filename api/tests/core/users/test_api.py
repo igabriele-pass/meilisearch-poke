@@ -1,0 +1,2149 @@
+import dataclasses
+import datetime
+import logging
+from decimal import Decimal
+from unittest import mock
+
+import fakeredis
+import pytest
+import time_machine
+from dateutil.relativedelta import relativedelta
+from flask import current_app
+
+import pcapi.core.mails.testing as mails_testing
+from pcapi import settings
+from pcapi.core.bookings import api as bookings_api
+from pcapi.core.bookings import exceptions as bookings_exceptions
+from pcapi.core.bookings import factories as bookings_factories
+from pcapi.core.bookings import models as bookings_models
+from pcapi.core.bookings.models import BookingStatus
+from pcapi.core.categories import subcategories
+from pcapi.core.external.attributes.queue import REDIS_EMAIL_LIST_ATTRIBUTES_TO_UPDATE
+from pcapi.core.external.batch import testing as batch_testing
+from pcapi.core.finance import api as finance_api
+from pcapi.core.finance import factories as finance_factories
+from pcapi.core.finance import models as finance_models
+from pcapi.core.history import factories as history_factories
+from pcapi.core.history import models as history_models
+from pcapi.core.mails.transactional.brevo_template_ids import TransactionalEmail
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.offers import factories as offers_factories
+from pcapi.core.subscription import api as subscription_api
+from pcapi.core.subscription import factories as subscription_factories
+from pcapi.core.subscription import models as subscription_models
+from pcapi.core.subscription.dms import schemas as dms_schemas
+from pcapi.core.testing import assert_num_queries
+from pcapi.core.users import api as users_api
+from pcapi.core.users import constants as users_constants
+from pcapi.core.users import exceptions as users_exceptions
+from pcapi.core.users import factories as users_factories
+from pcapi.core.users import models as users_models
+from pcapi.core.users import testing as brevo_testing
+from pcapi.core.users.email import update as email_update
+from pcapi.models import db
+from pcapi.routes.native.v1.serialization import common_models
+from pcapi.routes.serialization import users as users_serialization
+from pcapi.utils import date as date_utils
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+def _datetime_within_last_5sec(when: datetime.datetime) -> bool:
+    return date_utils.get_naive_utc_now() - relativedelta(seconds=5) < when < date_utils.get_naive_utc_now()
+
+
+def _assert_user_action_history_as_expected(
+    action: history_models.ActionHistory,
+    user: users_models.User,
+    author: users_models.User,
+    actionType: history_models.ActionType,
+    reason: users_constants.SuspensionReason,
+    comment: str | None = None,
+):
+    assert action.user == user
+    assert action.authorUser == author
+    assert action.actionType == actionType
+    if reason:
+        assert action.extraData["reason"] == reason.value
+    else:
+        assert action.extraData == {}
+    assert action.comment == comment
+
+
+@pytest.mark.usefixtures("db_session")
+class CancelBeneficiaryBookingsOnSuspendAccountTest:
+    @pytest.mark.parametrize(
+        "reason,is_backoffice_action",
+        [
+            (users_constants.SuspensionReason.UPON_USER_REQUEST, False),
+            (users_constants.SuspensionReason.FRAUD_RESELL_PRODUCT, True),
+            (users_constants.SuspensionReason.FRAUD_SUSPICION, True),
+            (users_constants.SuspensionReason.FRAUD_USURPATION, True),
+        ],
+    )
+    def should_cancel_booking_when_the_offer_is_a_thing(self, reason, is_backoffice_action):
+        booking_thing = bookings_factories.BookingFactory(
+            stock__offer__subcategoryId=subcategories.CARTE_CINE_ILLIMITE.id,
+            status=BookingStatus.CONFIRMED,
+        )
+
+        author = users_factories.AdminFactory()
+
+        users_api.suspend_account(
+            booking_thing.user, reason=reason, actor=author, is_backoffice_action=is_backoffice_action
+        )
+
+        assert booking_thing.status is BookingStatus.CANCELLED
+
+    @pytest.mark.parametrize(
+        "reason", [users_constants.SuspensionReason.FRAUD_SUSPICION, users_constants.SuspensionReason.FRAUD_USURPATION]
+    )
+    def should_not_cancel_booking_on_suspicion_when_the_offer_is_an_event(self, reason):
+        booking_thing = bookings_factories.BookingFactory(stock=offers_factories.EventStockFactory())
+
+        author = users_factories.AdminFactory()
+
+        users_api.suspend_account(booking_thing.user, reason=reason, actor=author, is_backoffice_action=True)
+
+        assert booking_thing.status is BookingStatus.CONFIRMED
+
+    @pytest.mark.parametrize(
+        "reason,is_backoffice_action",
+        [
+            (users_constants.SuspensionReason.UPON_USER_REQUEST, False),
+            (users_constants.SuspensionReason.FRAUD_RESELL_PRODUCT, True),
+        ],
+    )
+    def should_cancel_booking_when_event_is_still_cancellable(self, reason, is_backoffice_action):
+        """
+        ---[        cancellable       ][         not cancellable        ]-->
+        ---|---------------------------|--------------------------------|-->
+        booking date         date cancellation limit                event date
+
+        -----------------|------------------------------------------------->
+                        now
+        """
+        in_the_past = date_utils.get_naive_utc_now() - relativedelta(days=1)
+        in_the_future = date_utils.get_naive_utc_now() + relativedelta(days=1)
+        booking_event = bookings_factories.BookingFactory(
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+            status=BookingStatus.CONFIRMED,
+            dateCreated=in_the_past,
+            cancellationLimitDate=in_the_future,
+        )
+
+        author = users_factories.AdminFactory()
+
+        users_api.suspend_account(
+            booking_event.user, reason=reason, actor=author, is_backoffice_action=is_backoffice_action
+        )
+
+        assert booking_event.status is BookingStatus.CANCELLED
+
+    def should_not_cancel_event_when_cancellation_limit_date_is_past(self):
+        """
+        ---[        cancellable       ][         not cancellable        ]-->
+        ---|---------------------------|--------------------------------|-->
+        booking date         date cancellation limit                event date
+
+        -------------------------------------------------|----------------->
+                                                        now
+        """
+        in_the_past = date_utils.get_naive_utc_now() - relativedelta(seconds=1)
+        further_in_the_past = date_utils.get_naive_utc_now() - relativedelta(days=3)
+        booking_event = bookings_factories.BookingFactory(
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+            status=BookingStatus.CONFIRMED,
+            dateCreated=further_in_the_past,
+            cancellationLimitDate=in_the_past,
+        )
+
+        author = users_factories.AdminFactory()
+        reason = users_constants.SuspensionReason.UPON_USER_REQUEST
+
+        users_api.suspend_account(booking_event.user, reason=reason, actor=author)
+
+        assert booking_event.status is BookingStatus.CONFIRMED
+
+    def test_should_not_crash_when_booking_already_canceled(self):
+        booking_thing = bookings_factories.BookingFactory(
+            stock__offer__subcategoryId=subcategories.CARTE_CINE_ILLIMITE.id,
+            status=BookingStatus.CONFIRMED,
+        )
+
+        with mock.patch("pcapi.core.bookings.validation.check_booking_can_be_cancelled") as can_cancel_booking_mock:
+            # if Ubble calls our webhook twice at the same time, a race condition can occur when
+            # both thread try to cancel the user bookings. the slower thread will raise the exception.
+            can_cancel_booking_mock.side_effect = bookings_exceptions.BookingIsAlreadyCancelled()
+            users_api.suspend_account(
+                booking_thing.user,
+                reason=users_constants.SuspensionReason.FRAUD_SUSPICION,
+                actor=None,
+            )
+
+        # assert no operation was done
+        assert booking_thing.status is BookingStatus.CONFIRMED
+
+
+@pytest.mark.usefixtures("db_session")
+class SuspendAccountTest:
+    def test_suspend_admin(self):
+        user = users_factories.AdminFactory()
+        users_factories.UserSessionFactory(user=user)
+        reason = users_constants.SuspensionReason.FRAUD_RESELL_PRODUCT
+        author = users_factories.AdminFactory()
+
+        users_api.suspend_account(user, reason=reason, actor=author, is_backoffice_action=True)
+
+        assert user.suspension_reason == reason
+        assert _datetime_within_last_5sec(user.suspension_date)
+        assert not user.isActive
+        assert not user.has_admin_role
+        assert not db.session.query(users_models.UserSession).filter_by(userId=user.id).first()
+        assert author.isActive
+
+        history = db.session.query(history_models.ActionHistory).filter_by(userId=user.id).all()
+        assert len(history) == 1
+        _assert_user_action_history_as_expected(
+            history[0], user, author, history_models.ActionType.USER_SUSPENDED, reason
+        )
+
+        assert len(brevo_testing.brevo_requests) == 1
+        assert brevo_testing.brevo_requests[0]["email"] == user.email
+        assert brevo_testing.brevo_requests[0]["action"] == "delete"
+
+    def test_suspend_beneficiary(self, clear_redis):
+        user = users_factories.BeneficiaryGrant18Factory()
+        users_factories.NativeUserSessionFactory(user=user)
+        cancellable_booking = bookings_factories.BookingFactory(user=user)
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        confirmed_booking = bookings_factories.BookingFactory(
+            user=user, cancellation_limit_date=yesterday, status=BookingStatus.CONFIRMED
+        )
+        used_booking = bookings_factories.UsedBookingFactory(user=user)
+        author = users_factories.AdminFactory()
+        reason = users_constants.SuspensionReason.FRAUD_RESELL_PRODUCT
+        comment = "Dossier n°12345"
+        old_password_hash = user.password
+
+        users_api.suspend_account(user, reason=reason, actor=author, comment=comment, is_backoffice_action=True)
+
+        db.session.refresh(user)
+
+        assert not user.isActive
+        assert user.password == old_password_hash
+        assert user.suspension_reason == reason
+        assert _datetime_within_last_5sec(user.suspension_date)
+
+        assert cancellable_booking.status is BookingStatus.CANCELLED
+        assert confirmed_booking.status is BookingStatus.CONFIRMED
+        assert used_booking.status is BookingStatus.USED
+        assert db.session.query(users_models.NativeUserSession).count() == 0
+
+        history = db.session.query(history_models.ActionHistory).filter_by(userId=user.id).all()
+        assert len(history) == 1
+        _assert_user_action_history_as_expected(
+            history[0], user, author, history_models.ActionType.USER_SUSPENDED, reason, comment
+        )
+
+        assert len(brevo_testing.brevo_requests) == 1
+        # delete suspended user contact
+        assert brevo_testing.brevo_requests[0]["email"] == user.email
+        assert brevo_testing.brevo_requests[0]["action"] == "delete"
+        # update venue attributes after booking is canceled
+        assert current_app.redis_client.smembers(REDIS_EMAIL_LIST_ATTRIBUTES_TO_UPDATE) == {
+            cancellable_booking.venue.bookingEmail
+        }
+
+    def test_suspend_pro(self):
+        booking = bookings_factories.BookingFactory()
+        pro = offerers_factories.UserOffererFactory(offerer=booking.offerer).user
+        author = users_factories.AdminFactory()
+        reason = users_constants.SuspensionReason.END_OF_CONTRACT
+
+        users_api.suspend_account(pro, reason=reason, actor=author, is_backoffice_action=True)
+
+        assert not pro.isActive
+        assert booking.status is BookingStatus.CONFIRMED  # not canceled
+
+        history = db.session.query(history_models.ActionHistory).filter_by(userId=pro.id).all()
+        assert len(history) == 1
+        _assert_user_action_history_as_expected(
+            history[0], pro, author, history_models.ActionType.USER_SUSPENDED, reason
+        )
+
+        assert len(brevo_testing.brevo_requests) == 1
+        assert brevo_testing.brevo_requests[0]["email"] == pro.email
+        assert brevo_testing.brevo_requests[0]["action"] == "delete"
+
+    def should_change_password_when_user_is_suspended_for_suspicious_login(self):
+        user = users_factories.UserFactory()
+        old_password_hash = user.password
+
+        users_api.suspend_account(
+            user, reason=users_constants.SuspensionReason.SUSPICIOUS_LOGIN_REPORTED_BY_USER, actor=user
+        )
+
+        assert user.password != old_password_hash
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            users_constants.SuspensionReason.FRAUD_SUSPICION,
+            users_constants.SuspensionReason.UPON_USER_REQUEST,
+            users_constants.SuspensionReason.SUSPENSION_FOR_INVESTIGATION_TEMP,
+            users_constants.SuspensionReason.FRAUD_USURPATION,
+        ],
+    )
+    def should_not_change_password_when_user_is_suspended_for_reason_other_than_suspicious_login(self, reason):
+        user = users_factories.UserFactory()
+        old_password_hash = user.password
+
+        users_api.suspend_account(user, reason=reason, actor=user)
+
+        assert user.password == old_password_hash
+
+
+class UnsuspendAccountTest:
+    def test_unsuspend_account(self):
+        user = users_factories.UserFactory(isActive=False)
+        author = users_factories.AdminFactory()
+
+        comment = "Confusion avec un homonyme"
+        users_api.unsuspend_account(user, author, comment=comment)
+
+        assert not user.suspension_reason
+        assert not user.suspension_date
+        assert user.isActive
+
+        history = db.session.query(history_models.ActionHistory).filter_by(userId=user.id).all()
+        assert len(history) == 1
+        _assert_user_action_history_as_expected(
+            history[0], user, author, history_models.ActionType.USER_UNSUSPENDED, reason=None, comment=comment
+        )
+
+        assert len(brevo_testing.brevo_requests) == 1
+        assert brevo_testing.brevo_requests[0]["email"] == user.email
+        assert len(brevo_testing.brevo_requests[0]["attributes"]) > 0
+
+    def should_send_reset_password_email_when_user_is_suspended_for_suspicious_login(self):
+        user = users_factories.UserFactory(isActive=False)
+        history_factories.SuspendedUserActionHistoryFactory(
+            user=user, reason=users_constants.SuspensionReason.SUSPICIOUS_LOGIN_REPORTED_BY_USER
+        )
+        author = users_factories.AdminFactory()
+
+        users_api.unsuspend_account(user, author)
+
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["template"] == dataclasses.asdict(
+            TransactionalEmail.NEW_PASSWORD_REQUEST_FOR_SUSPICIOUS_LOGIN.value
+        )
+        assert mails_testing.outbox[0]["params"]["RESET_PASSWORD_LINK"]
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
+            users_constants.SuspensionReason.FRAUD_SUSPICION,
+            users_constants.SuspensionReason.UPON_USER_REQUEST,
+            users_constants.SuspensionReason.SUSPENSION_FOR_INVESTIGATION_TEMP,
+            users_constants.SuspensionReason.FRAUD_FAKE_DOCUMENT,
+        ],
+    )
+    def should_not_send_reset_password_email_when_user_is_suspended_for_reason_other_than_suspicious_login(
+        self, reason
+    ):
+        user = users_factories.UserFactory(isActive=False)
+        history_factories.SuspendedUserActionHistoryFactory(user=user, reason=reason)
+        author = users_factories.AdminFactory()
+
+        users_api.unsuspend_account(user, author)
+
+        assert len(mails_testing.outbox) == 0
+
+
+@pytest.mark.usefixtures("db_session")
+class ChangeUserEmailTest:
+    old_email = "oldemail@mail.com"
+    new_email = "newemail@mail.com"
+    mock_redis_client = fakeredis.FakeStrictRedis()
+
+    def test_change_user_email(self):
+        # Given
+        user = users_factories.UserFactory(email=self.old_email, firstName="UniqueNameForEmailChangeTest")
+        users_factories.SingleSignOnFactory(user=user)
+        users_factories.UserSessionFactory(user=user)
+
+        # When
+        email_update.validate_email_update_request(user=user, author=user, new_email=self.new_email)
+
+        # Then
+        db.session.refresh(user)
+        assert user.email == self.new_email
+        assert db.session.query(users_models.User).filter_by(email=self.old_email).first() is None
+        assert db.session.query(users_models.UserSession).filter_by(userId=user.id).first() is None
+        assert db.session.query(users_models.SingleSignOn).filter_by(userId=user.id).first() is None
+
+        assert len(user.email_history) == 1
+
+        history = user.email_history[0]
+        assert history.oldEmail == self.old_email
+        assert history.newEmail == self.new_email
+        assert history.eventType == users_models.EmailHistoryEventTypeEnum.VALIDATION
+        assert history.author == user
+        assert history.id is not None
+
+    def test_change_user_email_new_email_already_existing(self):
+        # Given
+        user = users_factories.UserFactory(email=self.old_email, firstName="UniqueNameForEmailChangeTest")
+        users_factories.SingleSignOnFactory(user=user)
+        other_user = users_factories.UserFactory(email=self.new_email)
+
+        # When
+        with pytest.raises(users_exceptions.EmailExistsError):
+            email_update.validate_email_update_request(user=user, author=user, new_email=self.new_email)
+
+        # Then
+        db.session.refresh(user)
+        db.session.refresh(other_user)
+        assert user.email == "oldemail@mail.com"
+        assert other_user.email == self.new_email
+
+        single_sign_on = (
+            db.session.query(users_models.SingleSignOn)
+            .filter(users_models.SingleSignOn.userId == user.id)
+            .one_or_none()
+        )
+        assert single_sign_on is not None
+
+    def test_change_user_email_twice(self):
+        """
+        Test that when the function is called twice:
+            1. no error is raised
+            2. no email updated is performed (email history stays the
+               same)
+        Update has been done, no need to panic.
+        """
+
+        user = users_factories.UserFactory(email=self.old_email)
+        users_factories.UserSessionFactory(user=user)
+
+        # first call, email is updated as expected
+        email_update.validate_email_update_request(user=user, author=user, new_email=self.new_email)
+
+        db.session.refresh(user)
+        assert user.email == self.new_email
+
+        # second call, no error, no update
+        email_update.validate_email_update_request(user=user, author=user, new_email=self.new_email)
+        db.session.refresh(user)
+        assert user.email == self.new_email
+
+    def test_validating_email_updates_external_contact(self):
+        # Given
+        user = users_factories.UserFactory(email=self.old_email, firstName="UniqueNameForEmailChangeTest")
+        users_factories.UserSessionFactory(user=user)
+
+        # When
+        email_update.validate_email_update_request(user=user, author=user, new_email=self.new_email)
+
+        assert brevo_testing.brevo_requests == [
+            {
+                "email": self.old_email,
+                "attributes": {"EMAIL": self.new_email},
+                "emailBlacklisted": False,
+                "use_pro_subaccount": False,
+            }
+        ]
+
+
+class CreateBeneficiaryTest:
+    def test_with_eligible_user(self):
+        user = users_factories.UserFactory(roles=[])
+        fraud_check = subscription_factories.BeneficiaryFraudCheckFactory(
+            user=user, type=subscription_models.FraudCheckType.UBBLE, status=subscription_models.FraudCheckStatus.OK
+        )
+        user = subscription_api.activate_beneficiary_for_eligibility(
+            user, fraud_check.get_detailed_source(), users_models.EligibilityType.AGE18
+        )
+        assert user.has_beneficiary_role
+        assert len(user.deposits) == 1
+
+    def test_with_eligible_underage_user(self):
+        user = users_factories.UserFactory(
+            roles=[], validatedBirthDate=datetime.date.today() - relativedelta(years=16, months=4)
+        )
+        fraud_check = subscription_factories.BeneficiaryFraudCheckFactory(
+            user=user,
+            type=subscription_models.FraudCheckType.EDUCONNECT,
+            status=subscription_models.FraudCheckStatus.OK,
+            eligibilityType=users_models.EligibilityType.UNDERAGE,
+            resultContent=subscription_factories.EduconnectContentFactory(
+                registration_datetime=date_utils.get_naive_utc_now()
+            ),
+        )
+        user = subscription_api.activate_beneficiary_for_eligibility(
+            user, fraud_check.get_detailed_source(), users_models.EligibilityType.UNDERAGE
+        )
+        assert user.has_underage_beneficiary_role
+        assert len(user.deposits) == 1
+        assert user.has_active_deposit
+        assert user.deposit.amount == 30
+
+    def test_external_users_updated(self):
+        user = users_factories.UserFactory(roles=[])
+        fraud_check = subscription_factories.BeneficiaryFraudCheckFactory(
+            user=user, type=subscription_models.FraudCheckType.UBBLE, status=subscription_models.FraudCheckStatus.OK
+        )
+        subscription_api.activate_beneficiary_for_eligibility(
+            user, fraud_check.get_detailed_source(), users_models.EligibilityType.AGE18
+        )
+
+        assert len(batch_testing.requests) == 3
+        assert len(brevo_testing.brevo_requests) == 1
+
+        trigger_event_log = batch_testing.requests[2]
+        assert trigger_event_log["user_id"] == user.id
+        assert trigger_event_log["event_name"] == "user_deposit_activated"
+        assert trigger_event_log["event_payload"] == {"deposit_type": "GRANT_18", "deposit_amount": 300}
+
+    def test_15yo_that_started_at_14_is_activated(self):
+        fifteen_years_and_one_week_ago = date_utils.get_naive_utc_now() - relativedelta(years=15, weeks=1)
+        one_month_ago = date_utils.get_naive_utc_now() - relativedelta(months=1)
+
+        fifteen_year_old = users_factories.UserFactory(validatedBirthDate=fifteen_years_and_one_week_ago)
+
+        fraud_check = subscription_factories.BeneficiaryFraudCheckFactory(
+            user=fifteen_year_old,
+            type=subscription_models.FraudCheckType.EDUCONNECT,
+            status=subscription_models.FraudCheckStatus.OK,
+            eligibilityType=users_models.EligibilityType.UNDERAGE,
+            resultContent=subscription_factories.EduconnectContentFactory(registration_datetime=one_month_ago),
+        )
+
+        subscription_api.activate_beneficiary_for_eligibility(
+            fifteen_year_old, fraud_check.get_detailed_source(), users_models.EligibilityType.UNDERAGE
+        )
+
+        assert fifteen_year_old.is_beneficiary
+        assert fifteen_year_old.deposit.amount == 20
+
+    def test_user_ex_underage_gets_remaining_amount_transferred_even_if_expired(self):
+        # No time_travel for user creation here, because there is a call to get_wallet_ballance (which is a database function) in activate_beneficiary_for_eligibility.
+        # The database has its own time, ignoring all time_travel shenanigans.
+        a_year_go = date_utils.get_naive_utc_now() - relativedelta(years=1)
+        user = users_factories.BeneficiaryFactory(
+            validatedBirthDate=a_year_go - relativedelta(years=17),
+            roles=[users_models.UserRole.UNDERAGE_BENEFICIARY],
+            dateCreated=a_year_go,
+            deposit__type=finance_models.DepositType.GRANT_15_17,
+            deposit__amount=30,
+            deposit__dateCreated=a_year_go,
+        )
+        bookings_factories.BookingFactory(user=user, amount=20)
+
+        # Mock an expired deposit
+        user.deposit.expirationDate = date_utils.get_naive_utc_now() - relativedelta(days=1)
+
+        # Finish steps for 18yo user
+        id_fraud_check = subscription_factories.BeneficiaryFraudCheckFactory(
+            user=user, status=subscription_models.FraudCheckStatus.OK, type=subscription_models.FraudCheckType.UBBLE
+        )
+        user.phoneNumber = "+33612345678"
+        subscription_factories.HonorStatementFraudCheckFactory(user=user)
+
+        subscription_api.activate_beneficiary_for_eligibility(
+            user, id_fraud_check.get_detailed_source(), users_models.EligibilityType.AGE17_18
+        )
+
+        assert user.deposit.type == finance_models.DepositType.GRANT_17_18
+        assert user.deposit.amount == 150 + 30
+        assert len(user.deposit.bookings) == 1  # The booking was transferred
+
+
+@pytest.mark.usefixtures("db_session")
+class UpdateUserInfoTest:
+    def test_update_user_info(self):
+        user = users_factories.UserFactory(email="initial@example.com")
+
+        users_api.update_user_info(user, author=user, first_name="New", last_name="Name")
+        user = db.session.query(users_models.User).one()
+        assert user.email == "initial@example.com"
+        assert user.full_name == "New Name"
+
+        users_api.update_user_info(user, author=user, email="new@example.com")
+        user = db.session.query(users_models.User).one()
+        assert user.email == "new@example.com"
+        assert user.full_name == "New Name"
+
+    def test_update_user_info_sanitizes_email(self):
+        user = users_factories.UserFactory(email="initial@example.com")
+
+        users_api.update_user_info(user, author=user, email="  NEW@example.com   ")
+        user = db.session.query(users_models.User).one()
+        assert user.email == "new@example.com"
+
+    def test_update_user_info_returns_modified_info(self):
+        user = users_factories.UserFactory(firstName="Noël", lastName="Flantier")
+
+        modified_info = users_api.update_user_info(
+            user, author=user, first_name="Hubert", last_name="Bonisseur de la Bath", commit=False
+        )
+        assert modified_info.to_dict() == {
+            "firstName": {"new_info": "Hubert", "old_info": "Noël"},
+            "lastName": {"new_info": "Bonisseur de la Bath", "old_info": "Flantier"},
+        }
+
+    def test_update_user_info_also_updates_underage_deposit_expiration_date(self):
+        # Given a user with an underage deposit
+        underaged_beneficiary_birthday = date_utils.get_naive_utc_now() - relativedelta(years=17, months=4)
+        underaged_beneficiary_expiration_date = underaged_beneficiary_birthday + relativedelta(
+            years=21, hour=0, minute=0, second=0, microsecond=0
+        )
+        user = users_factories.BeneficiaryFactory(age=17)
+        users_api.update_user_info(user, author=user, validated_birth_date=underaged_beneficiary_birthday)
+
+        assert user.deposits[0].expirationDate == underaged_beneficiary_expiration_date
+
+    def test_update_user_info_also_updates_deposit_expiration_date(self):
+        user = users_factories.BeneficiaryFactory()
+        previous_deposit_expiration_date = user.deposit.expirationDate
+        users_api.update_user_info(user, author=user, validated_birth_date=user.birth_date - relativedelta(years=1))
+
+        new_deposit_expiration_date = user.deposit.expirationDate
+        assert new_deposit_expiration_date == previous_deposit_expiration_date - relativedelta(years=1)
+
+
+@pytest.mark.usefixtures("db_session")
+class DomainsCreditTest:
+    def test_get_domains_credit_v1(self):
+        user = users_factories.BeneficiaryFactory(
+            deposit__version=1, deposit__amount=500, deposit__type=finance_models.DepositType.GRANT_18
+        )
+
+        # booking only in all domains
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=50,
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=5,
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )
+
+        # booking in digital domain
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=80,
+            stock__offer__subcategoryId=subcategories.JEU_EN_LIGNE.id,
+            stock__offer__url="http://on.line",
+        )
+
+        # booking in physical domain
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=150,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )
+
+        # cancelled booking
+        bookings_factories.CancelledBookingFactory(
+            user=user,
+            amount=150,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )
+
+        assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+            all=users_models.Credit(initial=Decimal(500), remaining=Decimal(215)),
+            digital=users_models.Credit(initial=Decimal(200), remaining=Decimal(120)),
+            physical=users_models.Credit(initial=Decimal(200), remaining=Decimal(50)),
+        )
+        assert user.wallet_balance == Decimal(215)
+
+    def test_get_domains_credit(self):
+        user = users_factories.BeneficiaryFactory(deposit__type=finance_models.DepositType.GRANT_18)
+
+        # booking in physical domain
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=250,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )
+
+        expected_wallet_balance = Decimal(50)
+        assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+            all=users_models.Credit(initial=Decimal(300), remaining=expected_wallet_balance),
+            digital=users_models.Credit(initial=Decimal(100), remaining=Decimal(50)),
+            physical=None,
+        )
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_credit_grant_17_18_digital_cap_v1(self):
+        with time_machine.travel(settings.DIGITAL_CAP_V2_DATETIME - relativedelta(minutes=1)):
+            user = users_factories.BeneficiaryFactory()
+
+        # booking in physical domain
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=50,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )
+
+        expected_wallet_balance = Decimal(100)
+        assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+            all=users_models.Credit(initial=Decimal(150), remaining=expected_wallet_balance),
+            digital=users_models.Credit(initial=Decimal(100), remaining=Decimal(100)),
+            physical=None,
+        )
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_credit_grant_17_18_digital_cap_v2(self):
+        with time_machine.travel(settings.DIGITAL_CAP_V2_DATETIME + relativedelta(minutes=1)):
+            user = users_factories.BeneficiaryFactory()
+
+        # booking in physical domain
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=50,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )
+
+        expected_wallet_balance = Decimal(100)
+        assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+            all=users_models.Credit(initial=Decimal(150), remaining=expected_wallet_balance),
+            digital=users_models.Credit(initial=Decimal(50), remaining=Decimal(50)),
+            physical=None,
+        )
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_credit_deposit_expired(self):
+        with time_machine.travel(settings.DIGITAL_CAP_V2_DATETIME):
+            user = users_factories.BeneficiaryFactory()
+        deposit_expiration_date = user.deposit.expirationDate
+        deposit_initial_amount = user.deposit.amount
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=deposit_initial_amount - 10,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )
+
+        with time_machine.travel(deposit_expiration_date):
+            assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+                all=users_models.Credit(initial=Decimal(deposit_initial_amount), remaining=Decimal(0)),
+                digital=users_models.Credit(initial=Decimal(50), remaining=Decimal(0)),
+                physical=None,
+            )
+
+    def test_get_domains_credit_deposit_expired_for_wallet_balance(self):
+        user = users_factories.BeneficiaryFactory()
+        bookings_factories.BookingFactory(
+            user=user,
+            amount=user.deposit.amount - 10,
+        )
+        user.deposit.expirationDate = date_utils.get_naive_utc_now() - datetime.timedelta(hours=1)
+
+        db.session.flush()
+
+        assert user.wallet_balance is None
+
+    def test_get_domains_credit_no_deposit(self):
+        user = users_factories.UserFactory()
+
+        assert not users_api.get_domains_credit(user)
+        assert user.wallet_balance is None
+
+    def test_get_domains_credit_ignores_incidents_that_are_neither_validated_nor_invoiced(self):
+        user = users_factories.BeneficiaryFactory(deposit__type=finance_models.DepositType.GRANT_18)
+        booking = bookings_factories.UsedBookingFactory(user=user, stock__price=Decimal(20))
+        finance_factories.IndividualBookingFinanceIncidentFactory(
+            booking=booking,
+            incident=finance_factories.FinanceIncidentFactory(status=finance_models.IncidentStatus.CANCELLED),
+            newTotalAmount=500,
+        )
+
+        expected_wallet_balance = Decimal(280)
+        assert users_api.get_domains_credit(user).all.remaining == expected_wallet_balance
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_credit_keeps_cents_of_partial_incident(self):
+        user = users_factories.BeneficiaryFactory(deposit__type=finance_models.DepositType.GRANT_18)
+        booking = bookings_factories.UsedBookingFactory(user=user, stock__price=Decimal(20))
+        finance_factories.IndividualBookingFinanceIncidentFactory(
+            booking=booking,
+            incident=finance_factories.FinanceIncidentFactory(status=finance_models.IncidentStatus.VALIDATED),
+            newTotalAmount=1234,
+        )
+
+        expected_wallet_balance = Decimal("287.66")
+        assert users_api.get_domains_credit(user).all.remaining == expected_wallet_balance
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_credit_counts_booking_with_several_incidents_once(self):
+        user = users_factories.BeneficiaryFactory(deposit__type=finance_models.DepositType.GRANT_18)
+        booking = bookings_factories.UsedBookingFactory(user=user, stock__price=Decimal(20))
+        finance_factories.IndividualBookingFinanceIncidentFactory(
+            booking=booking,
+            incident=finance_factories.FinanceIncidentFactory(status=finance_models.IncidentStatus.CANCELLED),
+            newTotalAmount=1500,
+        )
+        finance_factories.IndividualBookingFinanceIncidentFactory(
+            booking=booking,
+            incident=finance_factories.FinanceIncidentFactory(status=finance_models.IncidentStatus.VALIDATED),
+            newTotalAmount=1000,
+        )
+
+        expected_wallet_balance = Decimal(290)
+        assert users_api.get_domains_credit(user).all.remaining == expected_wallet_balance
+        assert user.wallet_balance == expected_wallet_balance
+
+    @staticmethod
+    def _price_booking(booking):
+        bookings_api.mark_as_used(
+            booking=booking,
+            validation_author_type=bookings_models.BookingValidationAuthorType.OFFERER,
+        )
+        finance_events = booking.finance_events
+        assert len(finance_events) == 1
+        finance_api.price_event(finance_events[0])
+
+    @staticmethod
+    def _price_incident(incident):
+        assert len(incident.booking_finance_incidents) == 1
+        booking_finance_incident = incident.booking_finance_incidents[0]
+        for finance_event in booking_finance_incident.finance_events:
+            finance_api.price_event(finance_event)
+
+    def test_get_domains_regular_credit_with_overpayments(self):
+        offerer = offerers_factories.OffererFactory(name="Association de coiffeurs", siren="853318959")
+        bank_account = finance_factories.BankAccountFactory(offerer=offerer)
+        venue = offerers_factories.VenueFactory(
+            pricing_point="self",
+            managingOfferer=offerer,
+            bank_account=bank_account,
+            siret="85331845900023",
+        )
+        author_user = users_factories.UserFactory()
+        user = users_factories.BeneficiaryGrant18Factory(
+            deposit__version=1, deposit__amount=500, deposit__type=finance_models.DepositType.GRANT_18
+        )
+
+        # booking1 (20€ → 20€) + booking2 (6€ → 0€) + booking3 (15€ → 10€) = 30€
+
+        booking1 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=4,
+            stock__price=Decimal("5.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 20€
+        self._price_booking(booking1)
+
+        # Booking to cancel totally
+        booking2 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=2,
+            stock__price=Decimal("3.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 6€ → 0€
+        self._price_booking(booking2)
+
+        # Booking to cancel partially
+        booking3 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=5,
+            stock__price=Decimal("3.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 15€ → 10€
+        self._price_booking(booking3)
+
+        # Mark all pricings as invoiced
+        cutoff = date_utils.get_naive_utc_now()
+        batch = finance_api.generate_cashflows(cutoff)
+        assert len(batch.cashflows) == 1
+        cashflow = batch.cashflows[0]
+        cashflow.status = finance_models.CashflowStatus.UNDER_REVIEW
+        db.session.add(cashflow)
+        db.session.flush()
+        invoice = finance_api._generate_invoice(
+            bank_account_id=bank_account.id, cashflow_ids=[c.id for c in batch.cashflows]
+        )
+        finance_api.validate_invoices([invoice.id])
+
+        # Create the finance incidents and validate them
+        #  - For booking2 → cancelled totally
+        incident2 = finance_api.create_overpayment_finance_incident(
+            bookings=[booking2],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("6.0"),
+        )
+        finance_api.validate_finance_overpayment_incident(
+            finance_incident=incident2,
+            force_debit_note=False,
+            author=author_user,
+        )
+        self._price_incident(incident2)
+
+        #  - For booking3 → cancelled partially: get back 5€
+        incident3 = finance_api.create_overpayment_finance_incident(
+            bookings=[booking3],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("5.0"),
+        )
+        finance_api.validate_finance_overpayment_incident(
+            finance_incident=incident3,
+            force_debit_note=False,
+            author=author_user,
+        )
+        self._price_incident(incident3)
+
+        expected_wallet_balance = Decimal(470)
+        assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+            all=users_models.Credit(initial=Decimal(500), remaining=expected_wallet_balance),
+            digital=users_models.Credit(initial=Decimal(200), remaining=Decimal(200)),
+            physical=users_models.Credit(initial=Decimal(200), remaining=Decimal(200)),
+        )
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_regular_credit_with_commercial_gestures(self):
+        offerer = offerers_factories.OffererFactory(name="Association de coiffeurs", siren="853318959")
+        bank_account = finance_factories.BankAccountFactory(offerer=offerer)
+        venue = offerers_factories.VenueFactory(
+            pricing_point="self",
+            managingOfferer=offerer,
+            bank_account=bank_account,
+            siret="85331845900023",
+        )
+        author_user = users_factories.UserFactory()
+        user = users_factories.BeneficiaryGrant18Factory(
+            deposit__version=1, deposit__amount=500, deposit__type=finance_models.DepositType.GRANT_18
+        )
+
+        # booking1 (20€ → 20€) + booking2 (6€ → 0€) + booking3 (15€ → 15€) = 35€
+
+        booking1 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=4,
+            stock__price=Decimal("5.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 20€
+        self._price_booking(booking1)
+
+        # Cancelled booking with commercial gesture
+        booking2 = bookings_factories.CancelledBookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=2,
+            stock__price=Decimal("3.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 0€
+
+        # Reimbursed booking with commercial gesture
+        booking3 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=5,
+            stock__price=Decimal("3.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 15€
+        self._price_booking(booking3)
+
+        # Mark all pricings as invoiced
+        cutoff = date_utils.get_naive_utc_now()
+        batch = finance_api.generate_cashflows(cutoff)
+        assert len(batch.cashflows) == 1
+        cashflow = batch.cashflows[0]
+        cashflow.status = finance_models.CashflowStatus.UNDER_REVIEW
+        db.session.add(cashflow)
+        db.session.flush()
+        invoice = finance_api._generate_invoice(
+            bank_account_id=bank_account.id, cashflow_ids=[c.id for c in batch.cashflows]
+        )
+        finance_api.validate_invoices([invoice.id])
+
+        # Create the finance incidents and validate them
+        # Overpayments are ignored in remaining credit
+        incident2 = finance_api.create_finance_commercial_gesture(
+            bookings=[booking2],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("6.0"),
+        )
+        finance_api.validate_finance_commercial_gesture(
+            finance_incident=incident2,
+            author=author_user,
+        )
+        self._price_incident(incident2)
+
+        incident3 = finance_api.create_finance_commercial_gesture(
+            bookings=[booking3],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("5.0"),
+        )
+        finance_api.validate_finance_commercial_gesture(
+            finance_incident=incident3,
+            author=author_user,
+        )
+        self._price_incident(incident3)
+
+        expected_wallet_balance = Decimal(465)
+        assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+            all=users_models.Credit(initial=Decimal(500), remaining=expected_wallet_balance),
+            digital=users_models.Credit(initial=Decimal(200), remaining=Decimal(200)),
+            physical=users_models.Credit(initial=Decimal(200), remaining=Decimal(200)),
+        )
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_regular_credit_with_overpayments_in_case_of_v3_deposit_transition(self):
+        offerer = offerers_factories.OffererFactory(name="Association de coiffeurs", siren="853318959")
+        bank_account = finance_factories.BankAccountFactory(offerer=offerer)
+        venue = offerers_factories.VenueFactory(
+            pricing_point="self",
+            managingOfferer=offerer,
+            bank_account=bank_account,
+            siret="85331845900023",
+        )
+        author_user = users_factories.UserFactory()
+        user = users_factories.BeneficiaryGrant18Factory(
+            deposit__type=finance_models.DepositType.GRANT_15_17,
+            deposit__expirationDate=date_utils.get_naive_utc_now() + datetime.timedelta(days=2),
+            deposit__amount=70,
+        )
+
+        # booking1 (20€ → 20€) + booking2 (6€ → 0€) + booking3 (15€ → 10€) = 30€
+        booking1 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=4,
+            stock__price=Decimal("5.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 20€
+        self._price_booking(booking1)
+
+        # Booking to cancel totally
+        booking2 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=2,
+            stock__price=Decimal("3.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 6€ → 0€
+        self._price_booking(booking2)
+
+        # Booking to cancel partially
+        booking3 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=5,
+            stock__price=Decimal("3.0"),
+            stock__offer__venue=venue,
+            stock__beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 15€ → 10€
+        self._price_booking(booking3)
+
+        # the old deposit expires and is replaced by a 17_18 one
+        user.deposit.expirationDate = date_utils.get_naive_utc_now() - datetime.timedelta(days=5)
+        users_factories.DepositGrantFactory(
+            user=user,
+            type=finance_models.DepositType.GRANT_17_18,
+            expirationDate=date_utils.get_naive_utc_now() + datetime.timedelta(days=5),
+            amount=50,
+        )
+        booking4 = bookings_factories.BookingFactory(
+            user=user,
+            cancellation_limit_date=date_utils.get_naive_utc_now() - datetime.timedelta(days=4),
+            quantity=4,
+            stock__price=Decimal("5.0"),
+            stock__offer__venue=venue,
+            stock__offer__subcategoryId=subcategories.SEANCE_CINE.id,
+        )  # 20€
+        self._price_booking(booking4)
+
+        # Mark all pricings as invoiced
+        cutoff = date_utils.get_naive_utc_now()
+        batch = finance_api.generate_cashflows(cutoff)
+        assert len(batch.cashflows) == 1
+        cashflow = batch.cashflows[0]
+        cashflow.status = finance_models.CashflowStatus.UNDER_REVIEW
+        db.session.add(cashflow)
+        db.session.flush()
+        invoice = finance_api._generate_invoice(
+            bank_account_id=bank_account.id, cashflow_ids=[c.id for c in batch.cashflows]
+        )
+        finance_api.validate_invoices([invoice.id])
+
+        # Create the finance incidents and validate them
+        #  - For booking2 → cancelled totally
+        incident2 = finance_api.create_overpayment_finance_incident(
+            bookings=[booking2],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("6.0"),
+        )
+        finance_api.validate_finance_overpayment_incident(
+            finance_incident=incident2,
+            force_debit_note=False,
+            author=author_user,
+        )
+        self._price_incident(incident2)
+
+        #  - For booking3 → cancelled partially: get back 5€
+        incident3 = finance_api.create_overpayment_finance_incident(
+            bookings=[booking3],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("5.0"),
+        )
+        finance_api.validate_finance_overpayment_incident(
+            finance_incident=incident3,
+            force_debit_note=False,
+            author=author_user,
+        )
+        self._price_incident(incident3)
+
+        # initial amount of active deposit + incidents amounts = 50 + (6 + 5) = 61
+        # 20€ are used with booking4 => remaining = 61 - 20 = 41€
+        expected_wallet_balance = Decimal(41)
+        assert users_api.get_domains_credit(user).all == users_models.Credit(
+            initial=Decimal(61), remaining=expected_wallet_balance
+        )
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_digital_credit_with_overpayments(self):
+        offerer = offerers_factories.OffererFactory(name="Association de coiffeurs", siren="853318959")
+        bank_account = finance_factories.BankAccountFactory(offerer=offerer)
+        venue = offerers_factories.VenueFactory(
+            pricing_point="self",
+            managingOfferer=offerer,
+            bank_account=bank_account,
+            siret="85331845900023",
+        )
+        author_user = users_factories.UserFactory()
+        user = users_factories.BeneficiaryFactory(
+            deposit__version=1, deposit__amount=500, deposit__type=finance_models.DepositType.GRANT_18
+        )
+
+        # booking1 (9€ → 9€) + booking2 (45€ → 0€) + booking3 (24€ → 15€) = 24€
+
+        booking1 = bookings_factories.BookingFactory(
+            user=user,
+            quantity=2,
+            stock__price=Decimal("4.5"),
+            stock__offer__venue=venue,
+            stock__offer__subcategoryId=subcategories.JEU_EN_LIGNE.id,
+            stock__offer__url="http://on.line",
+        )  # 9€
+        self._price_booking(booking1)
+
+        # Booking to cancel totally
+        booking2 = bookings_factories.BookingFactory(
+            user=user,
+            quantity=1,
+            stock__price=Decimal("45.0"),
+            stock__offer__venue=venue,
+            stock__offer__subcategoryId=subcategories.JEU_EN_LIGNE.id,
+            stock__offer__url="http://on.line",
+        )  # 45€ → 0€
+        self._price_booking(booking2)
+
+        # Booking to cancel partially
+        booking3 = bookings_factories.BookingFactory(
+            user=user,
+            quantity=3,
+            stock__price=Decimal("8.0"),
+            stock__offer__venue=venue,
+            stock__offer__subcategoryId=subcategories.JEU_EN_LIGNE.id,
+            stock__offer__url="http://on.line",
+        )  # 24€ → 15€
+        self._price_booking(booking3)
+
+        # Mark all pricings as invoiced
+        cutoff = date_utils.get_naive_utc_now()
+        batch = finance_api.generate_cashflows(cutoff)
+        assert len(batch.cashflows) == 1
+        cashflow = batch.cashflows[0]
+        cashflow.status = finance_models.CashflowStatus.UNDER_REVIEW
+        db.session.add(cashflow)
+        db.session.flush()
+        invoice = finance_api._generate_invoice(
+            bank_account_id=bank_account.id, cashflow_ids=[c.id for c in batch.cashflows]
+        )
+        finance_api.validate_invoices([invoice.id])
+
+        # Create the finance incidents and validate them
+        #  - For booking2 → cancelled totally
+        incident2 = finance_api.create_overpayment_finance_incident(
+            bookings=[booking2],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("45.0"),
+        )
+        finance_api.validate_finance_overpayment_incident(
+            finance_incident=incident2,
+            force_debit_note=False,
+            author=author_user,
+        )
+        self._price_incident(incident2)
+
+        #  - For booking3 → cancelled partially: get back 9€
+        incident3 = finance_api.create_overpayment_finance_incident(
+            bookings=[booking3],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("9.0"),
+        )
+        finance_api.validate_finance_overpayment_incident(
+            finance_incident=incident3,
+            force_debit_note=False,
+            author=author_user,
+        )
+        self._price_incident(incident3)
+
+        expected_wallet_balance = Decimal(476)
+        assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+            all=users_models.Credit(initial=Decimal(500), remaining=expected_wallet_balance),
+            digital=users_models.Credit(initial=Decimal(200), remaining=Decimal(176)),
+            physical=users_models.Credit(initial=Decimal(200), remaining=Decimal(200)),
+        )
+        assert user.wallet_balance == expected_wallet_balance
+
+    def test_get_domains_physical_credit_with_overpayments(self):
+        offerer = offerers_factories.OffererFactory(name="Association de coiffeurs", siren="853318959")
+        bank_account = finance_factories.BankAccountFactory(offerer=offerer)
+        venue = offerers_factories.VenueFactory(
+            pricing_point="self",
+            managingOfferer=offerer,
+            bank_account=bank_account,
+            siret="85331845900023",
+        )
+        author_user = users_factories.UserFactory()
+        user = users_factories.BeneficiaryFactory(
+            deposit__version=1, deposit__amount=500, deposit__type=finance_models.DepositType.GRANT_18
+        )
+
+        # booking1 (68€ → 68€) + booking2 (32€ → 0€) + booking3 (39€ → 27€) = 95€
+
+        booking1 = bookings_factories.BookingFactory(
+            user=user,
+            quantity=4,
+            stock__price=Decimal(17),
+            stock__offer__venue=venue,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )  # 68€
+        self._price_booking(booking1)
+
+        # booking to cancel totally
+        booking2 = bookings_factories.BookingFactory(
+            user=user,
+            quantity=2,
+            stock__price=Decimal(16),
+            stock__offer__venue=venue,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )  # 32€ → 0€
+        self._price_booking(booking2)
+
+        # booking in physical domain to cancel totally
+        booking3 = bookings_factories.BookingFactory(
+            user=user,
+            quantity=3,
+            stock__price=Decimal(13),
+            stock__offer__venue=venue,
+            stock__offer__subcategoryId=subcategories.JEU_SUPPORT_PHYSIQUE.id,
+        )  # 39€ → 27€
+        self._price_booking(booking3)
+
+        # Mark all pricings as invoiced
+        cutoff = date_utils.get_naive_utc_now()
+        batch = finance_api.generate_cashflows(cutoff)
+        assert len(batch.cashflows) == 1
+        cashflow = batch.cashflows[0]
+        cashflow.status = finance_models.CashflowStatus.UNDER_REVIEW
+        db.session.add(cashflow)
+        db.session.flush()
+        invoice = finance_api._generate_invoice(
+            bank_account_id=bank_account.id, cashflow_ids=[c.id for c in batch.cashflows]
+        )
+        finance_api.validate_invoices([invoice.id])
+
+        # Create the finance incidents and validate them
+        #  - For booking2 → cancelled totally
+        incident2 = finance_api.create_overpayment_finance_incident(
+            bookings=[booking2],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("45.0"),
+        )
+        finance_api.validate_finance_overpayment_incident(
+            finance_incident=incident2,
+            force_debit_note=False,
+            author=author_user,
+        )
+        self._price_incident(incident2)
+
+        #  - For booking3 → cancelled partially: get back 9€
+        incident3 = finance_api.create_overpayment_finance_incident(
+            bookings=[booking3],
+            author=author_user,
+            origin=finance_models.FinanceIncidentRequestOrigin.SUPPORT_PRO,
+            comment="BO",
+            amount=Decimal("12.0"),
+        )
+        finance_api.validate_finance_overpayment_incident(
+            finance_incident=incident3,
+            force_debit_note=False,
+            author=author_user,
+        )
+        self._price_incident(incident3)
+
+        expected_wallet_balance = Decimal(405)
+        assert users_api.get_domains_credit(user) == users_models.DomainsCredit(
+            all=users_models.Credit(initial=Decimal(500), remaining=expected_wallet_balance),
+            digital=users_models.Credit(initial=Decimal(200), remaining=Decimal(200)),
+            physical=users_models.Credit(initial=Decimal(200), remaining=Decimal(105)),
+        )
+        assert user.wallet_balance == expected_wallet_balance
+
+
+class CreateProUserTest:
+    data = {
+        "email": "prouser@Example.com",  # should be sanitized
+        "firstName": "Jean",
+        "lastName": "Test",
+        "password": "P@ssword12345",
+        "phoneNumber": "0666666666",
+        "contactOk": False,
+        "token": "token",
+    }
+
+    def test_create_pro_user(self):
+        pro_user_creation_body = users_serialization.ProUserCreationBodyV2Model(**self.data)
+
+        pro_user = users_api.create_pro_user(pro_user_creation_body)
+
+        assert pro_user.email == "prouser@example.com"
+        assert not pro_user.has_admin_role
+        assert not pro_user.needsToFillCulturalSurvey
+        assert not pro_user.has_pro_role
+        assert not pro_user.has_admin_role
+        assert not pro_user.has_beneficiary_role
+        assert not pro_user.deposits
+
+    @pytest.mark.settings(MAKE_PROS_BENEFICIARIES_IN_APP=True)
+    def test_create_pro_user_in_integration(self):
+        pro_user_creation_body = users_serialization.ProUserCreationBodyV2Model(**self.data)
+
+        pro_user = users_api.create_pro_user(pro_user_creation_body)
+
+        assert pro_user.email == "prouser@example.com"
+        assert not pro_user.has_admin_role
+        assert not pro_user.needsToFillCulturalSurvey
+        assert not pro_user.has_pro_role
+        assert not pro_user.has_admin_role
+        assert pro_user.has_beneficiary_role
+        assert pro_user.deposits
+
+
+class BeneficiaryInformationUpdateTest:
+    def test_update_user_information_from_dms(self):
+        declared_on_signup_date_of_birth = datetime.datetime(2000, 1, 1, 0, 0)
+        declared_on_dms_date_of_birth = datetime.date(2000, 5, 1)
+        user = users_factories.UserFactory(
+            activity=None,
+            address=None,
+            city=None,
+            firstName=None,
+            lastName=None,
+            postalCode=None,
+            dateOfBirth=declared_on_signup_date_of_birth,
+        )
+        beneficiary_information = dms_schemas.DMSContent(
+            last_name="Doe",
+            first_name="Jane",
+            activity="Lycéen",
+            civility=users_models.GenderEnum.F,
+            birth_date=declared_on_dms_date_of_birth,
+            email="jane.doe@test.com",
+            phone="0612345678",
+            postal_code="67200",
+            address="11 Rue du Test",
+            application_number=123,
+            procedure_number=98012,
+            registration_datetime=datetime.datetime(2020, 5, 1),
+        )
+
+        # when
+        beneficiary = users_api.update_user_information_from_external_source(user, beneficiary_information)
+
+        # Then
+        assert beneficiary.lastName == "Doe"
+        assert beneficiary.firstName == "Jane"
+        assert beneficiary.postalCode == "67200"
+        assert beneficiary.address == "11 Rue du Test"
+        assert beneficiary.validatedBirthDate == declared_on_dms_date_of_birth
+        assert beneficiary.dateOfBirth == declared_on_signup_date_of_birth
+        assert not beneficiary.has_beneficiary_role
+        assert not beneficiary.has_admin_role
+        assert beneficiary.password is not None
+        assert beneficiary.activity == "Lycéen"
+        assert beneficiary.civility == "Mme"
+        assert not beneficiary.deposits
+
+    def test_update_user_information_from_educonnect(self):
+        user = users_factories.UserFactory(
+            firstName=None,
+            lastName=None,
+        )
+        educonnect_data = subscription_factories.EduconnectContentFactory(
+            first_name="Raoul",
+            last_name="Dufy",
+            birth_date=datetime.date(2000, 5, 1),
+            ine_hash="identifiantnati0naleleve",
+        )
+        new_user = users_api.update_user_information_from_external_source(user, educonnect_data)
+
+        assert new_user.firstName == "Raoul"
+        assert new_user.lastName == "Dufy"
+        assert new_user.validatedBirthDate == datetime.date(2000, 5, 1)
+        assert new_user.ineHash == "identifiantnati0naleleve"
+
+    def test_update_user_information_from_ubble(self):
+        user = users_factories.UserFactory(civility=None)
+        ubble_data = subscription_factories.UbbleContentFactory(
+            first_name="Raoul",
+            last_name="Dufy",
+            birth_date=datetime.date(2000, 5, 1).isoformat(),
+            birth_place="Lyon",
+            id_document_number="123456789",
+            gender=users_models.GenderEnum.M,
+        )
+        new_user = users_api.update_user_information_from_external_source(user, ubble_data)
+
+        assert new_user.firstName == "Raoul"
+        assert new_user.lastName == "Dufy"
+        assert new_user.validatedBirthDate == datetime.date(2000, 5, 1)
+        assert new_user.birthPlace == "Lyon"
+        assert new_user.idPieceNumber == "123456789"
+        assert new_user.civility == "M."
+
+    def test_update_user_information_from_ubble_with_married_name(self):
+        user = users_factories.UserFactory(civility=None)
+        ubble_data = subscription_factories.UbbleContentFactory(married_name="Flouz")
+        new_user = users_api.update_user_information_from_external_source(user, ubble_data)
+
+        assert new_user.married_name == "Flouz"
+
+    def test_update_id_piece_number(self):
+        user = users_factories.UserFactory(activity="Etudiant", postalCode="75001", idPieceNumber=None)
+        dms_data = subscription_factories.DMSContentFactory(id_piece_number="140 767100 016")
+
+        users_api.update_user_information_from_external_source(user, dms_data)
+        assert user.idPieceNumber == "140767100016"
+
+    def test_phone_number_does_not_update_if_not_empty(self):
+        user = users_factories.UserFactory(phoneNumber="+33611111111")
+        dms_data = subscription_factories.DMSContentFactory(phone="+33622222222")
+
+        users_api.update_user_information_from_external_source(user, dms_data)
+
+        assert user.phoneNumber == "+33611111111"
+
+    def test_incomplete_data(self):
+        user = users_factories.UserFactory(firstName="Julie")
+        dms_data = subscription_factories.DMSContentFactory(birth_date=None)
+
+        with pytest.raises(users_exceptions.IncompleteDataException):
+            users_api.update_user_information_from_external_source(user, dms_data)
+
+        assert user.firstName == "Julie"
+
+    def should_not_update_date_of_birth_if_already_validated(self):
+        # Given
+        user = users_factories.UserFactory(
+            dateOfBirth=datetime.date(2000, 1, 1),
+            validatedBirthDate=datetime.date(2000, 1, 1),
+        )
+
+        # When
+        users_api.update_user_information_from_external_source(user, subscription_factories.DMSContentFactory())
+
+        # Then
+        assert user.birth_date == datetime.date(2000, 1, 1)
+
+
+class UpdateUserLastConnectionDateTest:
+    @time_machine.travel("2021-9-20 11:11:11", tick=False)
+    def test_first_update(self):
+        user = users_factories.UserFactory()
+
+        users_api.update_last_connection_date(user)
+
+        db.session.refresh(user)
+
+        assert user.lastConnectionDate == datetime.datetime(2021, 9, 20, 11, 11, 11)
+        assert len(brevo_testing.brevo_requests) == 1
+
+    @time_machine.travel("2021-9-20 01:11:11", tick=False)
+    def test_update_day_after(self):
+        user = users_factories.UserFactory(lastConnectionDate=datetime.datetime(2021, 9, 19, 23, 00, 11))
+
+        users_api.update_last_connection_date(user)
+
+        db.session.refresh(user)
+
+        assert user.lastConnectionDate == datetime.datetime(2021, 9, 20, 1, 11, 11)
+        assert len(brevo_testing.brevo_requests) == 1
+
+    @time_machine.travel("2021-9-20 11:11:11", tick=False)
+    def test_update_same_day(self):
+        user = users_factories.UserFactory(lastConnectionDate=datetime.datetime(2021, 9, 20, 9, 0))
+
+        users_api.update_last_connection_date(user)
+
+        db.session.refresh(user)
+
+        assert user.lastConnectionDate == datetime.datetime(2021, 9, 20, 11, 11, 11)
+        assert len(brevo_testing.brevo_requests) == 0
+
+    @time_machine.travel("2021-9-20 11:11:11", tick=False)
+    def test_no_update(self):
+        user = users_factories.UserFactory(lastConnectionDate=datetime.datetime(2021, 9, 20, 11, 00, 11))
+
+        users_api.update_last_connection_date(user)
+
+        db.session.refresh(user)
+
+        assert user.lastConnectionDate == datetime.datetime(2021, 9, 20, 11, 00, 11)
+        assert len(brevo_testing.brevo_requests) == 0
+
+
+class UserEmailValidationTest:
+    def test_validate_pro_user_email_from_pro_ff_on(self):
+        user_offerer = offerers_factories.UserOffererFactory(user__isEmailValidated=False)
+
+        users_api.validate_pro_user_email(user_offerer.user)
+
+        assert db.session.query(history_models.ActionHistory).count() == 0
+        assert user_offerer.user.isEmailValidated is True
+        assert len(mails_testing.outbox) == 0
+
+    def test_validate_pro_user_email_from_backoffice_ff_on(self):
+        backoffice_user = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserOffererFactory(user__isEmailValidated=False)
+
+        users_api.validate_pro_user_email(user_offerer.user, backoffice_user)
+
+        assert db.session.query(history_models.ActionHistory).count() == 1
+        action = db.session.query(history_models.ActionHistory).one()
+        assert action.actionType == history_models.ActionType.USER_EMAIL_VALIDATED
+        assert action.user == user_offerer.user
+        assert action.authorUser == backoffice_user
+
+        assert user_offerer.user.isEmailValidated is True
+        assert len(mails_testing.outbox) == 0
+
+
+class SearchPublicAccountTest:
+    def test_current_email(self):
+        user = users_factories.BeneficiaryGrant18Factory(email="current@email.com")
+        users_factories.EmailValidationEntryFactory(user=user)
+
+        query, _ = users_api.search_public_account("current@email.com")
+        users = query.all()
+
+        assert len(users) == 1
+        assert users[0].id == user.id
+
+    def test_current_domain(self):
+        user = users_factories.BeneficiaryGrant18Factory(email="current@domain.com")
+        users_factories.EmailValidationEntryFactory(user=user)
+
+        query, _ = users_api.search_public_account("@domain.com")
+        users = query.all()
+
+        assert len(users) == 1
+        assert users[0].id == user.id
+
+    def test_email_not_in_known_users(self):
+        users_factories.BeneficiaryGrant18Factory(email="current@domain.com")
+
+        query, _ = users_api.search_public_account("another@email.com")
+
+        assert not query.all()
+
+    def test_domain_not_in_known_users(self):
+        users_factories.BeneficiaryGrant18Factory(email="current@domain.com")
+
+        query, _ = users_api.search_public_account("@email.com")
+
+        assert not query.all()
+
+    def test_old_email(self):
+        event = users_factories.EmailValidationEntryFactory()
+        event.user.email = event.newEmail
+
+        query, _ = users_api.search_public_account_in_history_email(event.oldEmail)
+        users = query.all()
+
+        assert len(users) == 1
+        assert users[0].id == event.user.id
+
+    def test_old_email_but_not_validated(self):
+        user = users_factories.BeneficiaryGrant18Factory(email="current@domain.com")
+        event = users_factories.EmailUpdateEntryFactory(user=user)
+        # ensure that the current email is different from the event's
+        # old one
+        event.user.email = event.newEmail
+
+        query, _ = users_api.search_public_account_in_history_email(event.oldEmail)
+        assert not query.all()
+
+    def test_unknown_email(self):
+        query, _ = users_api.search_public_account("no@user.com")
+        assert not query.all()
+
+    def test_unknown_email_in_history_email(self):
+        query, _ = users_api.search_public_account_in_history_email("no@user.com")
+        assert not query.all()
+
+
+class SaveTrustedDeviceTest:
+    def should_not_save_trusted_device_when_no_device_id_provided(self):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        users_api.save_trusted_device(device_info=device_info, user=user)
+
+        assert db.session.query(users_models.TrustedDevice).count() == 0
+
+    def test_can_save_trusted_device(self):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="2E429592-2446-425F-9A62-D6983F375B3B",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        users_api.save_trusted_device(device_info=device_info, user=user)
+
+        trusted_device = db.session.query(users_models.TrustedDevice).one()
+
+        assert trusted_device.deviceId == device_info.device_id
+        assert trusted_device.source == "iPhone 13"
+        assert trusted_device.os == "iOS"
+
+    def test_can_access_trusted_devices_from_user(self):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="2E429592-2446-425F-9A62-D6983F375B3B",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        users_api.save_trusted_device(device_info=device_info, user=user)
+
+        trusted_device = db.session.query(users_models.TrustedDevice).one()
+
+        assert user.trusted_devices == [trusted_device]
+
+    def should_log_when_no_device_id(self, caplog):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        with caplog.at_level(logging.INFO):
+            users_api.save_trusted_device(device_info=device_info, user=user)
+
+        assert caplog.messages == ["Invalid deviceId was provided for trusted device"]
+        assert caplog.records[0].extra == {
+            "deviceId": "",
+            "os": "iOS",
+            "source": "iPhone 13",
+        }
+
+
+class UpdateLoginDeviceHistoryTest:
+    def should_not_save_login_device_when_no_device_id_provided(self):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        users_api.update_login_device_history(device_info=device_info, user=user)
+
+        assert db.session.query(users_models.LoginDeviceHistory).count() == 0
+
+    def test_can_save_login_device(self):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="2E429592-2446-425F-9A62-D6983F375B3B",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        users_api.update_login_device_history(device_info=device_info, user=user)
+
+        login_device = db.session.query(users_models.LoginDeviceHistory).one()
+
+        assert login_device.deviceId == device_info.device_id
+        assert login_device.source == "iPhone 13"
+        assert login_device.os == "iOS"
+        assert login_device.location is None
+
+    def should_return_login_history(self):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="2E429592-2446-425F-9A62-D6983F375B3B",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        login_history = users_api.update_login_device_history(device_info=device_info, user=user)
+
+        login_device = db.session.query(users_models.LoginDeviceHistory).one()
+
+        assert login_history == login_device
+
+    def test_can_access_login_device_history_from_user(self):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="2E429592-2446-425F-9A62-D6983F375B3B",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        users_api.update_login_device_history(device_info=device_info, user=user)
+
+        login_device = db.session.query(users_models.LoginDeviceHistory).one()
+
+        assert user.login_device_history == [login_device]
+
+    def should_log_when_no_device_id(self, caplog):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="",
+            source="iPhone 13",
+            os="iOS",
+        )
+
+        with caplog.at_level(logging.INFO):
+            users_api.update_login_device_history(device_info=device_info, user=user)
+
+        assert caplog.messages == ["Invalid deviceId was provided for login device"]
+        assert caplog.records[0].extra == {
+            "deviceId": "",
+            "os": "iOS",
+            "source": "iPhone 13",
+        }
+
+
+class ShouldSaveLoginDeviceAsTrustedDeviceTest:
+    device_info = common_models.DeviceInfo(
+        deviceId="2E429592-2446-425F-9A62-D6983F375B3B", os="iOS", source="iPhone 13"
+    )
+
+    def should_be_false_when_no_device_id(self):
+        user = users_factories.UserFactory()
+        device_without_id = common_models.DeviceInfo(deviceId="", os="iOS", source="iPhone 13")
+
+        assert users_api.should_save_login_device_as_trusted_device(device_info=device_without_id, user=user) is False
+
+    def should_be_false_when_no_device_history_for_user(self):
+        user = users_factories.UserFactory()
+
+        assert users_api.should_save_login_device_as_trusted_device(device_info=self.device_info, user=user) is False
+
+    def should_be_true_when_user_has_device_history_matching_device_id(self):
+        user = users_factories.UserFactory()
+        users_factories.LoginDeviceHistoryFactory(deviceId=self.device_info.device_id, user=user)
+
+        assert users_api.should_save_login_device_as_trusted_device(device_info=self.device_info, user=user) is True
+
+    def should_be_false_when_user_has_device_history_for_different_device(self):
+        user = users_factories.UserFactory()
+        users_factories.LoginDeviceHistoryFactory(deviceId=self.device_info.device_id, user=user)
+
+        other_device_info = common_models.DeviceInfo(deviceId="other_id", os="iOS", source="iPhone 13")
+        assert users_api.should_save_login_device_as_trusted_device(device_info=other_device_info, user=user) is False
+
+    def should_be_false_when_device_id_matches_different_user(self):
+        user = users_factories.UserFactory()
+        second_user = users_factories.UserFactory(email="py2@test.com")
+        users_factories.LoginDeviceHistoryFactory(deviceId=self.device_info.device_id, user=second_user)
+
+        assert users_api.should_save_login_device_as_trusted_device(device_info=self.device_info, user=user) is False
+
+    def should_be_true_when_device_id_matches_multiple_users_including_current_user(self):
+        user = users_factories.UserFactory()
+        second_user = users_factories.UserFactory(email="py2@test.com")
+        users_factories.LoginDeviceHistoryFactory(deviceId=self.device_info.device_id, user=second_user)
+        users_factories.LoginDeviceHistoryFactory(deviceId=self.device_info.device_id, user=user)
+
+        assert users_api.should_save_login_device_as_trusted_device(device_info=self.device_info, user=user) is True
+
+    def should_be_false_when_login_device_is_already_trusted_device(self):
+        user = users_factories.UserFactory()
+        users_factories.TrustedDeviceFactory(deviceId=self.device_info.device_id, user=user)
+        users_factories.LoginDeviceHistoryFactory(deviceId=self.device_info.device_id, user=user)
+
+        assert users_api.should_save_login_device_as_trusted_device(device_info=self.device_info, user=user) is False
+
+
+class IsLoginDeviceTrustedDeviceTest:
+    def should_not_be_trusted_when_user_has_no_trusted_device(self):
+        user = users_factories.UserFactory()
+        device_info = common_models.DeviceInfo(
+            deviceId="2E429592-2446-425F-9A62-D6983F375B3B", os="iOS", source="iPhone 13"
+        )
+
+        assert user.trusted_devices == []
+        assert users_api.is_login_device_a_trusted_device(device_info=device_info, user=user) is False
+
+    def should_not_be_trusted_when_no_device_info(self):
+        user = users_factories.UserFactory()
+
+        assert users_api.is_login_device_a_trusted_device(device_info=None, user=user) is False
+
+    def should_not_be_trusted_when_no_device_id(self):
+        user = users_factories.UserFactory()
+        device_without_id = common_models.DeviceInfo(deviceId="", os="iOS", source="iPhone 13")
+
+        assert users_api.is_login_device_a_trusted_device(device_info=device_without_id, user=user) is False
+
+    def should_be_trusted_when_device_is_a_trusted_device(self):
+        user = users_factories.UserFactory()
+        trusted_device = users_factories.TrustedDeviceFactory(user=user)
+        users_factories.TrustedDeviceFactory(deviceId="3A44812-5776-235D-8E31-G4361H987A1A", user=user)
+        device_info = common_models.DeviceInfo(deviceId=trusted_device.deviceId, os="iOS", source="iPhone 13")
+
+        assert users_api.is_login_device_a_trusted_device(device_info=device_info, user=user) is True
+
+    def should_not_be_trusted_when_device_is_not_a_trusted_device(self):
+        user = users_factories.UserFactory()
+        users_factories.TrustedDeviceFactory(user=user)
+        device_info = common_models.DeviceInfo(deviceId="other-device-id", os="iOS", source="iPhone 13")
+
+        assert users_api.is_login_device_a_trusted_device(device_info=device_info, user=user) is False
+
+
+class RecentSuspiciousLoginsTest:
+    def should_ignore_trusted_device_logins(self):
+        user = users_factories.UserFactory()
+        trusted_device = users_factories.TrustedDeviceFactory(user=user)
+        _trusted_login = users_factories.LoginDeviceHistoryFactory(user=user, deviceId=trusted_device.deviceId)
+
+        assert not users_api.get_recent_suspicious_logins(user)
+
+    def should_ignore_old_suspicious_device_logins(self):
+        user = users_factories.UserFactory()
+        _untrusted_login = users_factories.LoginDeviceHistoryFactory(
+            user=user, dateCreated=date_utils.get_naive_utc_now() - relativedelta(hours=25)
+        )
+
+        assert not users_api.get_recent_suspicious_logins(user)
+
+    def should_detect_suspicious_login(self):
+        user = users_factories.UserFactory()
+        untrusted_login = users_factories.LoginDeviceHistoryFactory(user=user)
+
+        assert users_api.get_recent_suspicious_logins(user) == [untrusted_login]
+
+    def should_detect_suspicious_login_before_trusted_device_addition(self):
+        user = users_factories.UserFactory()
+        untrusted_login = users_factories.LoginDeviceHistoryFactory(user=user)
+        _trusted_device = users_factories.TrustedDeviceFactory(user=user, deviceId=untrusted_login.deviceId)
+
+        assert users_api.get_recent_suspicious_logins(user) == [untrusted_login]
+
+
+class CreateSuspiciousLoginEmailTokenTest:
+    @time_machine.travel("2023-06-19 10:30:00", tick=False)
+    def should_encode_login_info_in_token(self):
+        with mock.patch("flask.current_app.redis_client", fakeredis.FakeStrictRedis()):
+            user = users_factories.UserFactory()
+            login_info = users_models.LoginDeviceHistory(
+                deviceId="2E429592-2446-425F-9A62-D6983F375B3B",
+                source="iPhone 13",
+                os="iOS",
+                location="Paris",
+                dateCreated=datetime.datetime(2023, 6, 19, 10, 30),
+            )
+
+            token = users_api.create_suspicious_login_email_token(login_info, user.id)
+
+            assert token.data == {
+                "dateCreated": "2023-06-19T10:30:00.000000Z",
+                "location": "Paris",
+                "source": "iPhone 13",
+                "os": "iOS",
+            }
+            assert token.get_expiration_date_from_token() == datetime.datetime(2023, 6, 26, 10, 30)
+
+            assert token.user_id == user.id
+
+    @time_machine.travel("2023-06-02 16:10:00", tick=False)
+    def should_encode_date_and_user_id_in_token_when_no_login_info(self):
+        user = users_factories.UserFactory()
+
+        token = users_api.create_suspicious_login_email_token(None, user.id)
+
+        assert token.data == {
+            "dateCreated": "2023-06-02T16:10:00.000000Z",
+        }
+        assert token.user_id == user.id
+
+
+class DeleteOldTrustedDevicesTest:
+    def should_delete_trusted_devices_older_than_five_years_ago(self):
+        five_years_ago = date_utils.get_naive_utc_now() - relativedelta(years=5)
+        six_years_ago = date_utils.get_naive_utc_now() - relativedelta(years=6)
+        users_factories.TrustedDeviceFactory(dateCreated=five_years_ago)
+        users_factories.TrustedDeviceFactory(dateCreated=six_years_ago)
+
+        users_api.delete_old_trusted_devices()
+
+        assert db.session.query(users_models.TrustedDevice).count() == 0
+
+    def should_not_delete_trusted_devices_created_less_than_five_years_ago(self):
+        less_than_five_years_ago = date_utils.get_naive_utc_now() - relativedelta(years=5) + datetime.timedelta(days=1)
+        users_factories.TrustedDeviceFactory(dateCreated=less_than_five_years_ago)
+
+        users_api.delete_old_trusted_devices()
+
+        assert db.session.query(users_models.TrustedDevice).count() == 1
+
+
+class DeleteOldLoginDeviceHistoryTest:
+    def should_delete_device_history_older_than_thirteen_months_ago(self):
+        thirteen_months_ago = date_utils.get_naive_utc_now() - relativedelta(months=13)
+        fourteen_months_ago = date_utils.get_naive_utc_now() - relativedelta(months=14)
+        users_factories.LoginDeviceHistoryFactory(dateCreated=thirteen_months_ago)
+        users_factories.LoginDeviceHistoryFactory(dateCreated=fourteen_months_ago)
+
+        users_api.delete_old_login_device_history()
+
+        assert db.session.query(users_models.LoginDeviceHistory).count() == 0
+
+    def should_not_delete_device_history_created_less_than_thirteen_months_ago(self):
+        less_than_thirteen_months_ago = (
+            date_utils.get_naive_utc_now() - relativedelta(months=13) + datetime.timedelta(days=1)
+        )
+        users_factories.LoginDeviceHistoryFactory(dateCreated=less_than_thirteen_months_ago)
+
+        users_api.delete_old_login_device_history()
+
+        assert db.session.query(users_models.LoginDeviceHistory).count() == 1
+
+
+class NotifyUserBeforeDeletionUponSuspensionTest:
+    def test_get_users_with_suspended_account_to_notify(self):
+        delta_time = 5
+        exact_time = date_utils.get_naive_utc_now() - datetime.timedelta(days=delta_time)
+        suspension_to_be_detected = history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=exact_time, reason=users_constants.SuspensionReason.UPON_USER_REQUEST
+        )
+
+        # not suspended upon user request: should be ignored
+        history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=exact_time, reason=users_constants.SuspensionReason.FRAUD_SUSPICION
+        )
+
+        # suspended one day after: should be ignored
+        history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=exact_time + datetime.timedelta(days=1),
+            reason=users_constants.SuspensionReason.UPON_USER_REQUEST,
+        )
+
+        # suspended one day before: should be ignored
+        history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=exact_time - datetime.timedelta(days=1),
+            reason=users_constants.SuspensionReason.UPON_USER_REQUEST,
+        )
+
+        # should not be notified because unsuspended
+        user = users_factories.UserFactory(isActive=False)
+        history_factories.SuspendedUserActionHistoryFactory(
+            user=user, actionDate=exact_time, reason=users_constants.SuspensionReason.FRAUD_SUSPICION
+        )
+        history_factories.UnsuspendedUserActionHistoryFactory(user=user, actionDate=date_utils.get_naive_utc_now())
+
+        expected_user_ids = {suspension_to_be_detected.userId}
+
+        with assert_num_queries(1):
+            query = users_api._get_users_with_suspended_account_to_notify(delta_time)
+            user_ids = {user.id for user in query}
+            assert user_ids == expected_user_ids
+
+    def test_notify_user_before_deletion_upon_suspension(self, app):
+        # given
+        exact_time = date_utils.get_naive_utc_now() - datetime.timedelta(
+            days=settings.DELETE_SUSPENDED_ACCOUNTS_SINCE - settings.NOTIFY_X_DAYS_BEFORE_DELETION
+        )
+        suspension_to_be_detected = history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=exact_time, reason=users_constants.SuspensionReason.UPON_USER_REQUEST
+        )
+
+        # not suspended upon user request: should be ignored
+        history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=exact_time, reason=users_constants.SuspensionReason.FRAUD_SUSPICION
+        )
+
+        # suspended one day after: should be ignored
+        history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=exact_time + datetime.timedelta(days=1),
+            reason=users_constants.SuspensionReason.UPON_USER_REQUEST,
+        )
+
+        # suspended one day before: should be ignored
+        history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=exact_time - datetime.timedelta(days=1),
+            reason=users_constants.SuspensionReason.UPON_USER_REQUEST,
+        )
+
+        # should not be notified because unsuspended
+        user = users_factories.UserFactory(isActive=False)
+        history_factories.SuspendedUserActionHistoryFactory(
+            user=user, actionDate=exact_time, reason=users_constants.SuspensionReason.FRAUD_SUSPICION
+        )
+        history_factories.UnsuspendedUserActionHistoryFactory(user=user, actionDate=date_utils.get_naive_utc_now())
+
+        # when
+        users_api.notify_users_before_deletion_of_suspended_account()
+
+        # then
+        user = db.session.get(users_models.User, suspension_to_be_detected.userId)
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["params"]["FIRSTNAME"] == user.firstName
+        assert mails_testing.outbox[0]["To"] == user.email
+
+    def test_multiple_suspensions_different_reason(self):
+        exact_time = date_utils.get_naive_utc_now() - datetime.timedelta(
+            days=settings.DELETE_SUSPENDED_ACCOUNTS_SINCE - settings.NOTIFY_X_DAYS_BEFORE_DELETION
+        )
+        user = users_factories.UserFactory(isActive=False)
+        history_factories.SuspendedUserActionHistoryFactory(
+            user=user, actionDate=exact_time, reason=users_constants.SuspensionReason.UPON_USER_REQUEST
+        )
+        history_factories.UnsuspendedUserActionHistoryFactory(
+            user=user, actionDate=exact_time + datetime.timedelta(minutes=1)
+        )
+        history_factories.SuspendedUserActionHistoryFactory(
+            user=user,
+            actionDate=exact_time + datetime.timedelta(minutes=2),
+            reason=users_constants.SuspensionReason.FRAUD_SUSPICION,
+        )
+
+        # when
+        users_api.notify_users_before_deletion_of_suspended_account()
+
+        # then
+        assert len(mails_testing.outbox) == 0
+
+    def test_multiple_suspensions_different_date(self):
+        exact_time = date_utils.get_naive_utc_now() - datetime.timedelta(
+            days=settings.DELETE_SUSPENDED_ACCOUNTS_SINCE - settings.NOTIFY_X_DAYS_BEFORE_DELETION
+        )
+        user = users_factories.UserFactory(isActive=False)
+        history_factories.SuspendedUserActionHistoryFactory(
+            user=user, actionDate=exact_time, reason=users_constants.SuspensionReason.UPON_USER_REQUEST
+        )
+        history_factories.UnsuspendedUserActionHistoryFactory(
+            user=user, actionDate=exact_time + datetime.timedelta(minutes=1)
+        )
+        history_factories.SuspendedUserActionHistoryFactory(
+            user=user,
+            actionDate=exact_time + datetime.timedelta(days=1),
+            reason=users_constants.SuspensionReason.UPON_USER_REQUEST,
+        )
+
+        # when
+        users_api.notify_users_before_deletion_of_suspended_account()
+
+        # then
+        assert len(mails_testing.outbox) == 0
+
+
+@pytest.mark.usefixtures("db_session")
+class GetSuspendedAccountsUponUserRequestSinceTest:
+    def test_get_suspended_upon_user_request_accounts_since(self) -> None:
+        one_week_ago = date_utils.get_naive_utc_now() - datetime.timedelta(days=7)
+        something = history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=one_week_ago, reason=users_constants.SuspensionReason.UPON_USER_REQUEST
+        )
+
+        # not suspended upon user request: should be ignored
+        history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=one_week_ago, reason=users_constants.SuspensionReason.FRAUD_SUSPICION
+        )
+
+        # suspended less than 5 days ago (see below): should be ignored
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        history_factories.SuspendedUserActionHistoryFactory(
+            actionDate=yesterday, reason=users_constants.SuspensionReason.UPON_USER_REQUEST
+        )
+
+        expected_user_ids = {something.userId}
+
+        with assert_num_queries(1):
+            query = users_api.get_suspended_upon_user_request_accounts_since(5)
+            user_ids = {user.id for user in query}
+            assert user_ids == expected_user_ids
+
+    def test_unsuspended_account(self) -> None:
+        """
+        Test that an unsuspended account is ignored, even if the
+        suspension event occurred more than N days ago.
+        """
+        one_week_ago = date_utils.get_naive_utc_now() - datetime.timedelta(days=7)
+        user = users_factories.UserFactory(isActive=False)
+        history_factories.SuspendedUserActionHistoryFactory(
+            user=user, actionDate=one_week_ago, reason=users_constants.SuspensionReason.FRAUD_SUSPICION
+        )
+
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        history_factories.UnsuspendedUserActionHistoryFactory(user=user, actionDate=yesterday)
+
+        with assert_num_queries(1):
+            assert not list(users_api.get_suspended_upon_user_request_accounts_since(5))

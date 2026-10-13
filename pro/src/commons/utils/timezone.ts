@@ -1,0 +1,124 @@
+import { fr } from 'date-fns/locale'
+import {
+  format,
+  formatInTimeZone,
+  fromZonedTime,
+  toZonedTime,
+} from 'date-fns-tz'
+
+import { buildDateTime, getToday, toISOStringWithoutMilliseconds } from './date'
+
+const timeRegex = /^([01]?\d|2[0-3]):([0-5]\d)$/
+export const isValidTime = (time?: string | null): boolean =>
+  Boolean(time && timeRegex.test(time))
+
+export const formatLocalTimeDateString = (
+  dateIsoString: string | number | Date,
+  departementCode?: string | null,
+  dateFormat = 'EEEE dd/MM/yyyy à HH:mm'
+): string => {
+  const zonedDate = getLocalDepartementDateTimeFromUtc(
+    dateIsoString,
+    departementCode
+  )
+  return format(zonedDate, dateFormat, {
+    timeZone: getDepartmentTimezone(departementCode),
+    locale: fr,
+  })
+}
+
+type GetLocalDepartementDateTimeFromUtc = (
+  date: string | number | Date,
+  departementCode?: string | null
+) => Date
+export const getLocalDepartementDateTimeFromUtc: GetLocalDepartementDateTimeFromUtc =
+  (date, departementCode) =>
+    toZonedTime(date, getDepartmentTimezone(departementCode))
+
+type GetUtcDateTimeFromLocalDepartement = (
+  zonedDate: Date,
+  departementCode?: string | null
+) => Date
+export const getUtcDateTimeFromLocalDepartement: GetUtcDateTimeFromLocalDepartement =
+  (zonedDate, departementCode) =>
+    fromZonedTime(zonedDate, getDepartmentTimezone(departementCode))
+
+// Cayenne              UTC          Paris                St Denis
+//    | ---------------- | ----------- | --------------------|
+//   9:00 ------------ 12:00 ------- 14:00 --------------- 16:00
+
+/* istanbul ignore next: DEBT, TO FIX */
+export const getDepartmentTimezone = (
+  departementCode?: string | null
+): string => {
+  // This mapping is also defined in the backend. Make
+  // sure that all are synchronized.
+  const defaultTimezone = 'Europe/Paris'
+  switch (departementCode) {
+    case '971':
+      return 'America/Guadeloupe'
+    case '972':
+      return 'America/Martinique'
+    case '973':
+      return 'America/Cayenne'
+    case '974':
+      return 'Indian/Reunion'
+    case '975':
+      return 'America/Miquelon'
+    case '976':
+      return 'Indian/Mayotte'
+    case '977':
+      return 'America/St_Barthelemy'
+    case '978': // Saint-Martin
+      return 'America/Guadeloupe'
+    case '986':
+      return 'Pacific/Wallis'
+    case '987':
+      // Polynésie actually spans multiple timezones. Use Papeete's timezone.
+      return 'Pacific/Tahiti'
+    case '988':
+      return 'Pacific/Noumea'
+    case '989': // Clipperton
+      return 'Pacific/Pitcairn'
+    default:
+      return defaultTimezone
+  }
+}
+
+export function convertTimeFromVenueTimezoneToUtc(
+  departementTime: string,
+  departmentCode?: string | null
+) {
+  const [hours, minutes] = departementTime.split(':')
+
+  // create a fake date to compute time offset for us
+  const userDate = getToday()
+  userDate.setHours(Number.parseInt(hours, 10))
+  userDate.setMinutes(Number.parseInt(minutes, 10))
+
+  // get venue time zone : ex: 'Pacific/Pitcairn'
+  const venueTimeZone = getDepartmentTimezone(departmentCode)
+  // convert time from venue time zone to UTC
+  const utcDate = fromZonedTime(userDate, venueTimeZone)
+
+  // get hours and minutes, now in UTC from the fake date
+  return formatInTimeZone(utcDate, 'Etc/UTC', 'HH:mm')
+}
+
+export const serializeDateTimeToUTCFromLocalDepartment = (
+  beginningDate: string,
+  beginningTime: string,
+  departementCode?: string | null
+): string => {
+  const beginningDateTimeInUserTimezone = buildDateTime(
+    beginningDate,
+    beginningTime
+  )
+
+  const beginningDateTimeInUTCTimezone = getUtcDateTimeFromLocalDepartement(
+    beginningDateTimeInUserTimezone,
+    departementCode
+  )
+
+  return toISOStringWithoutMilliseconds(beginningDateTimeInUTCTimezone)
+}

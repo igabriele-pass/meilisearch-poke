@@ -1,0 +1,23 @@
+:root {
+  --shadow-overlay: var(--size-spacing-xxs) var(--size-spacing-m)
+    var(--size-spacing-xxl) var(--color-background-shadow-overlay);
+
+  // ADAGE COLORS
+  // These must be replaced with brand and decorative colors
+  --color-adage-purple: #4613ad;
+  --color-adage-orange-light: #fa9f16;
+  --color-adage-orange-dark: #b85901;
+  --color-adage-purple-light: #ad87ff;
+  --color-adage-purple-dark: #8337e9;
+  --color-adage-pink-light: #ec3478;
+  --color-adage-pink-dark: #c01371;
+  --color-adage-green-light: #27dca8;
+  --color-adage-green-dark: #0e8474;
+  --color-adage-red-light: #f8733d;
+  --color-adage-red-dark: #ca3f13;
+  --color-adage-blue-light: #1fc5e9;
+  --color-adage-blue-dark: #0e78b7;
+  --color-adage-blue-external: #626fad;
+
+  scrollbar-color: var(--color-border-default) transparent;
+}

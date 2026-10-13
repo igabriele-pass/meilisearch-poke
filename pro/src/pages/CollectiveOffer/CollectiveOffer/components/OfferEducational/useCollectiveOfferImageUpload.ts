@@ -1,0 +1,124 @@
+import { useCallback, useState } from 'react'
+
+import { api } from '@/apiClient/api'
+import { getHumanReadableApiError } from '@/apiClient/helpers'
+import type {
+  GetCollectiveOfferResponseModel,
+  GetCollectiveOfferTemplateResponseModel,
+} from '@/apiClient/v1'
+import type { OfferCollectiveImage } from '@/commons/core/Offers/types'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { sendSentryCustomError } from '@/commons/utils/sendSentryCustomError'
+import type { OnImageUploadArgs } from '@/components/ModalImageUpsertOrEdit/ModalImageUpsertOrEdit'
+
+export const useCollectiveOfferImageUpload = (
+  offer?:
+    | GetCollectiveOfferResponseModel
+    | GetCollectiveOfferTemplateResponseModel,
+  isTemplate?: boolean
+) => {
+  const snackBar = useSnackBar()
+  const [imageOffer, setImageOffer] = useState<OfferCollectiveImage | null>(
+    offer !== undefined
+      ? {
+          url: offer.imageUrl,
+          credit: offer.imageCredit,
+          alternativeText: offer.imageAlternativeText ?? '',
+        }
+      : null
+  )
+  const [imageToUpload, setImageToUpload] = useState<OnImageUploadArgs | null>(
+    null
+  )
+
+  const onImageUpload = useCallback((image: OnImageUploadArgs) => {
+    setImageToUpload(image)
+    setImageOffer({
+      url: image.imageCroppedDataUrl,
+      credit: image.credit,
+      alternativeText: image.alternativeText ?? '',
+    })
+  }, [])
+
+  const onImageDelete = useCallback(() => {
+    setImageToUpload(null)
+    setImageOffer(null)
+  }, [])
+
+  const handleImageOnSubmit = useCallback(
+    async (offerId: number) => {
+      // Image field is empty
+      if (imageOffer === null) {
+        // Delete image if one was present before
+        if (offer?.imageUrl === undefined || offer.imageUrl === null) {
+          return
+        }
+
+        try {
+          if (isTemplate) {
+            await api.deleteOfferTemplateImage({
+              path: { offer_id: offerId },
+            })
+          } else {
+            await api.deleteOfferImage({ path: { offer_id: offerId } })
+          }
+        } catch {
+          snackBar.error(
+            'Une erreur est survenue lors de la suppression de l’image de l’offre'
+          )
+        }
+        return
+      }
+
+      // If imageOffer is not empty and imageToUpload is null
+      // it means that the image was not changed
+      if (imageToUpload === null) {
+        return
+      }
+
+      try {
+        const params = {
+          thumb: imageToUpload.imageFile,
+          credit: imageToUpload.credit ?? '',
+          alternativeText: imageToUpload.alternativeText ?? '',
+          croppingRectHeight: imageToUpload.cropParams?.height ?? 0,
+          croppingRectWidth: imageToUpload.cropParams?.width ?? 0,
+          croppingRectX: imageToUpload.cropParams?.x ?? 0,
+          croppingRectY: imageToUpload.cropParams?.y ?? 0,
+        }
+
+        const payload = isTemplate
+          ? await api.attachOfferTemplateImage({
+              path: { offer_id: offerId },
+              body: params,
+            })
+          : await api.attachOfferImage({
+              path: { offer_id: offerId },
+              body: params,
+            })
+        setImageOffer({
+          url: payload.imageUrl,
+          credit: imageToUpload.credit,
+          alternativeText: imageToUpload.alternativeText ?? '',
+        })
+      } catch (error) {
+        sendSentryCustomError(error)
+
+        return snackBar.error(
+          getHumanReadableApiError(
+            error,
+            'Une erreur est survenue lors de l’envoi de votre image'
+          )
+        )
+      }
+    },
+    [imageOffer, imageToUpload]
+  )
+
+  return {
+    imageOffer,
+    onImageUpload,
+    onImageDelete,
+    handleImageOnSubmit,
+  }
+}

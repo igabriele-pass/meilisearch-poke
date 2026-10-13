@@ -1,0 +1,80 @@
+import { CollectiveLocationType } from '@/apiClient/v1'
+import type { InstitutionFormValues } from '@/pages/CollectiveOfferInstitution/commons/validationSchema'
+
+import type { OfferEducationalFormValues } from './types'
+import { buildStudentLevelsMapWithDefaultValue } from './utils/buildStudentLevelsMapWithDefaultValue'
+
+export function getDefaultEducationalValues(
+  isMarseilleEnabled?: boolean
+): OfferEducationalFormValues {
+  return {
+    title: '',
+    description: '',
+    duration: '',
+    offererId: '',
+    venueId: '',
+    location: {
+      locationType: CollectiveLocationType.ADDRESS,
+      location: {
+        label: '',
+        id: '',
+        isManualEdition: false,
+        isVenueLocation: false,
+      },
+    },
+    latitude: '',
+    longitude: '',
+    city: '',
+    postalCode: '',
+    street: '',
+    banId: '',
+    coords: '',
+    'search-addressAutocomplete': '',
+    addressAutocomplete: '',
+    interventionArea: [],
+    participants: buildStudentLevelsMapWithDefaultValue(
+      false,
+      isMarseilleEnabled
+    ),
+    accessibility: {
+      visual: false,
+      audio: false,
+      motor: false,
+      mental: false,
+      none: false,
+    },
+    bookingEmails: [{ email: '' }],
+    domains: [],
+    'search-domains': '',
+    'search-formats': '',
+    'search-interventionArea': '',
+    priceDetail: '',
+    imageUrl: '',
+    imageCredit: '',
+    nationalProgramId: '',
+    isTemplate: false,
+    datesType: 'permanent',
+    beginningDate: '',
+    endingDate: '',
+    hour: '',
+    formats: [],
+    contactOptions: {
+      phone: false,
+      email: false,
+      form: false,
+    },
+    contactFormType: 'form',
+  }
+}
+
+export const DEFAULT_INSTITUTION_FORM_VALUES: InstitutionFormValues = {
+  educationalInstitution: '',
+  teacherEmail: undefined,
+  teacherName: undefined,
+}
+
+export const MAX_DESCRIPTION_LENGTH = 1500
+
+export const MAX_PRICE_DETAILS_LENGTH = 1000
+
+export const modelTemplate = `**Thèmes et mots clefs de la proposition d’éducation artistique et culturelle :**\nQuels sujets et grandes notions sont abordés ?\n\n**Déroulé de l’action :**\nComment se compose la proposition ?\nQuelles connaissances les élèves acquièrent-ils ?\nDe quelles pratiques font-ils l’expérience ?\nQuelles démarches artistiques ou scientifiques découvrent-ils ?\n\n**Les intervenants des arts ou des sciences :**\nQui les élèves vont-ils rencontrer ?\nQuelles sont les qualifications des intervenants ?`

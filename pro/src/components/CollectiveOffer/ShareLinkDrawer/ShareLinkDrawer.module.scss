@@ -1,0 +1,9 @@
+.drawer-content {
+  flex-grow: 1;
+}
+
+.share-link-container {
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-s);
+}

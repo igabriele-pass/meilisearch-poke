@@ -1,0 +1,54 @@
+import type { Meta, StoryObj } from '@storybook/react-vite'
+import { FormProvider, useForm, useFormContext } from 'react-hook-form'
+
+import { EmailSpellCheckInput } from './EmailSpellCheckInput'
+
+// <FormWrapper> provides a react-hook-form context, which is necessary for the storybook demo to work
+type WrapperFormValues = { email: string }
+const FormWrapper = ({ children }: { children: React.ReactNode }) => {
+  const hookForm = useForm<WrapperFormValues>({
+    defaultValues: { email: 'jmclery@htomil.com' },
+  })
+
+  return <FormProvider {...hookForm}>{children}</FormProvider>
+}
+
+const meta: Meta<typeof EmailSpellCheckInput> = {
+  title: '@/ui-kit/forms/EmailSpellCheckInput',
+  component: EmailSpellCheckInput,
+
+  decorators: [
+    (Story: any) => (
+      <FormWrapper>
+        <Story />
+      </FormWrapper>
+    ),
+  ],
+}
+
+export default meta
+
+type Story = StoryObj<typeof EmailSpellCheckInput>
+
+export const Default: Story = {
+  args: {
+    name: 'email',
+    label: 'Adresse email',
+    description: 'Format: email@exemple.com',
+    error: '',
+    required: true,
+  },
+  render: (args) => {
+    const { setValue, register } = useFormContext<WrapperFormValues>()
+
+    return (
+      <EmailSpellCheckInput
+        {...args}
+        {...register('email')}
+        onApplyTip={(tip) => {
+          setValue('email', tip)
+        }}
+      />
+    )
+  },
+}

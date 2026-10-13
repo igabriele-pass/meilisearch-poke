@@ -1,0 +1,152 @@
+import {
+  CollectiveLocationType,
+  OfferContactFormEnum,
+  type PostCollectiveOfferBodyModel,
+  type PostCollectiveOfferTemplateBodyModel,
+  type PostDateRangeModel,
+} from '@/apiClient/v1'
+import {
+  buildDateTime,
+  formatBrowserTimezonedDateAsUTC,
+  toISOStringWithoutMilliseconds,
+} from '@/commons/utils/date'
+
+import type { OfferEducationalFormValues } from '../types'
+import { parseDuration } from './parseDuration'
+import { serializeParticipants } from './serializeParticipants'
+
+const disabilityCompliances = (
+  accessibility: OfferEducationalFormValues['accessibility']
+): Pick<
+  PostCollectiveOfferTemplateBodyModel,
+  | 'audioDisabilityCompliant'
+  | 'mentalDisabilityCompliant'
+  | 'motorDisabilityCompliant'
+  | 'visualDisabilityCompliant'
+> => ({
+  audioDisabilityCompliant: accessibility.audio,
+  mentalDisabilityCompliant: accessibility.mental,
+  motorDisabilityCompliant: accessibility.motor,
+  visualDisabilityCompliant: accessibility.visual,
+})
+
+export const serializeDates = (
+  startDatetime: string,
+  endingDatetime: string,
+  hour?: string
+): PostDateRangeModel => {
+  const startDatetimeInUserTimezone = buildDateTime(
+    startDatetime,
+    hour || '00:00'
+  )
+  const startDateWithoutTz = new Date(
+    formatBrowserTimezonedDateAsUTC(startDatetimeInUserTimezone)
+  )
+  const endDateWithoutTz = new Date(
+    formatBrowserTimezonedDateAsUTC(buildDateTime(endingDatetime, '23:59'))
+  )
+  return {
+    start: toISOStringWithoutMilliseconds(startDateWithoutTz),
+    end: toISOStringWithoutMilliseconds(endDateWithoutTz),
+  }
+}
+
+const getCommonOfferPayload = (
+  offer: OfferEducationalFormValues
+): PostCollectiveOfferBodyModel | PostCollectiveOfferTemplateBodyModel => {
+  const getLocationPayload = () => {
+    if (offer.location?.locationType === CollectiveLocationType.ADDRESS) {
+      const location = offer.location.location?.isVenueLocation
+        ? { isVenueLocation: true }
+        : {
+            isManualEdition: offer.location.location?.isManualEdition,
+            isVenueLocation: offer.location.location?.isVenueLocation,
+            label: offer.location.location?.label,
+            banId: offer.banId,
+            street: offer.street ?? '',
+            postalCode: offer.postalCode ?? '',
+            latitude: offer.latitude ?? '',
+            longitude: offer.longitude ?? '',
+            city: offer.city ?? '',
+            inseeCode: offer.inseeCode,
+          }
+
+      return {
+        location: {
+          locationType: CollectiveLocationType.ADDRESS,
+          location,
+        },
+      }
+    }
+
+    if (offer.location?.locationType === CollectiveLocationType.TO_BE_DEFINED) {
+      return {
+        location: {
+          locationType: CollectiveLocationType.TO_BE_DEFINED,
+          locationComment: offer.location.locationComment || null,
+        },
+      }
+    }
+
+    return {
+      location: { locationType: CollectiveLocationType.SCHOOL },
+    }
+  }
+
+  const getInterventionArea = () => {
+    return offer.location?.locationType !== CollectiveLocationType.ADDRESS
+      ? offer.interventionArea
+      : []
+  }
+
+  return {
+    venueId: Number(offer.venueId),
+    name: offer.title,
+    description: offer.description,
+    durationMinutes: offer.duration ? parseDuration(offer.duration) : undefined,
+    ...disabilityCompliances(offer.accessibility),
+    students: serializeParticipants(offer.participants),
+    ...getLocationPayload(),
+    domains: (offer.domains || []).map(Number),
+    interventionArea: getInterventionArea(),
+    nationalProgramId: offer.nationalProgramId
+      ? Number(offer.nationalProgramId)
+      : null,
+    formats: offer.formats,
+    // contactEmail, contactPhone and bookingEmails are set in the collective offer template creation form
+    // when creating a collective offer from a collective offer template, we will receive here the values from the template
+    contactEmail: offer.contactOptions?.email ? offer.contactEmail : undefined,
+    contactPhone: offer.contactOptions?.phone ? offer.phone : undefined,
+    bookingEmails:
+      offer.bookingEmails?.map((email) => email.email) ?? undefined,
+  } as PostCollectiveOfferBodyModel | PostCollectiveOfferTemplateBodyModel
+}
+
+export const createCollectiveOfferTemplatePayload = (
+  offer: OfferEducationalFormValues
+): PostCollectiveOfferTemplateBodyModel => ({
+  ...getCommonOfferPayload(offer),
+  dates:
+    offer.datesType === 'specific_dates' &&
+    offer.beginningDate &&
+    offer.endingDate
+      ? serializeDates(offer.beginningDate, offer.endingDate, offer.hour)
+      : undefined,
+  priceDetail: offer.priceDetail,
+  contactForm:
+    offer.contactOptions?.form && offer.contactFormType === 'form'
+      ? OfferContactFormEnum.FORM
+      : undefined,
+  contactUrl:
+    offer.contactOptions?.form && offer.contactFormType === 'url'
+      ? offer.contactUrl
+      : undefined,
+})
+
+export const createCollectiveOfferPayload = (
+  offer: OfferEducationalFormValues,
+  offerTemplateId?: number
+): PostCollectiveOfferBodyModel => ({
+  ...getCommonOfferPayload(offer),
+  templateId: offerTemplateId,
+})

@@ -1,0 +1,229 @@
+import { screen } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import * as useAnalytics from '@/app/App/analytics/firebase'
+import { HomepageEvents } from '@/commons/core/FirebaseEvents/constants'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { OffersCardVariant } from '../types'
+import { OffersRetentionCard } from './OffersRetentionCard'
+
+const FakeCreateOfferPage = ({ variant }: { variant: OffersCardVariant }) => (
+  <div>Page création offre {variant.toLowerCase()}</div>
+)
+const FakeListOffersPage = ({ variant }: { variant: OffersCardVariant }) => (
+  <div>Page liste offres {variant.toLowerCase()}</div>
+)
+
+const renderOffersRetentionCard = (
+  variant: OffersCardVariant,
+  isReadOnly = false
+) => {
+  const user = userEvent.setup()
+
+  return {
+    ...renderWithProviders(null, {
+      routes: [
+        {
+          path: '/',
+          element: (
+            <OffersRetentionCard isReadOnly={isReadOnly} variant={variant} />
+          ),
+        },
+        {
+          path: '/offre/creation/collectif/vitrine',
+          element: <FakeCreateOfferPage variant={OffersCardVariant.TEMPLATE} />,
+        },
+        {
+          path: '/offre/creation/collectif',
+          element: <FakeCreateOfferPage variant={OffersCardVariant.BOOKABLE} />,
+        },
+        {
+          path: '/offre/individuelle/creation/description',
+          element: (
+            <FakeCreateOfferPage variant={OffersCardVariant.INDIVIDUAL} />
+          ),
+        },
+        {
+          path: '/offres/vitrines',
+          element: <FakeListOffersPage variant={OffersCardVariant.TEMPLATE} />,
+        },
+        {
+          path: '/offres/collectives',
+          element: <FakeListOffersPage variant={OffersCardVariant.BOOKABLE} />,
+        },
+        {
+          path: '/offres',
+          element: (
+            <FakeListOffersPage variant={OffersCardVariant.INDIVIDUAL} />
+          ),
+        },
+      ],
+    }),
+    user,
+  }
+}
+const mockLogEvent = vi.fn()
+
+describe('OffersRetentionCard', () => {
+  beforeEach(() => {
+    vi.spyOn(useAnalytics, 'useAnalytics').mockImplementation(() => ({
+      logEvent: mockLogEvent,
+    }))
+  })
+  it('should render without accessibility violations', async () => {
+    const { container } = renderOffersRetentionCard(OffersCardVariant.TEMPLATE)
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display template retention card', () => {
+    renderOffersRetentionCard(OffersCardVariant.TEMPLATE)
+
+    expect(
+      screen.getByRole('heading', {
+        level: 2,
+        name: 'Activités sur vos offres vitrines',
+      })
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        'Aucune nouvelle activité concernant vos offres vitrines'
+      )
+    ).toBeVisible()
+  })
+
+  it('should navigate to template offer creation page', async () => {
+    const { user } = renderOffersRetentionCard(OffersCardVariant.TEMPLATE)
+
+    await user.click(
+      screen.getByRole('link', { name: 'Créer une offre vitrine' })
+    )
+
+    expect(screen.getByText('Page création offre template')).toBeVisible()
+  })
+
+  it('should navigate to template offers list page', async () => {
+    const { user } = renderOffersRetentionCard(OffersCardVariant.TEMPLATE)
+
+    await user.click(
+      screen.getByRole('link', { name: 'Voir toutes les offres' })
+    )
+
+    expect(screen.getByText('Page liste offres template')).toBeVisible()
+  })
+
+  it('should display bookable retention card', () => {
+    renderOffersRetentionCard(OffersCardVariant.BOOKABLE)
+
+    expect(
+      screen.getByRole('heading', {
+        level: 2,
+        name: 'Activités sur vos offres réservables',
+      })
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        'Aucune nouvelle activité concernant vos offres réservables'
+      )
+    ).toBeVisible()
+  })
+
+  it('should navigate to bookable offer creation page', async () => {
+    const { user } = renderOffersRetentionCard(OffersCardVariant.BOOKABLE)
+
+    await user.click(
+      screen.getByRole('link', { name: 'Créer une offre réservable' })
+    )
+
+    expect(screen.getByText('Page création offre bookable')).toBeVisible()
+  })
+
+  it('should navigate to bookable offers list page', async () => {
+    const { user } = renderOffersRetentionCard(OffersCardVariant.BOOKABLE)
+
+    await user.click(
+      screen.getByRole('link', { name: 'Voir toutes les offres' })
+    )
+
+    expect(screen.getByText('Page liste offres bookable')).toBeVisible()
+  })
+
+  it('should display individual retention card', () => {
+    renderOffersRetentionCard(OffersCardVariant.INDIVIDUAL)
+
+    expect(
+      screen.getByRole('heading', {
+        level: 2,
+        name: 'Activités sur vos offres individuelles',
+      })
+    ).toBeVisible()
+    expect(
+      screen.getByText(
+        'Aucune nouvelle activité concernant vos offres individuelles'
+      )
+    ).toBeVisible()
+  })
+
+  it('should navigate to individual offer creation page', async () => {
+    const { user } = renderOffersRetentionCard(OffersCardVariant.INDIVIDUAL)
+
+    await user.click(screen.getByRole('link', { name: 'Créer une offre' }))
+
+    expect(screen.getByText('Page création offre individual')).toBeVisible()
+  })
+
+  it('should navigate to individual offers list page', async () => {
+    const { user } = renderOffersRetentionCard(OffersCardVariant.INDIVIDUAL)
+
+    await user.click(
+      screen.getByRole('link', { name: 'Voir toutes les offres' })
+    )
+
+    expect(screen.getByText('Page liste offres individual')).toBeVisible()
+  })
+
+  it('should log event on press CTA that sends to offer list', async () => {
+    const { user } = renderOffersRetentionCard(OffersCardVariant.INDIVIDUAL)
+
+    await user.click(
+      screen.getByRole('link', { name: 'Voir toutes les offres' })
+    )
+
+    expect(mockLogEvent).toHaveBeenCalledWith(
+      HomepageEvents.CLICKED_SEE_ALL_OFFERS,
+      {
+        offersVariant: OffersCardVariant.INDIVIDUAL,
+        hasOffersDisplayed: false,
+      }
+    )
+  })
+
+  it('should log event on press CTA that sends to offer creation', async () => {
+    const { user } = renderOffersRetentionCard(OffersCardVariant.INDIVIDUAL)
+
+    await user.click(screen.getByRole('link', { name: 'Créer une offre' }))
+
+    expect(mockLogEvent).toHaveBeenCalledWith(
+      HomepageEvents.CLICKED_CREATE_OFFER,
+      {
+        offersVariant: OffersCardVariant.INDIVIDUAL,
+        hasOffers: true,
+      }
+    )
+  })
+
+  it('should disable the offer creation CTA when isReadOnly is true', () => {
+    renderOffersRetentionCard(OffersCardVariant.INDIVIDUAL, true)
+
+    const createOfferLink = screen.getByRole('link', {
+      name: 'Créer une offre',
+    })
+    expect(createOfferLink).toHaveAttribute('aria-disabled', 'true')
+    expect(createOfferLink).not.toHaveAttribute('href')
+    expect(
+      screen.getByRole('link', { name: 'Voir toutes les offres' })
+    ).toHaveAttribute('href', '/offres')
+  })
+})

@@ -1,0 +1,108 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_a11y.scss" as a11y;
+@use "styles/mixins/_outline.scss" as outline;
+
+.adage-header-menu {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  flex: 1;
+  width: 100%;
+
+  &-item {
+    height: 100%;
+  }
+}
+
+.adage-header-link {
+  @include fonts.button;
+
+  height: 100%;
+  display: flex;
+  align-items: center;
+  padding: var(--size-spacing-l) var(--size-spacing-s);
+
+  &-active {
+    position: relative;
+    color: var(--color-text-brand-primary);
+
+    &::after {
+      content: "";
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      height: rem.torem(4px);
+      background-color: var(--color-border-brand-primary);
+    }
+  }
+
+  &-icon {
+    width: rem.torem(20px);
+    min-width: rem.torem(20px);
+    height: rem.torem(20px);
+    fill: var(--color-icon-default);
+  }
+
+  &:hover {
+    background-color: var(--color-background-subtle);
+  }
+
+  &:focus-visible {
+    outline: none;
+
+    .adage-header-link-focus {
+      @include outline.focus-outline(rem.torem(4px));
+
+      border-radius: var(--size-border-radius-s);
+    }
+  }
+}
+
+.adage-header-link-focus {
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-s);
+}
+
+.active-link-visually-hidden {
+  @include a11y.visually-hidden;
+}
+
+.adage-header-nb-hits {
+  @include fonts.body-accent;
+
+  padding: 0 var(--size-spacing-s);
+  background-color: var(--color-background-brand-primary);
+  color: var(--color-text-inverted);
+  border-radius: var(--size-border-radius-pill);
+  margin-left: var(--size-spacing-xs);
+}
+
+@media (min-width: size.$desktop) {
+  .adage-header-menu {
+    gap: var(--size-spacing-xxxxl);
+  }
+}
+
+@media (min-width: size.$laptop) {
+  .adage-header-link {
+    padding: 0 var(--size-spacing-l);
+  }
+}
+
+@media (min-width: size.$tablet) {
+  .adage-header-menu {
+    width: unset;
+    flex-direction: row;
+    text-align: center;
+    height: rem.torem(61px);
+    border-bottom: none;
+  }
+
+  .adage-header-link {
+    padding: 0 var(--size-spacing-s);
+  }
+}

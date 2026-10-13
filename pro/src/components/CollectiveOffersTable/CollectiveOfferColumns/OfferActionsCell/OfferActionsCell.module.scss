@@ -1,0 +1,9 @@
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_outline.scss" as outline;
+
+.actions-column {
+  display: flex;
+  place-items: center center;
+  gap: var(--size-spacing-xs);
+  place-self: center;
+}

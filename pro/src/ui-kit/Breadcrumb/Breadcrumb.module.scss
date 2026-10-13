@@ -1,0 +1,29 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.breadcrumb {
+  &-list {
+    display: flex;
+    align-items: center;
+    gap: var(--size-spacing-s);
+    flex-wrap: wrap;
+
+    &-last {
+      @include fonts.body-accent-xs;
+
+      display: inline-flex;
+      align-items: center;
+      white-space: break-spaces;
+    }
+
+    &-item {
+      display: flex;
+      align-items: center;
+      gap: var(--size-spacing-s);
+
+      &-arrow {
+        stroke: currentcolor;
+        stroke-width: 3px;
+      }
+    }
+  }
+}

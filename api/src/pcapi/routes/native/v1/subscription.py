@@ -1,0 +1,277 @@
+import logging
+import typing
+from functools import partial
+
+from flask_login import current_user
+from pydantic import ValidationError
+
+from pcapi.connectors.beneficiaries import ubble as ubble_connector
+from pcapi.core.external.attributes import api as external_attributes_api
+from pcapi.core.subscription import api as subscription_api
+from pcapi.core.subscription import exceptions
+from pcapi.core.subscription import fraud_check_api as fraud_api
+from pcapi.core.subscription import models as subscription_models
+from pcapi.core.subscription import profile_options
+from pcapi.core.subscription import schemas as subscription_schemas
+from pcapi.core.subscription.bonus import api as bonus_api
+from pcapi.core.subscription.bonus import constants as bonus_constants
+from pcapi.core.subscription.bonus import fraud_check_api as bonus_fraud_api
+from pcapi.core.subscription.bonus import statistics_api as bonus_statistics_api
+from pcapi.core.subscription.bonus import tasks as bonus_tasks
+from pcapi.core.subscription.ubble import api as ubble_subscription_api
+from pcapi.core.subscription.ubble import fraud_check_api as ubble_fraud_api
+from pcapi.core.subscription.ubble import schemas as ubble_schemas
+from pcapi.core.users import models as users_models
+from pcapi.models import api_errors
+from pcapi.models.feature import FeatureToggle
+from pcapi.routes.native.security import authenticated_and_active_user_required
+from pcapi.serialization.decorator import spectree_serialize
+from pcapi.utils import phone_number as phone_number_utils
+from pcapi.utils.transaction_manager import atomic
+from pcapi.utils.transaction_manager import on_commit
+
+from .. import blueprint
+from .serialization import subscription as serializers
+
+
+logger = logging.getLogger(__name__)
+
+
+@blueprint.native_route("/subscription/profile", methods=["GET"])
+@authenticated_and_active_user_required
+@spectree_serialize(on_success_status=200, on_error_statuses=[404], api=blueprint.api)
+def get_profile() -> serializers.ProfileResponse | None:
+    if (profile_data := subscription_api.get_profile_data(current_user)) is not None:
+        profile_data_dict = profile_data.model_dump(mode="json")
+        profile_data_dict.pop("origin", None)
+        try:
+            return serializers.ProfileResponse(profile=serializers.ProfileContent(**profile_data_dict))
+        except ValidationError as e:
+            logger.error("Invalid profile data for user %s: %s", current_user.id, e)
+            return serializers.ProfileResponse()
+
+    raise api_errors.ResourceNotFoundError()
+
+
+@blueprint.native_route("/subscription/profile", methods=["POST"])
+@atomic()
+@authenticated_and_active_user_required
+@spectree_serialize(on_success_status=204, api=blueprint.api)
+def complete_profile(body: serializers.ProfileUpdateRequest) -> None:
+    try:
+        subscription_api.complete_profile(
+            current_user,
+            first_name=body.first_name,
+            last_name=body.last_name,
+            address=body.address,
+            city=body.city,
+            postal_code=body.postal_code,
+            activity=users_models.ActivityEnum[body.activity_id.value],
+            phone_number=body.phone_number,
+            school_type=(
+                users_models.SchoolTypeEnum[body.school_type_id.value] if body.school_type_id is not None else None
+            ),
+        )
+    except exceptions.IneligiblePostalCodeException:
+        error = {"code": "INELIGIBLE_POSTAL_CODE"}
+        logger.warning("Failed to define postal code", extra={"code postal": body.postal_code, "code": error["code"]})
+        raise api_errors.ApiErrors(error, status_code=400)
+    except phone_number_utils.InvalidCountryCode:
+        error = {"code": "INVALID_COUNTRY_CODE", "message": "L'indicatif téléphonique n'est pas accepté"}
+        logger.warning("Failed to define phone number", extra={"number": body.phone_number, "code": error["code"]})
+        raise api_errors.ApiErrors(error, status_code=400)
+    except phone_number_utils.InvalidPhoneNumber:
+        error = {"code": "INVALID_PHONE_NUMBER", "message": "Le numéro de téléphone est invalide"}
+        logger.warning("Failed to define phone number", extra={"number": body.phone_number, "code": error["code"]})
+        raise api_errors.ApiErrors(error, status_code=400)
+
+    is_activated = subscription_api.activate_beneficiary_if_no_missing_step(current_user)
+    if not is_activated:
+        external_attributes_api.update_external_user(current_user)
+
+
+@blueprint.native_route("/subscription/activity_types", methods=["GET"])
+@authenticated_and_active_user_required
+@spectree_serialize(
+    response_model=serializers.ActivityTypesResponse,
+    on_success_status=200,
+    api=blueprint.api,
+)
+def get_activity_types() -> serializers.ActivityTypesResponse:
+    activities = [
+        serializers.ActivityResponseModel.model_validate(activity) for activity in profile_options.ALL_ACTIVITIES
+    ]
+    middle_school = serializers.ActivityResponseModel.model_validate(profile_options.MIDDLE_SCHOOL_STUDENT)
+    if current_user.is_18_or_above_eligible and middle_school in activities:
+        activities.remove(middle_school)
+
+    return serializers.ActivityTypesResponse(activities=activities)
+
+
+@blueprint.native_route("/subscription/honor_statement", methods=["POST"])
+@atomic()
+@authenticated_and_active_user_required
+@spectree_serialize(on_success_status=204, api=blueprint.api)
+def create_honor_statement_fraud_check() -> None:
+    fraud_api.create_honor_statement_fraud_check(current_user, "statement from /subscription/honor_statement endpoint")
+
+    is_activated = subscription_api.activate_beneficiary_if_no_missing_step(current_user)
+
+    if not is_activated:
+        external_attributes_api.update_external_user(current_user)
+
+
+@blueprint.native_route("/ubble_identification", methods=["POST"])
+@atomic()
+@authenticated_and_active_user_required
+@spectree_serialize(api=blueprint.api, response_model=serializers.IdentificationSessionResponse)
+def start_identification_session(
+    body: serializers.IdentificationSessionRequest,
+) -> serializers.IdentificationSessionResponse:
+    if current_user.eligibility is None:
+        raise api_errors.ApiErrors(
+            {"code": "IDCHECK_NOT_ELIGIBLE", "message": "Non éligible à un crédit"},
+            status_code=400,
+        )
+
+    if (
+        not subscription_api.get_user_subscription_state(current_user).next_step
+        == subscription_schemas.SubscriptionStep.IDENTITY_CHECK
+    ):
+        raise api_errors.ApiErrors(
+            {"code": "IDCHECK_ALREADY_PROCESSED", "message": "Une identification a déjà été traitée"},
+            status_code=400,
+        )
+
+    fraud_check = ubble_fraud_api.get_restartable_identity_checks(current_user)
+    if fraud_check:
+        source_data = typing.cast(ubble_schemas.UbbleContent, fraud_check.source_data())
+        if source_data.identification_url:
+            return serializers.IdentificationSessionResponse(identificationUrl=str(source_data.identification_url))
+
+    declared_names = subscription_api.get_declared_names(current_user)
+
+    if not declared_names:
+        logger.error("Ubble: no names found to start identification session", extra={"user_id": current_user.id})
+        raise api_errors.ApiErrors({"code": "NO_FIRST_NAME_AND_LAST_NAME"})
+
+    try:
+        identification_url = ubble_subscription_api.start_ubble_workflow(
+            current_user, declared_names[0], declared_names[1], body.redirectUrl
+        )
+        return serializers.IdentificationSessionResponse(identificationUrl=str(identification_url))
+
+    except ubble_connector.UbbleHttpError as exception:
+        if isinstance(exception, ubble_connector.UbbleServerError):
+            code = "IDCHECK_SERVICE_UNAVAILABLE"
+            message = "Le service d'identification n'est pas joignable"
+            return_status = 503
+        else:
+            code = "IDCHECK_SERVICE_ERROR"
+            message = "Une erreur s'est produite à l'appel du service d'identification"
+            return_status = 500
+        raise api_errors.ApiErrors({"code": code, "message": message}, status_code=return_status)
+
+
+@blueprint.native_route("/subscription/bonus/quotient_familial", methods=["POST"])
+@atomic()
+@authenticated_and_active_user_required
+@spectree_serialize(on_success_status=204, api=blueprint.api)
+def create_quotient_familial_bonus_credit_fraud_check(body: serializers.QuotientFamilialBonusCreditRequest) -> None:
+    if not bonus_api.get_user_is_eligible_for_qf_bonification(current_user):
+        raise api_errors.ApiErrors(
+            {"code": "BONUS_NOT_ELIGIBLE", "message": "Non éligible à la bonification"},
+            status_code=400,
+        )
+    first_attempt = bonus_fraud_api.get_first_manual_attempt(current_user)
+    is_first_attempt = first_attempt is None
+
+    fraud_check = bonus_fraud_api.create_qf_bonus_credit_fraud_check(
+        current_user,
+        last_name=body.last_name,
+        common_name=body.common_name,
+        first_names=body.first_names,
+        birth_date=body.birth_date,
+        gender=body.gender,
+        birth_country_cog_code=body.birth_country_cog_code,
+        birth_city_cog_code=body.birth_city_cog_code,
+        origin=bonus_constants.QUOTIENT_FAMILIAL_ENDPOINT_ORIGIN,
+    )
+
+    if is_first_attempt:
+        delay = bonus_fraud_api.get_attempt_delay_in_seconds(fraud_check)
+        if delay is not None:
+            on_commit(partial(bonus_statistics_api.record_first_bonus_attempt, delay))
+
+    disability_fraud_checks = bonus_fraud_api.accelerate_automatic_disability_bonus_fraud_checks(
+        current_user.beneficiaryFraudChecks, new_origin="/subscription/bonus/quotient_familial endpoint"
+    )
+
+    if not FeatureToggle.ENABLE_BONUS_CREDIT.is_active():
+        return
+
+    payload = bonus_tasks.BonusTaskPayload(fraud_check_id=fraud_check.id).model_dump()
+    on_commit(partial(bonus_tasks.apply_for_quotient_familial_bonus_task.delay, payload))
+
+    for i, fraud_check in enumerate(disability_fraud_checks):
+        # accessing AAH and AEEH of the same person at the same time crashes API Particulier
+        countdown = bonus_constants.DISABILITY_COUNTDOWN * i
+        if fraud_check.type == subscription_models.FraudCheckType.AAH_BONUS_CREDIT:
+            aah_payload = bonus_tasks.BonusTaskPayload(fraud_check_id=fraud_check.id).model_dump()
+            on_commit(
+                partial(
+                    bonus_tasks.apply_for_adult_disability_bonus_task.apply_async, (aah_payload,), countdown=countdown
+                )
+            )
+
+        if fraud_check.type == subscription_models.FraudCheckType.AEEH_BONUS_CREDIT:
+            aeeh_payload = bonus_tasks.BonusTaskPayload(fraud_check_id=fraud_check.id).model_dump()
+            on_commit(
+                partial(
+                    bonus_tasks.apply_for_disabled_child_education_bonus_task.apply_async,
+                    (aeeh_payload,),
+                    countdown=countdown,
+                )
+            )
+
+
+@blueprint.native_route("/subscription/bonus/disability", methods=["POST"])
+@atomic()
+@authenticated_and_active_user_required
+@spectree_serialize(on_success_status=204, api=blueprint.api)
+def create_disability_bonus_credit_fraud_checks(body: serializers.DisabilityBonusCreditRequest) -> None:
+    if not bonus_api.get_user_is_eligible_for_disability_bonification(current_user):
+        raise api_errors.ApiErrors(
+            {"code": "BONUS_NOT_ELIGIBLE", "message": "Non éligible à la bonification"},
+            status_code=400,
+        )
+
+    first_attempt = bonus_fraud_api.get_first_manual_attempt(current_user)
+    is_first_attempt = first_attempt is None
+
+    aah_fraud_check, aeeh_fraud_check = bonus_fraud_api.create_disability_bonus_credit_fraud_checks(
+        current_user,
+        birth_country_cog_code=body.birth_country_cog_code,
+        birth_city_cog_code=body.birth_city_cog_code,
+        origin=bonus_constants.DISABILITY_ENDPOINT_ORIGIN,
+    )
+
+    if is_first_attempt:
+        delay = bonus_fraud_api.get_attempt_delay_in_seconds(aah_fraud_check)
+        if delay is not None:
+            on_commit(partial(bonus_statistics_api.record_first_bonus_attempt, delay))
+
+    if not FeatureToggle.ENABLE_BONUS_CREDIT.is_active():
+        return
+
+    aah_payload = bonus_tasks.BonusTaskPayload(fraud_check_id=aah_fraud_check.id).model_dump()
+    on_commit(partial(bonus_tasks.apply_for_adult_disability_bonus_task.apply_async, (aah_payload,), countdown=0))
+
+    aeeh_payload = bonus_tasks.BonusTaskPayload(fraud_check_id=aeeh_fraud_check.id).model_dump()
+    on_commit(
+        partial(
+            bonus_tasks.apply_for_disabled_child_education_bonus_task.apply_async,
+            (aeeh_payload,),
+            countdown=bonus_constants.DISABILITY_COUNTDOWN,
+        )
+    )

@@ -1,0 +1,80 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_outline.scss" as outline;
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-l);
+}
+
+.main-icon-container {
+  position: relative;
+}
+
+.accessibility-icon {
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  background-color: var(--color-background-default);
+  width: rem.torem(16px);
+  height: rem.torem(16px);
+  border-radius: var(--size-border-radius-pill);
+
+  &.accessible {
+    color: var(--color-icon-success);
+  }
+
+  &.non-accessible {
+    color: var(--color-icon-error);
+  }
+}
+
+.title-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-s);
+  flex-grow: 1;
+}
+
+.title {
+  @include fonts.body-accent;
+}
+
+.accessibility-label {
+  @include fonts.body-accent-xs;
+}
+
+.collapse-button {
+  border: none;
+  background-color: transparent;
+  cursor: pointer;
+  margin: 0;
+  padding: 0;
+  color: var(--color-icon-subtle);
+  height: rem.torem(24px);
+  width: rem.torem(24px);
+
+  &:focus-visible {
+    @include outline.focus-outline;
+
+    border-radius: var(--size-border-radius-s);
+  }
+}
+
+.collapse-icon {
+  transition: transform 0.3s;
+
+  &.open {
+    transform: rotate(180deg);
+  }
+}
+
+.content {
+  display: none;
+  margin: var(--size-spacing-l) 0;
+
+  &.open {
+    display: block;
+  }
+}

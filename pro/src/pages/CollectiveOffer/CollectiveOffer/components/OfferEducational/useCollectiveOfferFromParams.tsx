@@ -1,0 +1,164 @@
+import type { ComponentType } from 'react'
+import { useLocation, useParams } from 'react-router'
+import useSWR from 'swr'
+
+import { api } from '@/apiClient/api'
+import type {
+  GetCollectiveOfferResponseModel,
+  GetCollectiveOfferTemplateResponseModel,
+  GetOffererResponseModel,
+} from '@/apiClient/v1'
+import {
+  GET_COLLECTIVE_OFFER_QUERY_KEY,
+  GET_COLLECTIVE_OFFER_TEMPLATE_QUERY_KEY,
+} from '@/commons/config/swrQueryKeys'
+import { isCollectiveOfferTemplate } from '@/commons/core/OfferEducational/types'
+import { extractOfferIdAndOfferTypeFromRouteParams } from '@/commons/core/OfferEducational/utils/extractOfferIdAndOfferTypeFromRouteParams'
+import { assertOrFrontendError } from '@/commons/errors/assertOrFrontendError'
+import { Spinner } from '@/ui-kit/Spinner/Spinner'
+
+export type CollectiveOfferFromParamsProps = {
+  offer: GetCollectiveOfferResponseModel
+}
+
+export type MandatoryCollectiveOfferFromParamsProps = {
+  offer:
+    | GetCollectiveOfferResponseModel
+    | GetCollectiveOfferTemplateResponseModel
+  isTemplate: boolean
+  offerer?: GetOffererResponseModel | null
+}
+
+export type OptionalCollectiveOfferFromParamsProps = Omit<
+  MandatoryCollectiveOfferFromParamsProps,
+  'offer' | 'offerer'
+> &
+  Partial<Pick<MandatoryCollectiveOfferFromParamsProps, 'offer' | 'offerer'>>
+
+export const useCollectiveOfferFromParams = (
+  isOfferMandatory: boolean,
+  offerIdFromParams?: string
+) => {
+  const location = useLocation()
+  const pathNameIncludesTemplate = location.pathname.includes('vitrine')
+
+  const { offerId, isTemplateId } =
+    extractOfferIdAndOfferTypeFromRouteParams(offerIdFromParams)
+
+  const isTemplate = isTemplateId || pathNameIncludesTemplate
+
+  const { data: offer } = useSWR<
+    GetCollectiveOfferResponseModel | GetCollectiveOfferTemplateResponseModel,
+    number,
+    [string, number] | null
+  >(
+    offerId !== undefined
+      ? [
+          isTemplate
+            ? GET_COLLECTIVE_OFFER_TEMPLATE_QUERY_KEY
+            : GET_COLLECTIVE_OFFER_QUERY_KEY,
+          offerId,
+        ]
+      : null,
+    ([, offerIdParams]) =>
+      isTemplate
+        ? api.getCollectiveOfferTemplate({
+            path: { offer_id: offerIdParams },
+          })
+        : api.getCollectiveOffer({
+            path: { offer_id: offerIdParams },
+          })
+  )
+
+  if (offerIdFromParams === undefined) {
+    assertOrFrontendError(
+      !isOfferMandatory,
+      // TODO (igabriele, 2025-07-31): This error message is obscure, we should clarify it.
+      'useOffer hook called on a page without offerId.'
+    )
+
+    return {
+      offer: undefined,
+      isTemplate: pathNameIncludesTemplate,
+    }
+  }
+
+  return {
+    offer,
+    isTemplate,
+  }
+}
+
+// Could be refactored with a react-router-v6 loader function
+export const withCollectiveOfferFromParams = <T,>(
+  Component: ComponentType<T & MandatoryCollectiveOfferFromParamsProps>
+) => {
+  const CollectiveOfferWrapperComponent = (props: T) => {
+    const { offerId: offerIdFromParams } = useParams<{
+      offerId: string
+    }>()
+    const additionalProps = useCollectiveOfferFromParams(
+      true,
+      offerIdFromParams
+    )
+
+    if (additionalProps.offer === undefined) {
+      return <Spinner />
+    }
+
+    return (
+      <Component
+        {...props}
+        {...additionalProps}
+        offer={additionalProps.offer}
+      />
+    )
+  }
+
+  return CollectiveOfferWrapperComponent
+}
+export const withOnlyCollectiveOfferFromParams = <T,>(
+  Component: ComponentType<T & CollectiveOfferFromParamsProps>
+) => {
+  const CollectiveOfferWrapperComponent = (props: T) => {
+    const { offerId: offerIdFromParams } = useParams<{
+      offerId: string
+    }>()
+    const { offer } = useCollectiveOfferFromParams(true, offerIdFromParams)
+
+    if (offer === undefined) {
+      return <Spinner />
+    }
+
+    assertOrFrontendError(
+      !isCollectiveOfferTemplate(offer),
+      '`offer` shoud not be a (collective offer) template.'
+    )
+
+    return <Component {...props} offer={offer} />
+  }
+
+  return CollectiveOfferWrapperComponent
+}
+
+export const withOptionalCollectiveOfferFromParams = <T,>(
+  Component: ComponentType<T & OptionalCollectiveOfferFromParamsProps>
+) => {
+  const CollectiveOfferWrapperComponent = (props: T) => {
+    const { offerId: offerIdFromParams } = useParams<{
+      offerId: string
+    }>()
+    const additionalProps = useCollectiveOfferFromParams(
+      false,
+      offerIdFromParams
+    )
+
+    if (offerIdFromParams && additionalProps.offer === undefined) {
+      return <Spinner />
+    }
+
+    return <Component {...props} {...additionalProps} />
+  }
+
+  return CollectiveOfferWrapperComponent
+}

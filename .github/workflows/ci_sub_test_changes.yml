@@ -1,0 +1,115 @@
+name: 3 [CI] Test changes
+
+on:
+  workflow_call:
+    inputs:
+      # changes
+      api-changed:
+        required: true
+        type: boolean
+      api-documentation-changed:
+        required: true
+        type: boolean
+      pro-changed:
+        required: true
+        type: boolean
+      github-changed:
+        required: true
+        type: boolean
+    outputs:
+      # stringified array, ex: '["GitHub actions","Front Pro","Backend"]'
+      failed-tests-matrix:
+        value: ${{ jobs.compute-failed-tests-matrix.outputs.failed-tests-matrix }}
+
+permissions: write-all
+
+jobs:
+  lint-github-actions:
+    name: Lint GitHub actions & worflows
+    if: ${{ inputs.github-changed }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: false
+          persist-credentials: false
+      - name: "Run actionlint"
+        uses: pass-culture/common-workflows/actions/actionlint-check@b2eaf34df9945c76e68cffc6e4bf27037f6ea21a # v0.2
+        with:
+          version: 0.3.0
+
+  build-backend-image:
+    name: Build backend image
+    if: ${{ inputs.github-changed || inputs.api-changed || inputs.pro-changed }}
+    uses: ./.github/workflows/docker_build_image.yml
+    with:
+      image: pcapi-tests
+      tag: ${{ github.sha }}
+
+  check-api-client-update:
+    name: Front API Client
+    needs: build-backend-image
+    uses: ./.github/workflows/ci_sub_test_api_client_update.yml
+    with:
+      tag: ${{ github.sha }}
+      image: pcapi-tests
+
+  test-backend:
+    name: Backend
+    needs: build-backend-image
+    if: ${{ inputs.github-changed || inputs.api-changed  }}
+    uses: ./.github/workflows/ci_sub_test_backend.yml
+    with:
+      tag: ${{ github.sha }}
+
+  test-api-documentation:
+    name: Public API documentation
+    if: ${{ inputs.github-changed || inputs.api-documentation-changed  }}
+    uses: ./.github/workflows/ci_sub_test_api_documentation.yml
+
+  test-pro:
+    name: Front Pro
+    if: ${{inputs.pro-changed || inputs.github-changed}}
+    uses: ./.github/workflows/ci_sub_test_front_pro.yml
+
+  test-e2e:
+    name: E2E
+    needs: build-backend-image
+    uses: ./.github/workflows/ci_sub_test_e2e.yml
+    if: ${{ always() && !cancelled() && (inputs.api-changed || inputs.pro-changed || inputs.github-changed) }}
+    with:
+      ENV: "development"
+      tag: ${{ github.sha }}
+
+  # If the following jobs have failed: lint-github-actions, test_pro_result, test_backend_result
+  # this job will return '["GitHub actions","Front Pro","Backend"]' in `failed-tests-matrix` output
+  compute-failed-tests-matrix:
+    name: Compute failed tests matrix
+    runs-on: ubuntu-latest
+    needs:
+      - lint-github-actions
+      - test-pro
+      - test-e2e
+      - test-backend
+      - check-api-client-update
+      - test-api-documentation
+    if: always()
+    env:
+      lint_github_actions_result: ${{contains(needs.lint-github-actions.result, 'failure') && 'GitHub actions' || ''}}
+      test_pro_result: ${{contains(needs.test-pro.result, 'failure') && 'Front Pro' || ''}}
+      test_e2e_result: ${{contains(needs.test-e2e.result, 'failure') && 'E2E' || ''}}
+      test_backend_result: ${{contains(needs.test-backend.result, 'failure') && 'Backend' || ''}}
+      test_api_client_result: ${{contains(needs.check-api-client-update.result, 'failure') && 'Client API Front' || ''}}
+      test_api_documentation: ${{contains(needs.test-api-documentation.result, 'failure') && 'Documentation API' || ''}}
+    outputs:
+      failed-tests-matrix: ${{ steps.compute-matrix.outputs.failed-tests-matrix }}
+    steps:
+      - id: compute-matrix
+        run: |
+          failed_results=("$lint_github_actions_result"  "$test_pro_result"  "$test_e2e_result"  "$test_backend_result"  "$test_api_documentation")
+          json_array=$(printf '%s\n' "${failed_results[@]}" | jq -R -s '
+            split("\n")
+            | map(select(length > 0))
+            | .
+          ' -c)
+          echo "failed-tests-matrix=$json_array" >> "$GITHUB_OUTPUT"

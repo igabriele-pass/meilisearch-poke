@@ -1,0 +1,149 @@
+export enum ButtonVariant {
+  PRIMARY = 'primary',
+  SECONDARY = 'secondary',
+  TERTIARY = 'tertiary',
+}
+
+export enum IconPositionEnum {
+  LEFT = 'left',
+  RIGHT = 'right',
+}
+
+export enum ButtonColor {
+  BRAND = 'brand',
+  NEUTRAL = 'neutral',
+  DANGER = 'danger',
+}
+
+export enum ButtonSize {
+  DEFAULT = 'default',
+  SMALL = 'small',
+}
+
+/**
+ * ******************* Base props *******************
+ */
+interface ButtonBaseProps {
+  /**
+   * The color of the button
+   */
+  color?: ButtonColor
+  /**
+   * The variant of the button
+   */
+  variant?: ButtonVariant
+  /**
+   * The label of the button
+   */
+  label?: string
+  /**
+   * If the button is disabled
+   */
+  disabled?: boolean
+  /**
+   * If the button is hovered
+   */
+  hovered?: boolean
+  /**
+   * If the button is loading
+   */
+  isLoading?: boolean
+  /**
+   * The size of the button
+   */
+  size?: ButtonSize
+  /**
+   * If the button has a transparent background (principally used with secondary variant)
+   */
+  transparent?: boolean
+  /**
+   * If the button is full width
+   */
+  fullWidth?: boolean
+  /**
+   * If the button is full height
+   */
+  fullHeight?: boolean
+  /**
+   * The tooltip of the button
+   */
+  tooltip?: string
+  /**
+   ******************* Icon props *******************
+   */
+  /**
+   * The icon of the button
+   */
+  icon?: string
+  /**
+   * The alternative text of the icon
+   */
+  iconAlt?: string
+  /**
+   * The position of the icon
+   */
+  iconPosition?: IconPositionEnum
+  /**
+   * The class name of the icon
+   *
+   * @deprecated We shouldn't inject any custom style in a DS component.
+   */
+  iconClassName?: string
+}
+
+/**
+ * ******************* Button props *******************
+ */
+type ButtonAsButtonProps = ButtonBaseProps & {
+  /**
+   * The type of component
+   */
+  as?: 'button'
+  /**
+   * The type of the button
+   */
+  type?: NonNullable<ButtonTypeAttribute>
+  to?: never
+  opensInNewTab?: never
+} & Omit<
+    React.ButtonHTMLAttributes<HTMLButtonElement>,
+    'className' | 'disabled' | 'style'
+  >
+
+/**
+ * ******************* Anchor props *******************
+ */
+export type ButtonAsAnchorProps = ButtonBaseProps & {
+  as: 'a'
+  type?: never
+  to: string
+  opensInNewTab?: boolean
+} & Omit<
+    React.AnchorHTMLAttributes<HTMLAnchorElement>,
+    'className' | 'href' | 'style'
+  >
+
+/**
+ * ******************* Link props *******************
+ */
+
+type ButtonAsRouterLinkProps = ButtonBaseProps & {
+  as: 'router-link'
+  type?: never
+  to: string
+  opensInNewTab?: never
+  /** Router `state` forwarded to the underlying `Link`, e.g. so the target page can read it once it takes over. */
+  state?: unknown
+} & Omit<
+    React.AnchorHTMLAttributes<HTMLAnchorElement>,
+    'className' | 'href' | 'style'
+  >
+
+export type ButtonTypeAttribute = NonNullable<
+  React.ButtonHTMLAttributes<HTMLButtonElement>['type']
+>
+
+export type ButtonProps =
+  | ButtonAsButtonProps
+  | ButtonAsAnchorProps
+  | ButtonAsRouterLinkProps

@@ -1,0 +1,138 @@
+from datetime import timedelta
+from unittest.mock import patch
+
+import pytest
+from flask_jwt_extended import decode_token
+from flask_jwt_extended.utils import create_access_token
+from flask_jwt_extended.utils import create_refresh_token
+
+import pcapi.core.users.factories as users_factories
+from pcapi.routes.native.security import authenticated_and_active_user_required
+from pcapi.routes.native.security import authenticated_maybe_inactive_user_required
+
+from tests.serialization.serialization_decorator_test import test_blueprint
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+@test_blueprint.route("/authenticated_and_active_user_required", methods=["GET"])
+@authenticated_and_active_user_required
+def authenticated_and_active_user_required_route(*args, **kwargs) -> None:
+    return "", 204
+
+
+@test_blueprint.route("/authenticated_maybe_inactive_user_required", methods=["GET"])
+@authenticated_maybe_inactive_user_required
+def authenticated_maybe_inactive_user_required_route(*args, **kwargs) -> None:
+    return "", 204
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/test-blueprint/authenticated_and_active_user_required",
+        "/test-blueprint/authenticated_maybe_inactive_user_required",
+    ],
+)
+def test_get_active_user(client, path):
+    user = users_factories.UserFactory(isActive=True)
+
+    client.with_token(user)
+    with patch("pcapi.core.users.sessions._common.NATIVE_FOLDERS", ["/test-blueprint/"]):
+        response = client.get(path)
+    assert response.status_code == 204
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/test-blueprint/authenticated_and_active_user_required",
+        "/test-blueprint/authenticated_maybe_inactive_user_required",
+    ],
+)
+def test_get_unauthenticated_active_user(client, path):
+    with patch("pcapi.core.users.sessions._common.NATIVE_FOLDERS", ["/test-blueprint/"]):
+        client.auth_header = {}
+        response = client.get(path)
+    assert response.status_code == 401
+
+
+def test_inactive_user_when_active_required(client):
+    user = users_factories.UserFactory(isActive=False)
+    path = "/test-blueprint/authenticated_and_active_user_required"
+
+    client.with_token(user)
+    with patch("pcapi.core.users.sessions._common.NATIVE_FOLDERS", ["/test-blueprint/"]):
+        response = client.get(path)
+    assert response.status_code == 401
+
+
+def test_inactive_user_when_may_be_inactive(client):
+    user = users_factories.UserFactory(isActive=False)
+    path = "/test-blueprint/authenticated_maybe_inactive_user_required"
+
+    client.with_token(user)
+    with patch("pcapi.core.users.sessions._common.NATIVE_FOLDERS", ["/test-blueprint/"]):
+        response = client.get(path)
+    assert response.status_code == 204
+
+
+class UserConnectedTest:
+    def test_user_connected_with_refresh_token(self, client):
+        user = users_factories.BeneficiaryFactory()
+        token = create_refresh_token(
+            identity=str(user.id),
+            expires_delta=timedelta(seconds=30),
+        )
+        users_factories.NativeUserSessionFactory(user=user, refreshToken=decode_token(token)["jti"])
+
+        response = client.with_explicit_token(token).get("/native/v1/me")
+
+        assert response.status_code == 401
+        assert response.json == {}
+
+    def test_user_connected_with_access_token(self, client):
+        user = users_factories.BeneficiaryFactory()
+        response = client.with_token(user).get("/native/v1/me")
+
+        assert response.status_code == 200
+        assert response.json
+
+    def test_user_connected_with_unregistred_access_token(self, client):
+        user = users_factories.BeneficiaryFactory()
+        response = client.with_token(user, register_token=False).get("/native/v1/me")
+
+        assert response.status_code == 401
+        assert response.json == {}
+
+    def test_user_connected_with_no_token(self, client):
+        response = client.without_token().get("/native/v1/me")
+
+        assert response.status_code == 401
+        assert response.json == {}
+
+    def test_user_connected_with_invalid_token(self, client):
+        user = users_factories.BeneficiaryFactory()
+        token = create_access_token(
+            identity=str(user.id),
+            expires_delta=timedelta(seconds=30),
+        )
+        users_factories.NativeUserSessionFactory(user=user, accessToken=decode_token(token)["jti"])
+
+        response = client.with_explicit_token(token[:-4]).get("/native/v1/me")
+
+        assert response.status_code == 401
+        assert response.json == {}
+
+    def test_user_connected_with_expired_token(self, client):
+        user = users_factories.BeneficiaryFactory()
+        token = create_access_token(
+            identity=str(user.id),
+            expires_delta=timedelta(seconds=-30),
+        )
+
+        response = client.with_explicit_token(token).get("/native/v1/me")
+
+        assert response.status_code == 401
+        assert response.json == {}

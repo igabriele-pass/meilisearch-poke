@@ -1,0 +1,33 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_a11y.scss" as a11y;
+
+.invoices-table {
+  margin: var(--size-spacing-xxl) 0;
+  position: relative;
+}
+
+.negative-amount {
+  color: var(--color-text-error);
+}
+
+.positive-amount {
+  color: var(--color-text-success);
+}
+
+.cell-document-type {
+  display: flex;
+  gap: var(--size-spacing-xs);
+}
+
+.cell-actions {
+  text-align: right;
+}
+
+@media (min-width: size.$tablet) {
+  .cell-document-type {
+    text-align: left;
+    white-space: nowrap;
+  }
+}

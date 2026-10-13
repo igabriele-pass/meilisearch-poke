@@ -1,0 +1,104 @@
+{% import "components/clipboard.html" as clipboard %}
+{% import "components/logo.html" as logo %}
+{% import "components/badges.html" as badges with context %}
+{% from "components/generic_modal.html" import build_modal_form with context %}
+{% from "components/forms.html" import build_form_fields_group with context %}
+{% from "components/dynamic/spinner.html" import build_loading_spinner with context %}
+{% extends "layouts/pro.html" %}
+{% block pro_main_content %}
+  <div class="row row-cols-1 g-4 py-3 pc-strip-query-string">
+    <div class="col">
+      <div class="card shadow">
+        <div class="card-body">
+          <div class="row justify-content-start align-items-center">
+            <div class="col d-flex align-items-center justify-content-start">
+              <h2 class="card-title mb-3 text-primary">{{ user.firstName }} {{ user.lastName | upper }}</h2>
+              <div class="fs-5 ps-4 mb-3 align-middle">
+                {% for role in user.roles %}{{ role | format_role | format_badge("secondary") }}{% endfor %}
+                {% if not user.isActive %}{{ user.isActive | format_state | format_badge("danger") }}{% endif %}
+                {{ badges.build_pro_user_status_badge(user) }}
+              </div>
+              <div class="d-flex row-reverse justify-content-end flex-grow-1 gap-2">
+                {% if has_permission("MANAGE_PRO_ENTITY") %}
+                  {% set edit_pro_user_information_label_id = random_hash() %}
+                  {{ build_modal_form("edit-pro-user", dst, form, "Modifier les informations", "Modification des informations de " + user.firstName | empty_string_if_null + " " + user.lastName | empty_string_if_null | upper, "Enregistrer") }}
+                {% endif %}
+                {% if has_permission("PRO_FRAUD_ACTIONS") and user.isActive %}
+                  {{ build_modal_form("suspend-pro-user", suspension_dst, suspension_form, "Suspendre le compte", "Suspendre le compte", "Confirmer la suspension") }}
+                {% elif has_permission("PRO_FRAUD_ACTIONS") and not user.isActive %}
+                  {{ build_modal_form("unsuspend-pro-user", suspension_dst, suspension_form, "Réactiver le compte", "Réactiver le compte", "Confirmer la réactivation") }}
+                {% endif %}
+                {% if has_permission("MANAGE_PRO_ENTITY") and can_be_deleted %}
+                  {{ build_modal_form("delete-pro-user", delete_dst, delete_form, "Supprimer le compte", "Supprimer le compte", "Supprimer le compte", "Pour confirmer la suppression du compte merci de saisir son adresse email") }}
+                {% endif %}
+                {% if has_permission("MANAGE_PRO_ENTITY") and can_be_disconnected %}
+                  {% set disconnect_text = sessions_count | pluralize("La session active de "~ user.full_name ~" sera déconnectée.", "Les "~ sessions_count ~" sessions actives de "~ user.full_name ~" seront déconnectées.") %}
+                  {{ build_modal_form("delete-pro-user", disconnect_dst, disconnect_form, "Déconnecter les sessions", "Déconnecter " + user.full_name, "Déconnecter", disconnect_text) }}
+                {% endif %}
+                {% if user.isActive %}
+                  <div class="mx-3 pt-2 pc-brevo-logo-link">
+                    <a href="{{ url_for('backoffice.users.redirect_to_brevo_user_page', user_id=user.id) }}"
+                       target="_blank"
+                       rel="noreferrer noopener">{{ logo.brevo() }}</a>
+                  </div>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+          <p class="card-subtitle text-muted mb-3 h5">
+            User ID : {{ user.id }} {{ clipboard.copy_to_clipboard(user.id, "Copier l'ID de l'utilisateur") }}
+          </p>
+          <div class="row pt-3">
+            <div class="col-4">
+              <div class="fs-6">
+                <p class="mb-1">
+                  <span class="fw-bold">Email :</span> {{ user.email }}
+                  <span class="ms-1">{{ clipboard.copy_to_clipboard(user.email, "Copier l'adresse email") }}</span>
+                  {{ badges.build_has_changed_email_icon(user) }}
+                </p>
+                <p class="mb-1">
+                  <span class="fw-bold">Tél :</span> {{ user.phoneNumber | empty_string_if_null }}
+                </p>
+                <p class="mb-1">
+                  <span class="fw-bold">Nombre de sessions actives :</span> {{ sessions_count }}
+                </p>
+              </div>
+            </div>
+            <div class="col-4">
+              <div class="fs-6">
+                <p class="mb-1">
+                  <span class="fw-bold">Code postal :</span> {{ user.postalCode | empty_string_if_null }}
+                </p>
+                <p class="mb-1">
+                  <span class="fw-bold">Département :</span> {{ user.departementCode | empty_string_if_null }}
+                </p>
+              </div>
+            </div>
+            <div class="col-4">
+              <div class="fs-6">
+                <p class="mb-1">
+                  <span class="fw-bold">Email validé :</span> {{ user.isEmailValidated | format_bool }}
+                </p>
+                {% if not user.isEmailValidated and has_permission("MANAGE_PRO_ENTITY") %}
+                  <p class="mb-1">
+                    {{ build_modal_form("validate-email", url_for("backoffice.pro_user.validate_pro_user_email", user_id=user.id) , empty_form, "Valider l'adresse email", "Confirmer la validation de l'adresse email", "Vous êtes sur le point de valider l'adresse email, êtes-vous sûr ?") }}
+                  </p>
+                {% endif %}
+                <p class="mb-1">
+                  <span class="fw-bold">Abonné aux emails marketing :</span> {{ user.get_notification_subscriptions().marketing_email | format_bool }}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="mt-4">
+        <div id="pro_user_details_frame"
+             hx-trigger="load"
+             hx-get="{{ url_for('backoffice.pro_user.get_details', user_id=user.id, active_tab=request.args.get('active_tab', 'history')) }}">
+          {{ build_loading_spinner() }}
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock pro_main_content %}

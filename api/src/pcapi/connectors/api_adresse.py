@@ -1,0 +1,651 @@
+"""
+A client for API Adresse.
+Documentation of the API: https://adresse.data.gouv.fr/api-doc/adresse
+Further explanations at: https://guides.etalab.gouv.fr/apis-geo/1-api-adresse.html
+"""
+
+import csv
+import enum
+import json
+import logging
+import re
+from hashlib import md5
+from io import StringIO
+
+import pydantic.v1 as pydantic_v1
+
+from pcapi import settings
+from pcapi.core.geography.constants import MAX_LATITUDE
+from pcapi.core.geography.constants import MAX_LONGITUDE
+from pcapi.utils import cache as cache_utils
+from pcapi.utils import module_loading
+from pcapi.utils import postal_code as postal_code_utils
+from pcapi.utils import regions
+from pcapi.utils import requests
+from pcapi.utils.redis import get_redis_client
+
+
+logger = logging.getLogger(__name__)
+
+
+RELIABLE_SCORE_THRESHOLD = 0.8
+
+
+class AdresseException(Exception):
+    pass  # base class, never raised directly
+
+
+class AdresseApiException(AdresseException):
+    pass  # error from the API itself
+
+
+class AdresseApiServerErrorException(AdresseApiException):
+    pass
+
+
+class NoResultException(AdresseException):
+    pass  # address is not referenced
+
+
+class InvalidFormatException(AdresseException):
+    pass
+
+
+class RateLimitExceeded(AdresseApiException):
+    pass
+
+
+class AddressInfo(pydantic_v1.BaseModel):
+    id: str
+    label: str | None
+    postcode: str
+    citycode: str  # inseeCode
+    latitude: float
+    longitude: float
+    score: float
+    city: str
+    street: str
+    type: str | None
+
+    @pydantic_v1.validator("latitude")
+    def validate_latitude(cls, latitude: float) -> float:
+        if not -MAX_LATITUDE <= latitude <= MAX_LATITUDE:
+            raise ValueError("latitude out of bounds")
+        return latitude
+
+    @pydantic_v1.validator("longitude")
+    def validate_longitude(cls, longitude: float) -> float:
+        if not -MAX_LONGITUDE <= longitude <= MAX_LONGITUDE:
+            raise ValueError("longitude out of bounds")
+        return longitude
+
+
+class ResultColumn(enum.Enum):
+    LATITUDE = "latitude"
+    LONGITUDE = "longitude"
+    RESULT_CITY = "result_city"
+    RESULT_CITYCODE = "result_citycode"
+    RESULT_CONTEXT = "result_context"
+    RESULT_DISTRICT = "result_district"
+    RESULT_HOUSENUMBER = "result_housenumber"
+    RESULT_ID = "result_id"
+    RESULT_LABEL = "result_label"
+    RESULT_NAME = "result_name"
+    RESULT_OLDCITY = "result_oldcity"
+    RESULT_OLDCITYCODE = "result_oldcitycode"
+    RESULT_POSTCODE = "result_postcode"
+    RESULT_SCORE = "result_score"
+    RESULT_SCORE_NEXT = "result_score_next"
+    RESULT_STATUS = "result_status"
+    RESULT_STREET = "result_street"
+    RESULT_TYPE = "result_type"
+
+
+def format_q(address: str, city: str) -> str:
+    """
+    This method formats the search address (q) in order to get the most accurate results from BAN.
+
+    Hence, this method:
+     - only uses address and city, without postcode.
+       In several cases, including postcode can induce errors in results.
+       Some cities have several postcodes and results may differ depending on the given postcode.
+       Examples (q --> result):
+       With postcode: '33 Boulevard Clemenceau 38000 Grenoble' --> '33 Boulevard Gambetta 38000 Grenoble'
+       Without postcode: '33 Boulevard Clemenceau Grenoble' --> '33 Boulevard Clemenceau 38100 Grenoble'
+
+     - normalizes / formats address and city to get as close as possible to the address format used by BAN.
+       It also makes sure neither address nor city contains a comma, as it would break the CSV payload.
+       Examples (q --> result):
+       Not normalized: '105 RUE DES HAIES PARIS 20' --> 'Voie Ao/20 75020 Paris'
+       Normalized: '105 Rue Des Haies Paris' --> '105 Rue des Haies 75020 Paris'
+    """
+    # Address:
+    address = address.strip()
+    address = address.replace(",", " ")
+    address = " ".join(address.split())  # substitute multiple whitespaces with a single one
+    address = address.title()
+    subs = (
+        (r"\s*\d{5}.*", ""),  # Remove postcode and city from address
+        (" Bd ", " Boulevard "),
+        (" Pl ", " Place "),
+        (" T ", "ter "),
+    )
+    for pattern, repl in subs:
+        address = re.sub(pattern, repl, address)
+
+    # City:
+    city = city.strip()
+    city = city.replace(",", "")
+    if city and (s := city.split()[0].lower()) in ("paris", "marseille", "lyon"):
+        city = s
+    city = city.capitalize()
+
+    q = f"{address} {city}"
+    return q
+
+
+def format_payload(headers: list[str], lines: list[dict]) -> str:
+    return "\n".join([",".join(headers)] + [",".join([str(line[field]) for field in headers]) for line in lines])
+
+
+def _get_backend() -> "BaseBackend":
+    backend_class = module_loading.import_string(settings.ADRESSE_BACKEND)
+    return backend_class()
+
+
+def get_municipality_centroid(city: str, postcode: str | None = None, citycode: str | None = None) -> AddressInfo:
+    """Return information about the requested city."""
+    return _get_backend().get_municipality_centroid(postcode=postcode, citycode=citycode, city=city)
+
+
+def get_address(
+    address: str,
+    *,
+    postcode: str | None = None,
+    city: str | None = None,
+    citycode: str | None = None,
+    strict: bool = False,
+) -> AddressInfo:
+    """Return information about the requested address."""
+    return _get_backend().get_single_address_result(
+        address=address, postcode=postcode, citycode=citycode, city=city, strict=strict
+    )
+
+
+def search_address(address: str, limit: int = 10) -> list[AddressInfo]:
+    """Search for addresses."""
+    return _get_backend().search_address(address, limit)
+
+
+def search_csv(
+    payload: str,
+    columns: list[str] | None = None,
+    result_columns: list[ResultColumn] | None = None,
+) -> csv.DictReader:
+    """Search CSV."""
+    return _get_backend().search_csv(payload, columns=columns, result_columns=result_columns)
+
+
+def find_ban_address(
+    address: str,
+    postal_code: str | None = None,
+    insee_code: str | None = None,
+    enforce_reliability: bool = False,
+) -> AddressInfo:
+    """Find a single address result from BAN database"""
+    return _get_backend().find_ban_address(
+        address=address, postal_code=postal_code, insee_code=insee_code, enforce_reliability=enforce_reliability
+    )
+
+
+def find_ban_city(
+    city: str,
+    postal_code: str | None = None,
+    insee_code: str | None = None,
+    enforce_reliability: bool = False,
+) -> AddressInfo:
+    """Find a single municipality or locality result from BAN database"""
+    return _get_backend().find_ban_city(
+        city=city, postal_code=postal_code, insee_code=insee_code, enforce_reliability=enforce_reliability
+    )
+
+
+class BaseBackend:
+    def get_municipality_centroid(
+        self, city: str, postcode: str | None = None, citycode: str | None = None
+    ) -> AddressInfo:
+        raise NotImplementedError()
+
+    def get_single_address_result(
+        self,
+        address: str,
+        *,
+        postcode: str | None,
+        city: str | None = None,
+        citycode: str | None = None,
+        strict: bool = False,
+    ) -> AddressInfo:
+        raise NotImplementedError()
+
+    def search_address(self, address: str, limit: int) -> list[AddressInfo]:
+        raise NotImplementedError()
+
+    def search_csv(
+        self,
+        payload: str,
+        columns: list[str] | None = None,
+        result_columns: list[ResultColumn] | None = None,
+    ) -> csv.DictReader:
+        raise NotImplementedError()
+
+    def find_ban_address(
+        self,
+        address: str,
+        postal_code: str | None = None,
+        insee_code: str | None = None,
+        enforce_reliability: bool = False,
+    ) -> AddressInfo:
+        raise NotImplementedError()
+
+    def find_ban_city(
+        self,
+        city: str,
+        postal_code: str | None = None,
+        insee_code: str | None = None,
+        enforce_reliability: bool = False,
+    ) -> AddressInfo:
+        raise NotImplementedError()
+
+
+class TestingBackend(BaseBackend):
+    def get_municipality_centroid(
+        self, city: str, postcode: str | None = None, citycode: str | None = None
+    ) -> AddressInfo:
+        # Used to check non-diffusible SIREN/SIRET
+        return AddressInfo(
+            id="06029",
+            label="Cannes",
+            postcode="06400",
+            citycode="06029",
+            score=0.9549627272727272,
+            latitude=43.555468,
+            longitude=7.004585,
+            city="Cannes",
+            street="n/d",
+            type="municipality",
+        )
+
+    def get_single_address_result(
+        self,
+        address: str,
+        *,
+        postcode: str | None,
+        city: str | None = None,
+        citycode: str | None = None,
+        strict: bool = False,
+    ) -> AddressInfo:
+        return AddressInfo(
+            id="75101_9575_00003",
+            label="3 Rue de Valois 75001 Paris",
+            postcode="75001",
+            citycode="75056",
+            score=0.9651727272727272,
+            latitude=48.87171,
+            longitude=2.308289,
+            city="Paris",
+            street="3 Rue de Valois",
+            type="housenumber",
+        )
+
+    def search_address(self, address: str, limit: int) -> list[AddressInfo]:
+        return [self.get_single_address_result(address, postcode=None)]
+
+    def search_csv(
+        self,
+        payload: str,
+        columns: list[str] | None = None,
+        result_columns: list[ResultColumn] | None = None,
+    ) -> csv.DictReader:
+        return csv.DictReader("q,result_id\n33 Boulevard Clemenceau Grenoble,38185_1660_00033")
+
+    def find_ban_address(
+        self,
+        address: str,
+        postal_code: str | None = None,
+        insee_code: str | None = None,
+        enforce_reliability: bool = False,
+    ) -> AddressInfo:
+        """Find a single address result from BAN database"""
+        return AddressInfo(
+            id="75119_2494_00005",
+            label="5 Rue Curial 75019 Paris",
+            postcode="75019",
+            citycode="75119",
+            score=0.9809327272727272,
+            latitude=48.890611,
+            longitude=2.371334,
+            city="Paris",
+            street="5 Rue Curial",
+            type="housenumber",
+        )
+
+    def find_ban_city(
+        self,
+        city: str,
+        postal_code: str | None = None,
+        insee_code: str | None = None,
+        enforce_reliability: bool = False,
+    ) -> AddressInfo:
+        """Find a single municipality or locality result from BAN database"""
+        return AddressInfo(
+            id="75056",
+            label="Paris",
+            postcode="75001",
+            citycode="75056",
+            score=0.956,
+            latitude=48.85900,
+            longitude=2.34700,
+            city="Paris",
+            street="",
+            type="municipality",
+        )
+
+
+class ApiAdresseBackend(BaseBackend):
+    base_url = "https://data.geopf.fr/geocodage"
+
+    def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        params: dict | None = None,
+        files: list | None = None,
+        timeout: float | None = None,
+    ) -> requests.Response:
+        methods = {"GET": requests.get, "POST": requests.post}
+        try:
+            response = methods[method](url, params=params, files=files, timeout=timeout)
+        except requests.exceptions.RequestException as exc:
+            msg = "Network error on Adresse API"
+            logger.exception(msg, extra={"exc": exc, "url": url})
+            raise AdresseApiException(msg) from exc
+
+        if response.status_code in (500, 503):
+            raise AdresseApiServerErrorException("Adresse API is unavailable")
+        if response.status_code == 400:
+            raise InvalidFormatException()
+        if response.status_code == 429:
+            raise RateLimitExceeded("Rate limit exceeded from API Adresse")
+        if response.status_code != 200:
+            raise AdresseApiException(f"Unexpected {response.status_code} response from Adresse API: {url}")
+
+        return response
+
+    def _search(self, params: dict) -> dict:
+        url = f"{self.base_url}/search"
+        response = self._request("GET", url, params=params, timeout=3)
+        try:
+            data = response.json()
+        except requests.exceptions.JSONDecodeError:
+            raise AdresseApiException("Unexpected non-JSON response from Adresse API")
+        return data
+
+    def _cached_search(self, params: dict) -> dict:
+        def retriever() -> str:
+            return json.dumps(self._search(params))
+
+        key_template = "cache:api:addresse:search:%(hash_params)s"
+        hash_params = md5(json.dumps(params).encode("utf-8")).hexdigest()
+
+        cached_data = cache_utils.get_from_cache(
+            retriever=retriever,
+            key_template=key_template,
+            key_args={"hash_params": hash_params},
+            expire=60 * 60 * 24 * 7,  # time between 2 PC main releases
+        )
+        if cached_data == json.dumps({"type": "FeatureCollection", "features": []}):
+            # This is a broken response from BAN API, real empty response should look like this
+            # {'type': 'FeatureCollection', 'version': 'draft', 'features': [], 'attribution': 'BAN', 'licence': 'ETALAB-2.0', 'query': 'Pouroi faire', 'filters': {'postcode': '97351'}, 'limit': 1}
+            get_redis_client().delete(key_template % {"hash_params": hash_params})
+
+        return json.loads(str(cached_data))
+
+    def _search_csv(self, files: list) -> str:
+        url = f"{self.base_url}/search/csv"
+        response = self._request("POST", url, files=files, timeout=60)
+        return response.text
+
+    @classmethod
+    def _remove_quotes(cls, value: str | None) -> str | None:
+        # API Adresse fails when q starts with non-alphanumeric characters, which are useless for search.
+        # Similar to PC Pro in pro/src/commons/utils/removeQuotes.ts
+        return re.sub('["“”«»]', "", value).strip("' ") if value is not None else None
+
+    def get_municipality_centroid(
+        self, city: str, postcode: str | None = None, citycode: str | None = None
+    ) -> AddressInfo:
+        """Fallback to querying the city, because the q parameter must contain part of the address label"""
+        if len(city) < 3 and postcode is not None:
+            city = f"{postcode} {city}"
+        params = {
+            "q": self._remove_quotes(city),
+            "postcode": postcode,
+            "citycode": citycode,
+            "type": "municipality",
+            "autocomplete": 0,
+            "limit": 1,
+        }
+        data = self._cached_search(params=params)
+        if self._is_result_empty(data):
+            logger.warning(
+                "No result from API Adresse for a municipality",
+                extra={"postcode": postcode, "city": city},
+            )
+            raise NoResultException
+        return self._format_result(data["features"][0])
+
+    def get_single_address_result(
+        self,
+        address: str,
+        *,
+        postcode: str | None,
+        city: str | None = None,
+        citycode: str | None = None,
+        strict: bool = False,
+    ) -> AddressInfo:
+        """
+        No human interaction so we limit to 1 result, and add a filter on the INSEE code (Code Officiel Géographique)
+        This will get the highest score result from the query, for a specific INSEE code.
+        An incorrect result would still be in the vicinity of the expected result, and can be later edited in pc pro
+        see https://forum.etalab.gouv.fr/t/interpretation-du-score/3852/4
+        If no result is found, we return the centroid of the municipality
+        """
+        params = {
+            "q": self._remove_quotes(address),
+            "postcode": postcode,
+            "citycode": citycode,
+            "city": self._remove_quotes(city),
+            "autocomplete": 0,
+            "limit": 1,
+        }
+
+        data = self._cached_search(params=params)
+        if self._is_result_empty(data):
+            logger.info(
+                "No result from API Adresse for queried address",
+                extra={"queried_address": address, "postcode": postcode},
+            )
+            if strict or city is None or postcode is None:  # i.e. we cannot get municipality centroid
+                raise NoResultException
+
+            return self.get_municipality_centroid(city=city, postcode=postcode, citycode=citycode)
+
+        result = self._format_result(data["features"][0])
+
+        extra = {
+            "id": result.id,
+            "label": result.label,
+            "latitude": result.latitude,
+            "longitude": result.longitude,
+            "queried_address": address,
+            "score": result.score,
+        }
+
+        if result.score < RELIABLE_SCORE_THRESHOLD:
+            logger.info("Result from API Adresse has a low score", extra=extra)
+            if strict:
+                raise NoResultException
+        else:
+            logger.info("Retrieved details from API Adresse for query", extra=extra)
+        return result
+
+    def _is_result_empty(self, result: dict) -> bool:
+        return len(result["features"]) == 0
+
+    def _get_missing_postal_code(self, citycode: str) -> str:
+        # postcode is missing in API Adresse responses in Saint-Martin and Saint-Barthélémy
+        match regions.get_department_code_from_city_code(citycode):
+            case postal_code_utils.SAINT_BARTHELEMY_DEPARTEMENT_CODE:
+                return postal_code_utils.SAINT_BARTHELEMY_POSTAL_CODE
+            case postal_code_utils.SAINT_MARTIN_DEPARTEMENT_CODE:
+                return postal_code_utils.SAINT_MARTIN_POSTAL_CODE
+
+        # Empty postal code is not supported at many places in our code, so fail and raise an alert when unexpected
+        raise ValueError("Missing postal code")
+
+    def _format_result(self, data: dict) -> AddressInfo:
+        # GeoJSON defines Point as [longitude, latitude]
+        # https://datatracker.ietf.org/doc/html/rfc7946#appendix-A.1
+        coordinates = data["geometry"]["coordinates"]
+        properties = data["properties"]
+
+        return AddressInfo(
+            id=properties["id"],
+            latitude=coordinates[1],
+            longitude=coordinates[0],
+            score=properties["score"],
+            label=properties["label"],
+            postcode=properties.get("postcode") or self._get_missing_postal_code(properties["citycode"]),
+            citycode=properties["citycode"],
+            city=properties["city"],
+            street=properties["name"],
+            type=properties["type"],
+        )
+
+    def search_address(self, address: str, limit: int) -> list[AddressInfo]:
+        params = {
+            "q": self._remove_quotes(address),
+            "autocomplete": 0,
+            "limit": limit,
+        }
+
+        data = self._cached_search(params=params)
+        if self._is_result_empty(data):
+            raise NoResultException
+
+        return [self._format_result(result) for result in data["features"]]
+
+    def search_csv(
+        self,
+        payload: str,
+        columns: list[str] | None = None,
+        result_columns: list[ResultColumn] | None = None,
+    ) -> csv.DictReader:
+        url = f"{self.base_url}/csv"
+
+        payload_size = len(payload.encode("utf-8"))
+        if payload_size > 50 * 1000 * 1000:  # 50 Mb
+            raise ValueError("Payload is too large")
+
+        if len({line.count(",") for line in payload.split("\n")}) != 1:
+            raise ValueError("Malformed payload")
+
+        if columns is None:
+            msg = "All columns will be concatenated to build the search address"
+            logger.warning(msg, extra={"url": url})
+            columns = []
+
+        headers = payload.partition("\n")[0].split(",")
+        if not set(columns).issubset(headers):
+            raise ValueError("Mismatch between columns and payload headers")
+
+        if result_columns is None:
+            result_columns = []
+        if any(result_column not in ResultColumn for result_column in result_columns):
+            raise ValueError("Invalid result_columns")
+
+        files = [("data", payload)]
+        for column in columns:
+            files.append(("columns", (None, column)))  # type: ignore[arg-type]
+        for result_column in result_columns:
+            files.append(("result_columns", (None, result_column.value)))  # type: ignore[arg-type]
+        text = self._search_csv(files)
+        return csv.DictReader(StringIO(text))
+
+    def find_ban_address(
+        self,
+        address: str,
+        postal_code: str | None = None,
+        insee_code: str | None = None,
+        enforce_reliability: bool = False,
+    ) -> AddressInfo:
+        params = {
+            "q": self._remove_quotes(address),
+            "postcode": postal_code,
+            "citycode": insee_code,
+            "autocomplete": 0,
+            "limit": 1,
+        }
+
+        data = self._cached_search(params=params)
+        if self._is_result_empty(data):
+            logger.info(
+                "No BAN address found for query",
+                extra={"queried_address": address, "insee_code": insee_code},
+            )
+            raise NoResultException
+
+        result = self._format_result(data["features"][0])
+
+        extra = {
+            "queried_address": address,
+            "id": result.id,
+            "label": result.label,
+            "postal_code": result.postcode,
+            "insee_code": result.citycode,
+            "city": result.city,
+            "score": result.score,
+            "type": result.type,
+        }
+
+        if result.score < RELIABLE_SCORE_THRESHOLD:
+            logger.info("BAN address found with a low reliability score", extra=extra)
+            if enforce_reliability:
+                raise NoResultException
+        else:
+            logger.info("BAN address found for query", extra=extra)
+        return result
+
+    def find_ban_city(
+        self,
+        city: str,
+        postal_code: str | None = None,
+        insee_code: str | None = None,
+        enforce_reliability: bool = False,
+    ) -> AddressInfo:
+        address = f"{postal_code} {city}" if postal_code is not None else city
+        try:
+            result = self.find_ban_address(
+                address=address, insee_code=insee_code, enforce_reliability=enforce_reliability
+            )
+        except NoResultException:
+            result = self.find_ban_address(address=address, enforce_reliability=enforce_reliability)
+
+        if result.type not in ("municipality", "locality"):
+            logger.info(
+                "No BAN city centroid found for query", extra={"queried_address": city, "insee_code": insee_code}
+            )
+            if enforce_reliability:
+                raise NoResultException
+        return result

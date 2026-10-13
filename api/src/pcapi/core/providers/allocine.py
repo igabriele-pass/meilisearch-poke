@@ -1,0 +1,248 @@
+import logging
+import traceback
+from collections.abc import Iterator
+
+import sqlalchemy as sa
+
+import pcapi.core.providers.repository as providers_repository
+from pcapi import settings
+from pcapi.connectors import api_allocine
+from pcapi.connectors.big_query.queries.allocine import AllocineMovieQuery
+from pcapi.connectors.serialization import allocine_serializers
+from pcapi.core.object_storage.backends.gcp import GCPBackend
+from pcapi.core.object_storage.backends.gcp import GCPData
+from pcapi.core.object_storage.backends.utils import copy_file_between_storage_backends
+from pcapi.core.offers import models as offers_models
+from pcapi.core.offers.models import Movie
+from pcapi.core.offers.models import OfferExtraData
+from pcapi.core.providers import constants as providers_constants
+from pcapi.core.providers.models import Provider
+from pcapi.core.providers.utils import log_provider_synchronization
+from pcapi.models import db
+from pcapi.utils.repository import transaction
+from pcapi.utils.transaction_manager import atomic
+
+
+logger = logging.getLogger(__name__)
+
+MOVIE_SPECIAL_EVENT = "SPECIAL_EVENT"
+
+
+def get_allocine_products_provider() -> Provider:
+    return db.session.query(Provider).filter(Provider.name == providers_constants.ALLOCINE_PRODUCTS_PROVIDER_NAME).one()
+
+
+@log_provider_synchronization(providers_constants.ALLOCINE_PRODUCTS_PROVIDER_NAME)
+def synchronize_products() -> None:
+    from pcapi.core.offers.api import upsert_movie_product_from_provider
+
+    movies = get_movie_list()
+    allocine_products_provider = get_allocine_products_provider()
+    with transaction():
+        for movie in movies:
+            generic_movie = create_generic_movie(movie)
+            upsert_movie_product_from_provider(generic_movie, allocine_products_provider)
+
+
+@log_provider_synchronization(providers_constants.ALLOCINE_PRODUCTS_PROVIDER_NAME)
+def synchronize_products_with_bigquery() -> None:
+    from pcapi.core.offers.api import upsert_movie_product_from_provider
+
+    allocine_products_provider = get_allocine_products_provider()
+    last_sync_date = providers_repository.get_last_successful_synchronization_date(allocine_products_provider)
+    with atomic():
+        for movie in AllocineMovieQuery(updated_since=last_sync_date).execute():
+            logger.info(
+                "Allocine movie returned by data", extra={"allocine_id": movie.internalId, "title": movie.title}
+            )
+            generic_movie = create_generic_movie(movie)
+            product = upsert_movie_product_from_provider(generic_movie, allocine_products_provider)
+            if product and generic_movie.poster_uuid:
+                _synchronize_movie_poster(product, allocine_products_provider, generic_movie.poster_uuid)
+
+
+def create_generic_movie(movie: allocine_serializers.AllocineMovie) -> Movie:
+    movie_data = build_movie_data(movie)
+    return Movie(
+        allocine_id=str(movie.internalId),
+        description=build_description(movie),
+        duration=movie.runtime,
+        extra_data=movie_data,
+        poster_url=movie_data["posterUrl"],
+        poster_uuid=movie.poster_uuid,
+        title=movie.title,
+        visa=movie_data["visa"],
+    )
+
+
+def _synchronize_movie_poster(product: offers_models.Product, provider: Provider, poster_uuid: str) -> None:
+    """
+    Synchronizes the movie poster from the Data bucket to the Backend bucket.
+
+    This function checks if the product already has a poster mediation with the given UUID.
+    If not, it copies the image file from the Data bucket to the Backend bucket and updates the ProductMediation.
+    """
+    existing_poster_mediation = db.session.scalar(
+        sa.select(offers_models.ProductMediation).where(
+            offers_models.ProductMediation.productId == product.id,
+            offers_models.ProductMediation.imageType == offers_models.ImageType.POSTER,
+        )
+    )
+
+    if existing_poster_mediation and existing_poster_mediation.uuid == poster_uuid:
+        return
+
+    try:
+        gcp_data = GCPData()
+        gcp_backend = GCPBackend()
+
+        copied_file_id = copy_file_between_storage_backends(
+            source_storage=gcp_data,
+            destination_storage=gcp_backend,
+            source_folder=settings.DATA_ALLOCINE_POSTERS_FOLDER_NAME,
+            destination_folder=settings.THUMBS_FOLDER_NAME,
+            file_id=poster_uuid,
+        )
+
+        if copied_file_id:
+            with atomic():
+                db.session.execute(
+                    sa.delete(offers_models.ProductMediation).where(
+                        offers_models.ProductMediation.productId == product.id,
+                        offers_models.ProductMediation.imageType == offers_models.ImageType.POSTER,
+                    )
+                )
+
+                mediation = offers_models.ProductMediation(
+                    productId=product.id,
+                    lastProvider=provider,
+                    imageType=offers_models.ImageType.POSTER,
+                    uuid=poster_uuid,
+                )
+                db.session.add(mediation)
+
+    except Exception as err:
+        logger.warning(
+            "Could not synchronize movie poster from GCS",
+            extra={
+                "product_id": product.id,
+                "allocine_id": product.extraData.get("allocineId") if product.extraData else None,
+                "mediation_uuid": poster_uuid,
+                "error": str(err),
+                "traceback": traceback.format_exc(),
+            },
+        )
+
+
+def get_movie_list() -> list[allocine_serializers.AllocineMovie]:
+    movie_list = []
+    has_next_page = True
+    end_cursor = ""
+    while has_next_page:
+        try:
+            response = api_allocine.get_movie_list_page(end_cursor)
+        except api_allocine.AllocineException as exc:
+            logger.exception("Could not get movies page at cursor '%s'. Error: '%s'", end_cursor, exc)
+            break
+
+        movie_list += response.movieList.movies
+        end_cursor = response.movieList.pageInfo.endCursor
+        has_next_page = response.movieList.pageInfo.hasNextPage
+
+    return movie_list
+
+
+def get_movies_showtimes(theater_id: str) -> Iterator[allocine_serializers.AllocineMovieShowtime]:
+    try:
+        movie_showtime_list_response = api_allocine.get_movies_showtimes_from_allocine(theater_id)
+    except api_allocine.AllocineException as exc:
+        logger.error("Could not get movies showtimes for theater %s. Error: '%s'", theater_id, str(exc))
+        return iter([])
+
+    movie_showtime_list = movie_showtime_list_response.movieShowtimeList
+    movies_number = movie_showtime_list.totalCount
+    filtered_movies_showtimes = _exclude_empty_movies_and_special_events(movie_showtime_list.moviesShowtimes)
+
+    logger.info("[ALLOCINE] Total : %s movies", movies_number)
+
+    return iter(filtered_movies_showtimes)
+
+
+def get_movie_poster(poster_url: str) -> bytes:
+    try:
+        return api_allocine.get_movie_poster_from_allocine(poster_url)
+    except api_allocine.AllocineException:
+        logger.info(
+            "Could not fetch movie poster",
+            extra={
+                "provider": "allociné",
+                "url": poster_url,
+            },
+        )
+        return b""
+
+
+def _exclude_empty_movies_and_special_events(
+    movies_showtimes: list[allocine_serializers.AllocineMovieShowtime],
+) -> list[allocine_serializers.AllocineMovieShowtime]:
+    return [
+        movie_showtimes
+        for movie_showtimes in movies_showtimes
+        if movie_showtimes.movie and movie_showtimes.movie.type != MOVIE_SPECIAL_EVENT
+    ]
+
+
+def build_movie_data(movie: allocine_serializers.AllocineMovie) -> OfferExtraData:
+    return OfferExtraData(
+        allocineId=movie.internalId,
+        backlink=str(movie.backlink.url),
+        cast=[build_full_name(item.actor) for item in movie.cast.items if item.actor],
+        companies=[company.model_dump() for company in movie.companies],
+        countries=[country.name for country in movie.countries],
+        credits=[credit.model_dump() for credit in movie.credits],
+        eidr=movie.data.eidr,
+        genres=[genre.name for genre in movie.genres],
+        originalTitle=movie.originalTitle,
+        posterUrl=str(movie.poster.url) if movie.poster else None,
+        productionYear=movie.data.productionYear,
+        releaseDate=get_most_recent_release_date(movie.releases),
+        certificate=get_certificate(movie.releases),
+        runtime=movie.runtime,
+        stageDirector=build_full_name(movie.credits[0].person) if movie.credits else None,
+        synopsis=movie.synopsis,
+        title=movie.title,
+        type=movie.type,
+        visa=movie.releases[0].data.visa_number if movie.releases else None,
+    )
+
+
+def build_movie_id_at_providers(provider_id: int, allocine_id: int) -> str:
+    return f"{provider_id}:{allocine_id}"
+
+
+def get_most_recent_release_date(releases: list[allocine_serializers.AllocineMovieRelease]) -> str | None:
+    sorted_releases = sorted(
+        [
+            release.releaseDate.date.isoformat()
+            for release in releases
+            if release.releaseDate and release.releaseDate.date
+        ],
+        reverse=True,
+    )
+    return sorted_releases[0] if sorted_releases else None
+
+
+def get_certificate(releases: list[allocine_serializers.AllocineMovieRelease]) -> str | None:
+    sorted_certificates = sorted(
+        [release.certificate for release in releases if release.certificate],
+        reverse=True,
+    )
+    return sorted_certificates[0] if sorted_certificates else None
+
+
+def build_description(movie: allocine_serializers.AllocineMovie) -> str:
+    return f"{movie.synopsis}\n{movie.backlink.label}: {movie.backlink.url}"
+
+
+def build_full_name(person: allocine_serializers.AllocineMoviePerson) -> str:
+    return f"{person.firstName or ''} {person.lastName or ''}".strip()

@@ -1,0 +1,54 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_forms.scss" as forms;
+@use "styles/mixins/_rem.scss" as rem;
+
+.wrapper {
+  position: relative;
+}
+
+.text-area {
+  @include forms.input-theme;
+
+  $padding: 16px;
+
+  display: block;
+  padding-top: rem.torem($padding);
+  padding-bottom: rem.torem($padding);
+  resize: none;
+  overflow: hidden auto;
+  border-radius: var(--size-border-radius-m);
+
+  @include forms.input-theme-nested;
+
+  &.has-error {
+    @include forms.input-theme-error;
+  }
+}
+
+.label:not(.has-description) {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--size-spacing-s);
+}
+
+.template-button {
+  position: absolute;
+  bottom: rem.torem(16px);
+  left: rem.torem(16px);
+}
+
+.description {
+  @include fonts.body-xs;
+
+  display: block;
+  margin: 0 0 var(--size-spacing-s) 0;
+  color: var(--color-text-subtle);
+}
+
+.field-header-right {
+  @include fonts.body-accent-xs;
+
+  display: flex;
+  color: var(--color-text-subtle);
+}

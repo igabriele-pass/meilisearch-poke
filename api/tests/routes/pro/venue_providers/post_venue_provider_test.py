@@ -1,0 +1,486 @@
+from unittest.mock import patch
+
+import pytest
+
+import pcapi.core.offerers.factories as offerers_factories
+import pcapi.core.providers.factories as providers_factories
+import pcapi.core.providers.repository as providers_repository
+import pcapi.core.providers.tasks as providers_tasks
+from pcapi.core.history import models as history_models
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.providers.models import VenueProvider
+from pcapi.core.users import factories as user_factories
+from pcapi.models import db
+
+
+class Returns201Test:
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_cinema_sessions_task.delay")
+    def test_when_venue_provider_is_successfully_created(self, mock_synchronize_cinema_sessions_task, client):
+        venue = offerers_factories.VenueFactory(siret="12345678912345")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+
+        provider = providers_factories.PublicApiProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(f"/venues/{venue.id}/venue-providers", json={"providerId": provider.id})
+
+        assert response.status_code == 201
+        venue_provider = db.session.query(VenueProvider).one()
+        assert venue_provider.venueId == venue.id
+        assert venue_provider.providerId == provider.id
+        assert "id" in response.json
+        action = db.session.query(history_models.ActionHistory).one()
+        assert action.actionType == history_models.ActionType.SYNC_VENUE_TO_PROVIDER
+        assert action.authorUser == user
+        assert action.extraData["provider_name"] == venue_provider.provider.name
+
+        mock_synchronize_cinema_sessions_task.assert_not_called()
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_cinema_sessions_task.delay")
+    def test_when_movie_provider_is_successfully_created(self, mock_synchronize_cinema_sessions_task, client):
+        venue = offerers_factories.VenueFactory(siret="12345678912345")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        provider = providers_factories.CGRCinemaProviderPivotFactory(venue=venue).provider
+
+        auth_request = client.with_session_auth(email=user.email)
+        response = auth_request.post(f"/venues/{venue.id}/venue-providers", json={"providerId": provider.id})
+
+        assert response.status_code == 201
+
+        venue_provider_id = response.json["id"]
+        mock_synchronize_cinema_sessions_task.assert_called_once_with(
+            providers_tasks.CinemaSynchronisationTaskPayload(venue_provider_id=venue_provider_id).model_dump()
+        )
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_venue_provider")
+    def test_when_add_allocine_stocks_provider_with_default_settings_at_import(
+        self, mock_synchronize_venue_provider, client
+    ):
+        venue = offerers_factories.VenueFactory(managingOfferer__siren="775671464")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        providers_factories.AllocineTheaterFactory(siret=venue.siret)
+        provider = providers_factories.AllocineProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(
+            f"/venues/{venue.id}/venue-providers",
+            json={
+                "providerId": provider.id,
+                "price": "9.99",
+                "quantity": 50,
+                "isDuo": True,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json["isDuo"]
+        assert response.json["price"] == 9.99
+        assert response.json["quantity"] == 50
+        venue_provider = db.session.query(VenueProvider).one()
+        mock_synchronize_venue_provider.assert_called_once_with(venue_provider)
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_venue_provider")
+    def test_when_add_allocine_stocks_provider_for_venue_without_siret(self, mock_synchronize_venue_provider, client):
+        venue = offerers_factories.VenueWithoutSiretFactory(managingOfferer__siren="775671464")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        providers_factories.AllocinePivotFactory(venue=venue)
+        provider = providers_factories.AllocineProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(
+            f"/venues/{venue.id}/venue-providers",
+            json={
+                "providerId": provider.id,
+                "price": "9.99",
+                "quantity": 50,
+                "isDuo": True,
+            },
+        )
+
+        assert response.status_code == 201
+        assert response.json["isDuo"]
+        assert response.json["price"] == 9.99
+        assert response.json["quantity"] == 50
+        venue_provider = db.session.query(VenueProvider).one()
+        mock_synchronize_venue_provider.assert_called_once_with(venue_provider)
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_cinema_sessions_task.delay")
+    def test_when_no_regression_on_format(self, mock_synchronize_cinema_sessions_task, client):
+        venue = offerers_factories.VenueFactory(siret="12345678912345")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+
+        provider = providers_factories.PublicApiProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(f"/venues/{venue.id}/venue-providers", json={"providerId": provider.id})
+
+        assert response.status_code == 201
+        assert set(response.json.keys()) == {
+            "dateCreated",
+            "id",
+            "isActive",
+            "isDuo",
+            "isFromAllocineProvider",
+            "lastSyncDate",
+            "price",
+            "provider",
+            "quantity",
+            "venueId",
+            "venueIdAtOfferProvider",
+        }
+        assert set(response.json["provider"].keys()) == {
+            "id",
+            "name",
+            "isActive",
+            "hasOffererProvider",
+            "enabledForPro",
+        }
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_cinema_sessions_task.delay")
+    def test_when_venue_id_at_offer_provider_is_ignored_for_pro(self, mock_synchronize_cinema_sessions_task, client):
+        venue = offerers_factories.VenueFactory(siret="12345678912345")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+
+        provider = providers_factories.PublicApiProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(
+            f"/venues/{venue.id}/venue-providers",
+            json={"providerId": provider.id, "venueIdAtOfferProvider": "====VY24G1AGF56"},
+        )
+
+        assert response.status_code == 201
+        venue_provider = db.session.query(VenueProvider).one()
+        assert venue_provider.venueId == venue.id
+        assert venue_provider.providerId == provider.id
+        assert "id" in response.json
+        mock_synchronize_cinema_sessions_task.assert_not_called()
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_venue_provider")
+    def test_create_venue_provider_for_cinema(self, mocked_synchronize_venue_provider, requests_mock, client):
+        venue = offerers_factories.VenueFactory()
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        ems_provider = providers_repository.get_provider_by_local_class("EMSStocks")
+        pivot = providers_factories.CinemaProviderPivotFactory(venue=venue, provider=ems_provider)
+        providers_factories.EMSCinemaDetailsFactory(cinemaProviderPivot=pivot)
+
+        client = client.with_session_auth(email=user.email)
+
+        response = client.post(f"/venues/{venue.id}/venue-providers", json={"providerId": ems_provider.id})
+
+        assert response.status_code == 201
+        assert response.json["provider"]["id"] == ems_provider.id
+        assert response.json["venueId"] == venue.id
+        assert response.json["venueIdAtOfferProvider"] == pivot.idAtProvider
+        venue_provider = db.session.query(VenueProvider).one()
+        mocked_synchronize_venue_provider.assert_called_once_with(venue_provider)
+        venue_provider = db.session.query(VenueProvider).one()
+
+
+class Returns400Test:
+    @pytest.mark.usefixtures("db_session")
+    def test_when_api_error_raise_when_missing_fields(self, client):
+        user = user_factories.ProFactory()
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post("/venues/1/venue-providers", json={})
+
+        assert response.status_code == 400
+        assert response.json["providerId"] == ["Ce champ est obligatoire"]
+
+    @pytest.mark.usefixtures("clean_database")
+    def test_when_add_allocine_stocks_provider_with_wrong_format_price(self, client):
+        venue = offerers_factories.VenueFactory(managingOfferer__siren="775671464")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        providers_factories.AllocineTheaterFactory(siret=venue.siret)
+        provider = providers_factories.AllocineProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(
+            f"/venues/{venue.id}/venue-providers",
+            json={
+                "providerId": provider.id,
+                "isDuo": True,
+                "price": "not a price",
+            },
+        )
+
+        assert response.status_code == 400
+        assert response.json == {"price": ["Saisissez un nombre valide"]}
+        assert db.session.query(VenueProvider).count() == 0
+
+    @pytest.mark.usefixtures("db_session")
+    def test_when_add_allocine_stocks_provider_with_no_price(self, client):
+        venue = offerers_factories.VenueFactory(managingOfferer__siren="775671464")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        providers_factories.AllocineTheaterFactory(siret=venue.siret)
+        provider = providers_factories.AllocineProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(f"/venues/{venue.id}/venue-providers", json={"providerId": provider.id})
+
+        assert response.status_code == 400
+        assert response.json["price"] == ["Il est obligatoire de saisir un prix."]
+        assert db.session.query(VenueProvider).count() == 0
+
+    @pytest.mark.usefixtures("db_session")
+    def test_when_add_allocine_stocks_provider_with_negative_price(self, client):
+        venue = offerers_factories.VenueFactory(managingOfferer__siren="775671464")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        providers_factories.AllocineTheaterFactory(siret=venue.siret)
+        provider = providers_factories.AllocineProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(
+            f"/venues/{venue.id}/venue-providers",
+            json={"providerId": provider.id, "price": -20},
+        )
+
+        assert response.status_code == 400
+        assert response.json["price"] == ["Saisissez un nombre supérieur ou égal à 0.0"]
+        assert db.session.query(VenueProvider).count() == 0
+
+    @pytest.mark.usefixtures("db_session")
+    def test_when_add_same_provider(self, client):
+        provider = providers_factories.PublicApiProviderFactory()
+        venue_provider = providers_factories.VenueProviderFactory(provider=provider, venueIdAtOfferProvider=None)
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue_provider.venue.managingOfferer)
+
+        client = client.with_session_auth(email=user.email)
+
+        response = client.post(
+            f"/venues/{venue_provider.venueId}/venue-providers",
+            json={"providerId": venue_provider.providerId},
+        )
+
+        assert response.status_code == 400
+        assert response.json == {"global": ["Votre structure est déjà liée à cette source."]}
+        assert venue_provider.venue.venueProviders == [venue_provider]
+
+
+class Returns401Test:
+    @pytest.mark.usefixtures("db_session")
+    def test_when_user_is_not_logged_in(self, client):
+        response = client.post("/venues/1/venue-providers")
+
+        assert response.status_code == 401
+
+
+class Returns404Test:
+    @pytest.mark.usefixtures("db_session")
+    def test_when_venue_does_not_exist(self, client):
+        user = user_factories.ProFactory()
+        provider = providers_factories.PublicApiProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(
+            "/venues/404/venue-providers",
+            json={
+                "providerId": provider.id,
+                "isDuo": False,
+                "price": "9.99",
+            },
+        )
+
+        assert response.status_code == 404
+
+    @pytest.mark.usefixtures("db_session")
+    def test_when_add_allocine_pivot_is_missing(self, client):
+        venue = offerers_factories.VenueFactory(managingOfferer__siren="775671464")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        provider = providers_factories.AllocineProviderFactory()
+
+        venue_provider_data = {
+            "providerId": provider.id,
+            "isDuo": False,
+            "price": "9.99",
+        }
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(f"/venues/{venue.id}/venue-providers", json=venue_provider_data)
+
+        assert response.status_code == 404
+        assert response.json == {
+            "allocine": [
+                "Cette structure n'est pas autorisée à être synchronisée avec Allociné. Veuillez contacter le support si vous souhaitez le faire."
+            ]
+        }
+        assert db.session.query(VenueProvider).count() == 0
+
+    @pytest.mark.usefixtures("db_session")
+    def test_when_provider_is_inactive(self, client):
+        user = user_factories.ProFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer__siren="775671464")
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        provider = providers_factories.PublicApiProviderFactory(isActive=False)
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(
+            f"/venues/{venue.id}/venue-providers",
+            json={"providerId": provider.id},
+        )
+
+        assert response.status_code == 404
+        assert db.session.query(VenueProvider).count() == 0
+
+    @pytest.mark.usefixtures("db_session")
+    def test_when_provider_is_not_enabled_for_pro(self, client):
+        user = user_factories.ProFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer__siren="775671464")
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        provider = providers_factories.PublicApiProviderFactory(enabledForPro=False)
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        response = auth_request.post(
+            f"/venues/{venue.id}/venue-providers",
+            json={"providerId": provider.id},
+        )
+
+        assert response.status_code == 404
+        assert db.session.query(VenueProvider).count() == 0
+
+
+class ConnectProviderToVenueTest:
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.api.connect_venue_to_provider")
+    def test_should_inject_the_appropriate_repository_to_the_usecase(self, mocked_connect_venue_to_provider, client):
+        venue = offerers_factories.VenueFactory(siret="12345678912345")
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+
+        provider = providers_factories.PublicApiProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        auth_request.post(f"/venues/{venue.id}/venue-providers", json={"providerId": provider.id})
+
+        mocked_connect_venue_to_provider.assert_called_once_with(venue, provider)
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_cinema_sessions_task.delay")
+    def test_should_connect_to_allocine(
+        self,
+        mocekd_synchronize_cinema_sessions_task,
+        client,
+    ):
+        venue = offerers_factories.VenueFactory()
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        providers_factories.AllocineTheaterFactory(siret=venue.siret)
+        provider = providers_factories.AllocineProviderFactory()
+
+        venue_provider_data = {
+            "providerId": provider.id,
+            "price": "33.33",
+            "isDuo": True,
+        }
+
+        auth_request = client.with_session_auth(email=user.email)
+
+        auth_request.post(f"/venues/{venue.id}/venue-providers", json=venue_provider_data)
+
+        assert len(venue.venueProviders) == 1
+        venue_provider = venue.venueProviders[0]
+        assert venue_provider.provider == provider
+        mocekd_synchronize_cinema_sessions_task.assert_called_once_with(
+            providers_tasks.CinemaSynchronisationTaskPayload(venue_provider_id=venue_provider.id).model_dump()
+        )
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_cinema_sessions_task.delay")
+    def test_should_connect_to_provider_linked_to_an_offerer(
+        self,
+        mocekd_synchronize_cinema_sessions_task,
+        client,
+    ):
+        venue = offerers_factories.VenueFactory()
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        provider = providers_factories.ProviderFactory(
+            name="Technical provider", localClass=None, isActive=True, enabledForPro=True
+        )
+        providers_factories.OffererProviderFactory(offerer=venue.managingOfferer, provider=provider)
+
+        venue_provider_data = {"providerId": provider.id}
+
+        response = client.with_session_auth(email=user.email).post(
+            f"/venues/{venue.id}/venue-providers", json=venue_provider_data
+        )
+
+        assert response.status_code == 201
+        assert len(venue.venueProviders) == 1
+        venue_provider = venue.venueProviders[0]
+        assert venue_provider.provider == provider
+        mocekd_synchronize_cinema_sessions_task.assert_not_called()
+
+    @pytest.mark.usefixtures("db_session")
+    @patch("pcapi.core.providers.tasks.synchronize_cinema_sessions_task.delay")
+    def test_should_connect_venue_without_siret_to_provider(
+        self,
+        mocekd_synchronize_cinema_sessions_task,
+        client,
+    ):
+        venue = offerers_factories.VenueWithoutSiretFactory()
+        user = user_factories.ProFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=venue.managingOfferer)
+        provider = providers_factories.ProviderFactory(
+            name="Technical provider", localClass=None, isActive=True, enabledForPro=True
+        )
+        providers_factories.OffererProviderFactory(offerer=venue.managingOfferer, provider=provider)
+
+        venue_provider_data = {"providerId": provider.id}
+
+        response = client.with_session_auth(email=user.email).post(
+            f"/venues/{venue.id}/venue-providers", json=venue_provider_data
+        )
+
+        assert response.status_code == 201
+        assert len(venue.venueProviders) == 1
+        venue_provider = venue.venueProviders[0]
+        assert venue_provider.provider == provider
+        mocekd_synchronize_cinema_sessions_task.assert_not_called()
+
+
+class Returns403Test:
+    @pytest.mark.usefixtures("db_session")
+    def test_error_if_venue_is_closed(self, client):
+        venue = offerers_factories.VenueFactory(state=offerers_models.VenueState.CLOSED)
+        user = offerers_factories.UserOffererFactory(offerer=venue.managingOfferer).user
+
+        provider = providers_factories.PublicApiProviderFactory()
+
+        auth_request = client.with_session_auth(email=user.email)
+        response = auth_request.post(f"/venues/{venue.id}/venue-providers", json={"providerId": provider.id})
+
+        assert response.status_code == 403

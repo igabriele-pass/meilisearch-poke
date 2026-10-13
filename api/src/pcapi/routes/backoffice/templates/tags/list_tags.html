@@ -1,0 +1,134 @@
+{% from "components/forms.html" import build_form_fields_group with context %}
+{% from "components/forms.html" import build_filters_form with context %}
+{% from "components/generic_modal.html" import build_modal_form with context %}
+{% import "components/presentation/details/tabs.html" as tabs %}
+{% from "components/dynamic/modal.html" import build_lazy_modal with context %}
+{% extends "layouts/connected.html" %}
+{% block page %}
+  <div class="pt-3 px-5">
+    <h1>Tags offres et partenaires culturels</h1>
+    <div class="mt-4">
+      {% call tabs.build_details_tabs_wrapper() %}
+        {{ tabs.build_details_tab("tags", "Tags", active_tab == 'tags') }}
+        {{ tabs.build_details_tab("categories", "Catégories", active_tab == 'categories') }}
+      {% endcall %}
+      {% call tabs.build_details_tabs_content_wrapper() %}
+        {% call tabs.build_details_tab_content("tags", active_tab == 'tags') %}
+          {% if has_permission("MANAGE_OFFERS_AND_VENUES_TAGS") %}
+            <button class="btn btn-outline-primary-subtle-bg my-2"
+                    data-bs-toggle="modal"
+                    data-bs-target="#create-offer-venue-tag"
+                    type="button">Créer un tag offres et partenaires culturels</button>
+            {{ build_lazy_modal(url_for("backoffice.tags.get_create_tag_form") , "create-offer-venue-tag") }}
+          {% endif %}
+          <div class="mt-4">
+            <form name="filter-offer-venue-tag"
+                  action="{{ dst }}"
+                  method="get"
+                  class="col-8 row">
+              <div class="col-8">
+                <div class="input-group mb-3">{% for form_field in form %}{{ form_field }}{% endfor %}</div>
+              </div>
+              <div class="col-4">
+                <button type="submit"
+                        class="btn btn-primary">Chercher</button>
+              </div>
+            </form>
+          </div>
+          <div>
+            {% if rows and rows.total > 0 %}
+              <div class="d-flex justify-content-between">
+                <p class="lead num-results">{{ rows.total }} résultat{{ rows.total | pluralize }}</p>
+                <div>{% include "components/search/pagination.html" %}</div>
+              </div>
+              <table class="table mb-4">
+                <thead>
+                  <tr>
+                    <th scope="col"></th>
+                    <th scope="col">ID</th>
+                    <th scope="col" class="col-2">Nom</th>
+                    <th scope="col" class="col-4">Description</th>
+                    <th scope="col" class="col-2">Catégories</th>
+                    <th scope="col" class="col-1">Date de début</th>
+                    <th scope="col" class="col-1">Date de fin</th>
+                    <th scope="col">Valorisation</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for tag in rows.items %}
+                    <tr>
+                      <td>
+                        {% if has_permission("MANAGE_OFFERS_AND_VENUES_TAGS") or has_permission("MANAGE_TAGS_N2") %}
+                          <div class="dropdown">
+                            <button type="button"
+                                    data-bs-toggle="dropdown"
+                                    aria-expanded="false"
+                                    class="btn p-0">
+                              <i class="bi bi-three-dots-vertical"></i>
+                            </button>
+                            <ul class="dropdown-menu">
+                              {% if has_permission("MANAGE_OFFERS_AND_VENUES_TAGS") %}
+                                <li class="dropdown-item p-0">
+                                  <a class="btn btn-sm d-block w-100 text-start px-3"
+                                     data-bs-toggle="modal"
+                                     data-bs-target="#update-offer-venue-tag-{{ tag.id }}">Modifier le tag</a>
+                                </li>
+                              {% endif %}
+                              {% if has_permission("MANAGE_TAGS_N2") %}
+                                <li class="dropdown-item p-0">
+                                  <a class="btn btn-sm d-block w-100 text-start px-3"
+                                     data-bs-toggle="modal"
+                                     data-bs-target="#delete-offer-venue-tag-{{ tag.id }}">Supprimer le tag</a>
+                                </li>
+                              {% endif %}
+                            </ul>
+                            {{ build_lazy_modal(url_for("backoffice.tags.get_update_tag_form", tag_id=tag.id) , "update-offer-venue-tag-" + tag.id | string) }}
+                            {% if has_permission("MANAGE_TAGS_N2") %}
+                              {{ build_lazy_modal(url_for("backoffice.tags.get_delete_tag_form", tag_id=tag.id) , "delete-offer-venue-tag-" + tag.id | string) }}
+                            {% endif %}
+                          </div>
+                        {% endif %}
+                      </td>
+                      <td>{{ tag.id }}</td>
+                      <td>{{ tag.name }}</td>
+                      <td>{{ tag.description | empty_string_if_null }}</td>
+                      <td>{{ tag.categories | format_tag_object_list }}</td>
+                      <td>{{ tag.startDateTime | format_date }}</td>
+                      <td>{{ tag.endDateTime | format_date }}</td>
+                      <td>{{ tag.highlight.name }}</td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            {% else %}
+              <p class="lead num-results">Aucun résultat</p>
+            {% endif %}
+          </div>
+        {% endcall %}
+        {% call tabs.build_details_tab_content("categories", active_tab == 'categories') %}
+          {% if create_category_form %}
+            {{ build_modal_form("create-tag-category", url_for("backoffice.tags.create_tag_category") , create_category_form, "Créer une catégorie", "Enregistrer", "Enregistrer") }}
+          {% endif %}
+          <div>
+            <table class="table mb-4">
+              <thead>
+                <tr>
+                  <th scope="col">ID</th>
+                  <th scope="col">Libellé</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for category in category_rows %}
+                  <tr>
+                    <td>{{ category.id }}</td>
+                    <td>{{ category.label }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endcall %}
+      {% endcall %}
+    </div>
+  </div>
+{% endblock %}

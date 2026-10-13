@@ -1,0 +1,152 @@
+import { createContext, useCallback, useContext, useMemo } from 'react'
+import useSWR, { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import type { HeadLineOfferResponseModel } from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import {
+  GET_OFFER_EXPOSURE_QUERY_KEY,
+  GET_VENUE_HEADLINE_OFFER_QUERY_KEY,
+} from '@/commons/config/swrQueryKeys'
+import { EngagementEvents } from '@/commons/core/FirebaseEvents/constants'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { noopAsync } from '@/commons/utils/noop'
+
+type UpsertHeadlineOfferParams = {
+  offerId: number
+  context: {
+    actionType: string
+    requiredImageUpload?: boolean
+  }
+}
+
+type RemoveHeadlineOfferParams = {
+  offerId: number
+}
+
+type HeadlineOfferContextValues = {
+  headlineOffer: HeadLineOfferResponseModel | null
+  upsertHeadlineOffer: (params: UpsertHeadlineOfferParams) => Promise<void>
+  removeHeadlineOffer: (params: RemoveHeadlineOfferParams) => Promise<void>
+}
+
+const HeadlineOfferContext = createContext<HeadlineOfferContextValues>({
+  headlineOffer: null,
+  upsertHeadlineOffer: async () => noopAsync(),
+  removeHeadlineOffer: async () => noopAsync(),
+})
+
+export const useHeadlineOfferContext = () => {
+  return useContext(HeadlineOfferContext)
+}
+
+type HeadlineOfferContextProviderProps = { children: React.ReactNode }
+
+export function HeadlineOfferContextProvider({
+  children,
+}: Readonly<HeadlineOfferContextProviderProps>) {
+  const { mutate } = useSWRConfig()
+  const snackBar = useSnackBar()
+  const { logEvent } = useAnalytics()
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+
+  const { data: rawHeadlineOffer, error } = useSWR(
+    selectedPartnerVenue
+      ? [GET_VENUE_HEADLINE_OFFER_QUERY_KEY, selectedPartnerVenue.id]
+      : null,
+    ([, venueId]) => api.getVenueHeadlineOffer({ path: { venue_id: venueId } }),
+    {
+      onError: (error) => {
+        // 404 is expected when there is no headline offer.
+        if (error.status !== 404) {
+          throw error
+        }
+      },
+      onErrorRetry: (error) => {
+        // By default, SWR retries on error. We don't want to retry on 404,
+        // since it's expected when there is no headline offer.
+        if (error.status === 404) {
+          return
+        }
+      },
+    }
+  )
+
+  // Sometimes rawHeadlineOffer still contains cached data while the offer is no longer an headline offer,
+  // by different means that didn't trigger a mutation (e.g. the offer has 0 stock, is deactivated).
+  const headlineOffer = error ? null : (rawHeadlineOffer ?? null)
+
+  const upsertHeadlineOffer = useCallback(
+    async ({ offerId, context }: UpsertHeadlineOfferParams) => {
+      try {
+        await mutate(
+          [GET_VENUE_HEADLINE_OFFER_QUERY_KEY, selectedPartnerVenue.id],
+          api.upsertHeadlineOffer({ body: { offerId } }),
+          { populateCache: true, revalidate: false, throwOnError: true }
+        )
+
+        await mutate([GET_OFFER_EXPOSURE_QUERY_KEY, offerId])
+
+        snackBar.success('Votre offre a été mise à la une !')
+        logEvent(EngagementEvents.CLICKED_CONFIRMED_ADD_HEADLINE_OFFER, {
+          action: context.actionType,
+          requiredImageUpload: !!context.requiredImageUpload,
+        })
+      } catch {
+        snackBar.error(
+          'Une erreur s’est produite lors de l’ajout de votre offre à la une'
+        )
+      }
+    },
+    [selectedPartnerVenue.id, snackBar, logEvent, mutate]
+  )
+
+  const removeHeadlineOffer = useCallback(
+    async ({ offerId }: RemoveHeadlineOfferParams) => {
+      if (selectedPartnerVenue) {
+        try {
+          await mutate(
+            [GET_VENUE_HEADLINE_OFFER_QUERY_KEY, selectedPartnerVenue.id],
+            api.deleteHeadlineOffer({
+              body: { venueId: selectedPartnerVenue.id },
+            }),
+            {
+              populateCache: () => null,
+              revalidate: false,
+              throwOnError: true,
+            }
+          )
+
+          await mutate([GET_OFFER_EXPOSURE_QUERY_KEY, offerId])
+
+          snackBar.success('Votre offre n’est plus à la une')
+          logEvent(EngagementEvents.CLICKED_CONFIRMED_ADD_HEADLINE_OFFER, {
+            action: 'deleted',
+          })
+        } catch {
+          snackBar.error(
+            'Une erreur s’est produite lors du retrait de votre offre à la une'
+          )
+        }
+      }
+    },
+    [selectedPartnerVenue, snackBar, logEvent, mutate]
+  )
+
+  return (
+    <HeadlineOfferContext.Provider
+      value={useMemo(
+        () => ({
+          headlineOffer,
+          upsertHeadlineOffer,
+          removeHeadlineOffer,
+        }),
+        [headlineOffer, upsertHeadlineOffer, removeHeadlineOffer]
+      )}
+    >
+      {children}
+    </HeadlineOfferContext.Provider>
+  )
+}

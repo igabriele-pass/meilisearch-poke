@@ -1,0 +1,54 @@
+// This file will be replace by apiClient
+/* istanbul ignore file */
+
+import { client } from 'repository/pcapi/pcapiClient'
+
+import { stringify } from '@/commons/utils/query-string'
+import type { CroppedRect } from '@/components/ModalImageUpsertOrEdit/ModalImageUpsertOrEdit'
+
+//
+// venues
+//
+
+type VenueImage = {
+  x_crop_percent?: number
+  y_crop_percent?: number
+  height_crop_percent?: number
+  width_crop_percent?: number
+  image_credit?: string
+  image_alternative_text?: string | null
+}
+
+export const postImageToVenue = async (
+  venueId: number,
+  banner: File,
+  imageCredit: string | null,
+  imageAlternativeText: string | null,
+  cropParams?: CroppedRect
+) => {
+  const body = new FormData()
+  body.append('banner', banner)
+
+  const venueImage: VenueImage = {
+    x_crop_percent: cropParams?.x,
+    y_crop_percent: cropParams?.y,
+    height_crop_percent: cropParams?.height,
+    width_crop_percent: cropParams?.width,
+  }
+
+  if (imageCredit) {
+    venueImage.image_credit = imageCredit
+  }
+
+  if (imageAlternativeText) {
+    venueImage.image_alternative_text = imageAlternativeText
+  }
+
+  // @ts-expect-error
+  const queryParams = stringify(venueImage)
+
+  return await client.postWithFormData(
+    `/venues/${venueId}/banner?${queryParams}`,
+    body
+  )
+}

@@ -1,0 +1,146 @@
+import { screen } from '@testing-library/react'
+import { axe } from 'vitest-axe'
+
+import {
+  IndividualOfferContext,
+  type IndividualOfferContextValues,
+} from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import {
+  getIndividualOfferFactory,
+  getOfferStockFactory,
+  getStocksResponseFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import {
+  type RenderComponentFunction,
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+
+vi.mock('@/apiClient/api', () => ({
+  api: { getStocks: vi.fn() },
+}))
+
+import { api } from '@/apiClient/api'
+import type { GetIndividualOfferResponseModel } from '@/apiClient/v1'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import {
+  MOCKED_CATEGORIES,
+  MOCKED_SUBCATEGORIES,
+  MOCKED_SUBCATEGORY,
+} from '@/pages/IndividualOffer/commons/__mocks__/constants'
+
+import { IndividualOfferPriceTable } from './IndividualOfferPriceTable'
+
+const LABELS = {
+  headings: {
+    priceTable: 'Tarifs',
+  },
+  texts: {
+    loading: 'Chargement en cours',
+  },
+}
+
+const renderIndividualOfferPriceTable: RenderComponentFunction<
+  void,
+  IndividualOfferContextValues,
+  {
+    offer: GetIndividualOfferResponseModel | null
+    offerId?: number
+  }
+> = (params) => {
+  const contextValues: IndividualOfferContextValues = {
+    categories: MOCKED_CATEGORIES,
+    hasPublishedOfferWithSameEan: false,
+    isEvent: params.offer?.isEvent ?? null,
+    offer: params.offer,
+    offerId: params.offer?.id ?? params.offerId ?? null,
+    setIsControlledEvent: vi.fn(),
+    subCategories: MOCKED_SUBCATEGORIES,
+    ...params.contextValues,
+  }
+  const user = sharedCurrentUserFactory()
+  const options: RenderWithProvidersOptions = {
+    storeOverrides: {
+      user: {
+        currentUser: user,
+        selectedPartnerVenue: makeGetVenueResponseModel({ id: 2 }),
+      },
+    },
+    ...params.options,
+  }
+
+  return renderWithProviders(
+    <IndividualOfferContext.Provider value={contextValues}>
+      <IndividualOfferPriceTable />
+    </IndividualOfferContext.Provider>,
+    options
+  )
+}
+
+describe('<IndividualOfferSummaryPriceTable />', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderIndividualOfferPriceTable({
+      offer: null,
+      offerId: 1,
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show spinner when offer is fetching', () => {
+    renderIndividualOfferPriceTable({
+      offer: null,
+      offerId: 1,
+    })
+
+    expect(screen.getByText(LABELS.texts.loading)).toBeInTheDocument()
+  })
+
+  it('should render layout, screen and action bar when stocks loaded', async () => {
+    vi.spyOn(api, 'getStocks').mockResolvedValueOnce(
+      getStocksResponseFactory({
+        stocks: [getOfferStockFactory({ id: 2 })],
+      })
+    )
+
+    const offer = getIndividualOfferFactory({
+      id: 1,
+      hasStocks: true,
+      isEvent: false,
+      subcategoryId: MOCKED_SUBCATEGORY.NON_EVENT_OFFLINE.id,
+    })
+
+    renderIndividualOfferPriceTable({ offer })
+
+    expect(
+      await screen.findByRole('heading', { name: LABELS.headings.priceTable })
+    ).toBeInTheDocument()
+    expect(api.getStocks).toHaveBeenCalledWith({
+      path: { offer_id: offer.id },
+    })
+  })
+
+  it('should not call stocks for an event offer', async () => {
+    vi.spyOn(api, 'getStocks').mockResolvedValueOnce(
+      getStocksResponseFactory({
+        stocks: [getOfferStockFactory({ id: 2 })],
+      })
+    )
+
+    const offer = getIndividualOfferFactory({
+      id: 1,
+      hasStocks: true,
+      isEvent: true,
+      subcategoryId: MOCKED_SUBCATEGORY.EVENT_OFFLINE.id,
+    })
+
+    renderIndividualOfferPriceTable({ offer })
+
+    expect(
+      await screen.findByRole('heading', { name: LABELS.headings.priceTable })
+    ).toBeInTheDocument()
+
+    expect(api.getStocks).not.toHaveBeenCalled()
+  })
+})

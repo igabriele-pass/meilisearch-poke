@@ -1,0 +1,126 @@
+import { act, screen, waitFor } from '@testing-library/react'
+import { expect } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { getCollectiveOfferFactory } from '@/commons/utils/factories/collectiveApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import {
+  managedVenueFactory,
+  userOffererFactory,
+} from '@/commons/utils/factories/userOfferersFactories'
+import {
+  makeGetVenueManagingOffererResponseModel,
+  makeGetVenueResponseModel,
+  makeVenueListItemLiteResponseModel,
+} from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import type { OptionalCollectiveOfferFromParamsProps } from '@/pages/CollectiveOffer/CollectiveOffer/components/OfferEducational/useCollectiveOfferFromParams'
+
+import { CollectiveOfferCreation } from '../CollectiveOfferCreation'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    listEducationalOfferers: vi.fn(),
+  },
+}))
+
+const renderCollectiveOfferCreation = (
+  path: string,
+  props: OptionalCollectiveOfferFromParamsProps
+) => {
+  return renderWithProviders(<CollectiveOfferCreation {...props} />, {
+    initialRouterEntries: [path],
+    storeOverrides: {
+      user: {
+        currentUser: sharedCurrentUserFactory(),
+        selectedPartnerVenue: makeGetVenueResponseModel({
+          id: props.offer?.venue?.id ?? 1,
+          managingOfferer: makeGetVenueManagingOffererResponseModel({ id: 10 }),
+        }),
+        venues: [
+          makeVenueListItemLiteResponseModel({
+            id: props.offer?.venue?.id ?? 1,
+          }),
+        ],
+      },
+    },
+  })
+}
+
+describe('CollectiveOfferCreation', () => {
+  const venue = managedVenueFactory({ id: 1 })
+  const offerer = userOffererFactory({
+    id: 1,
+    name: 'Ma super structure',
+    managedVenues: [venue],
+  })
+  const defaultProps = {
+    offer: getCollectiveOfferFactory({
+      venue: {
+        ...venue,
+        managingOfferer: { ...offerer, siren: '123456789' },
+        departementCode: '33',
+        imgUrl: null,
+        imgAlternativeText: null,
+      },
+    }),
+    isTemplate: false,
+  }
+
+  beforeEach(() => {
+    vi.spyOn(api, 'listEducationalOfferers').mockResolvedValue({
+      educationalOfferers: [offerer],
+    })
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderCollectiveOfferCreation(
+      '/offre/creation/collectif',
+      {
+        ...defaultProps,
+      }
+    )
+
+    await screen.findByRole('heading', {
+      name: 'Quel est le type de votre offre ?',
+    })
+
+    await act(async () => {
+      expect(await axe(container)).toHaveNoViolations()
+    })
+  })
+
+  it('should render collective offer creation form', async () => {
+    renderCollectiveOfferCreation('/offre/creation/collectif', {
+      ...defaultProps,
+    })
+
+    expect(
+      await screen.findByRole('heading', {
+        name: /Créer une offre/,
+      })
+    ).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', {
+          name: 'Quel est le type de votre offre ?',
+        })
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('should render with template tag', async () => {
+    renderCollectiveOfferCreation('/offre/creation/collectif/vitrine', {
+      ...defaultProps,
+      isTemplate: true,
+    })
+    expect(
+      await screen.findByRole('heading', {
+        name: /Créer une offre/,
+      })
+    ).toBeInTheDocument()
+    expect(screen.getByText('Offre vitrine')).toBeInTheDocument()
+  })
+})

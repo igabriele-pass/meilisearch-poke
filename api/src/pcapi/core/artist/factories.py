@@ -1,0 +1,56 @@
+import factory
+
+from pcapi import settings
+from pcapi.core.factories import BaseFactory
+from pcapi.core.offers import models as offers_models
+
+from . import models
+
+
+some_artist_images = [
+    "https://upload.wikimedia.org/wikipedia/commons/f/fa/Colleen_Hoover_Video_Call.png",
+    "https://upload.wikimedia.org/wikipedia/commons/e/e9/FIBD2023HajimeIsayama_01.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/6/60/Vincent_Willem_van_Gogh_107.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/0/08/JUL_-_Julien_Mari_2018.jpg",
+    "https://upload.wikimedia.org/wikipedia/commons/6/62/Madsen_Niko_Maurer_2008_01.jpg",
+]
+
+
+class ArtistFactory(BaseFactory[models.Artist]):
+    class Meta:
+        model = models.Artist
+
+    name = factory.Faker("name")
+    description = factory.Faker("text")
+    app_search_score = settings.ALGOLIA_ARTIST_MIN_APP_SEARCH_SCORE
+    image_license_url = factory.Faker("url")
+    image = factory.LazyAttributeSequence(lambda _, n: some_artist_images[n % len(some_artist_images)])
+    wikidata_id = factory.Sequence(lambda n: f"Q{n + 1:05d}")
+
+
+class ArtistProductLinkFactory(BaseFactory):
+    class Meta:
+        model = models.ArtistProductLink
+
+    artist_id = factory.SubFactory(models.Artist)
+    product_id = factory.SubFactory(offers_models.Product)
+
+
+class ArtistOfferLinkFactory(BaseFactory):
+    class Meta:
+        model = models.ArtistOfferLink
+
+    artist_type = models.ArtistType.PERFORMER
+
+
+class ArtistMusicPlatformFactory(BaseFactory):
+    class Meta:
+        model = models.ArtistMusicPlatform
+
+    artist_id = factory.LazyAttribute(lambda o: o.artist.id if hasattr(o, "artist") else None)
+    spotify_id = None
+    isni_id = None
+    apple_music_id = None
+    deezer_id = None
+    genius_id = None
+    soundcloud_id = None

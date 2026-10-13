@@ -1,0 +1,481 @@
+import { yupResolver } from '@hookform/resolvers/yup'
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { FormProvider, type UseFormReturn, useForm } from 'react-hook-form'
+import { expect, vi } from 'vitest'
+import { axe } from 'vitest-axe'
+import * as yup from 'yup'
+
+import { getSiretData } from '@/commons/core/Venue/utils/getSiretData'
+import { structureDataBodyModelFactory } from '@/commons/utils/factories/userOfferersFactories'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+import { Button } from '@/design-system/Button/Button'
+
+import type { VenueSettingsFormValues } from '../../../commons/types'
+import {
+  SiretOrCommentFields,
+  type SiretOrCommentFieldsProps,
+} from '../SiretOrCommentFields'
+import { SiretOrCommentValidationSchema } from '../validationSchema'
+
+vi.mock('@/commons/core/Venue/siretApiValidate')
+
+vi.mock('@/commons/core/Venue/utils/getSiretData', () => ({
+  getSiretData: vi.fn(),
+}))
+
+const onSubmit = vi.fn()
+
+const defaultFormContext: SiretOrCommentFieldsProps['formContext'] = {
+  isCaledonian: false,
+  withSiret: true,
+  siren: '123456789',
+  activity: 'someActivity' as VenueSettingsFormValues['activity'],
+  siret: '12345678901234',
+}
+
+const defaultInitialValues = {
+  comment: '',
+  siret: '12345678901234',
+  addressAutocomplete: null,
+  isOpenToPublic: 'true',
+}
+
+const SiretOrCommentTestValidationSchema = SiretOrCommentValidationSchema.shape(
+  {
+    comment: yup.string().default(''),
+    addressAutocomplete: yup.string().nullable().default(null),
+    isOpenToPublic: yup.string().default('true'),
+  }
+)
+
+type SiretOrCommentTestFormValues = yup.InferType<
+  typeof SiretOrCommentTestValidationSchema
+>
+
+function renderSiretOrComment(
+  defaultProps: SiretOrCommentFieldsProps,
+  initalValues?: Partial<SiretOrCommentTestFormValues>,
+  options?: RenderWithProvidersOptions
+) {
+  let methodsRef!: UseFormReturn<SiretOrCommentTestFormValues>
+
+  const Wrapper = () => {
+    const methods = useForm<SiretOrCommentTestFormValues>({
+      context: {
+        ...defaultFormContext,
+        ...defaultProps.formContext,
+      },
+      defaultValues: {
+        ...defaultInitialValues,
+        ...(initalValues || {}),
+      },
+      resolver: yupResolver<SiretOrCommentTestFormValues, unknown, unknown>(
+        SiretOrCommentTestValidationSchema
+      ),
+      mode: 'all',
+    })
+    methodsRef = methods
+
+    return (
+      <FormProvider {...methods}>
+        <form onSubmit={methods.handleSubmit(onSubmit)}>
+          <SiretOrCommentFields {...defaultProps} />
+          <Button type="submit" isLoading={false} label="Enregistrer" />
+        </form>
+      </FormProvider>
+    )
+  }
+
+  const renderResult = renderWithProviders(<Wrapper />, options)
+
+  return Object.assign(renderResult, methodsRef)
+}
+
+describe('SiretOrCommentFields', () => {
+  let props: SiretOrCommentFieldsProps
+
+  beforeEach(() => {
+    props = {
+      formContext: defaultFormContext,
+      onAddressUpdate: vi.fn(),
+    }
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderSiretOrComment(props)
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display Siret when siret is provided', () => {
+    renderSiretOrComment(props)
+
+    const siretField = screen.getByLabelText(/SIRET de la structure/)
+    expect(siretField).toBeInTheDocument()
+    const commentField = screen.queryByText(
+      'Commentaire de la structure sans SIRET'
+    )
+    expect(commentField).not.toBeInTheDocument()
+  })
+
+  it('should display comment field when there is no siret', () => {
+    renderSiretOrComment({
+      ...props,
+      formContext: {
+        ...props.formContext,
+        withSiret: false,
+      },
+    })
+
+    const siretField = screen.queryByText(/SIRET de la structure/)
+    expect(siretField).not.toBeInTheDocument()
+    const commentField = screen.getByLabelText(
+      'Commentaire de la structure sans SIRET',
+      {
+        exact: false,
+      }
+    )
+    expect(commentField).toBeInTheDocument()
+  })
+
+  describe('should validate SIRET on submit', () => {
+    it('handles onSiretChange and calls APIs and form methods', async () => {
+      vi.mocked(getSiretData)
+        .mockResolvedValueOnce(structureDataBodyModelFactory())
+        .mockRejectedValueOnce(
+          new Error('Impossible de vérifier le SIRET saisi.')
+        )
+
+      renderSiretOrComment(props)
+
+      // Find input again after rerender
+      const siretInput = screen.getByLabelText(/SIRET de la structure/i)
+
+      // Simulate input change with a valid siret starting with siren
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '123 456 789 01234')
+
+      await waitFor(() => {
+        expect(getSiretData).toHaveBeenCalledWith('123 456 789 01234')
+      })
+
+      await userEvent.click(
+        screen.getByRole('button', {
+          name: 'Enregistrer',
+        })
+      )
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1))
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'ma super stucture',
+          addressAutocomplete: '',
+          'search-addressAutocomplete': '',
+          street: '',
+          postalCode: '',
+          city: '',
+          latitude: '',
+          longitude: '',
+          coords: '',
+          inseeCode: null,
+          banId: null,
+        }),
+        expect.anything()
+      )
+
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '123 456 789 01235')
+
+      await waitFor(() => {
+        expect(getSiretData).toHaveBeenCalledWith('123 456 789 01235')
+      })
+
+      expect(
+        await screen.findByText('Impossible de vérifier le SIRET saisi.')
+      ).toBeInTheDocument()
+    })
+
+    it('handles onRidetChange and unhumanize value', async () => {
+      renderSiretOrComment({
+        ...props,
+        formContext: {
+          ...defaultFormContext,
+          isCaledonian: true,
+          siren: '1234567',
+        },
+      })
+
+      const ridetInput: HTMLInputElement = screen.getByLabelText(
+        /RIDET de la structure/
+      )
+      await userEvent.clear(ridetInput)
+      await userEvent.type(ridetInput, '1234567890')
+
+      await userEvent.click(
+        screen.getByRole('button', {
+          name: 'Enregistrer',
+        })
+      )
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalled())
+      expect(onSubmit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          siret: '1234567890',
+          comment: '',
+        }),
+        expect.anything()
+      )
+    })
+
+    it('should display error if siret is not diffusible', async () => {
+      vi.mocked(getSiretData).mockResolvedValue({
+        ...structureDataBodyModelFactory(),
+        name: 'Siret is not diffusible',
+        isDiffusible: false,
+      })
+
+      renderSiretOrComment(props)
+
+      // Find input again after rerender
+      const siretInput = screen.getByLabelText(/SIRET de la structure/i)
+
+      // Simulate input change with a valid siret starting with siren
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '123 456 789 01235')
+
+      await waitFor(() => {
+        expect(getSiretData).toHaveBeenCalledWith('123 456 789 01235')
+      })
+
+      expect(
+        await screen.findByText(
+          'Certaines informations de votre structure ne sont pas diffusibles. Veuillez contacter le support.'
+        )
+      ).toBeInTheDocument()
+    })
+
+    it('should submit valid form', async () => {
+      renderSiretOrComment(props)
+
+      const siretInput = screen.getByLabelText('SIRET de la structure', {
+        exact: false,
+      })
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '12345678900000')
+      await userEvent.click(
+        screen.getByRole('button', {
+          name: 'Enregistrer',
+        })
+      )
+
+      expect(onSubmit).toHaveBeenCalledTimes(1)
+    })
+
+    it('should display required message if siret is empty', async () => {
+      renderSiretOrComment(props)
+
+      expect(
+        screen.queryByText('Veuillez renseigner un SIRET ')
+      ).not.toBeInTheDocument()
+      const siretInput = screen.getByLabelText('SIRET de la structure', {
+        exact: false,
+      })
+      await userEvent.clear(siretInput)
+      await userEvent.tab()
+      await userEvent.click(
+        screen.getByRole('button', {
+          name: 'Enregistrer',
+        })
+      )
+
+      expect(
+        await screen.findByText('Veuillez renseigner un SIRET')
+      ).toBeInTheDocument()
+    })
+
+    it('user should not be able to enter non number characters', async () => {
+      renderSiretOrComment(props)
+
+      const siretInput: HTMLInputElement = screen.getByLabelText(
+        'SIRET de la structure',
+        {
+          exact: false,
+        }
+      )
+
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, 'abc')
+
+      expect(siretInput.value).toEqual('')
+    })
+
+    it('user should be able to enter number characters', async () => {
+      renderSiretOrComment(props)
+
+      const siretInput: HTMLInputElement = screen.getByLabelText(
+        'SIRET de la structure',
+        {
+          exact: false,
+        }
+      )
+
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '123')
+
+      expect(siretInput.value).toEqual('123')
+    })
+
+    it('should display too short message if siret is not 14 characters', async () => {
+      renderSiretOrComment(props)
+
+      const siretInput = screen.getByLabelText('SIRET de la structure', {
+        exact: false,
+      })
+      await userEvent.click(siretInput)
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '12345')
+      await userEvent.click(
+        screen.getByRole('button', {
+          name: 'Enregistrer',
+        })
+      )
+
+      const errorMessage = await screen.findByText(
+        'Le SIRET doit comporter 14 caractères'
+      )
+      expect(errorMessage).toBeInTheDocument()
+    })
+
+    it('should display error message if siret does not match siren', async () => {
+      renderSiretOrComment(props)
+
+      const siretInput = screen.getByLabelText('SIRET de la structure', {
+        exact: false,
+      })
+      await userEvent.click(siretInput)
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '11122233344400')
+      await userEvent.click(
+        screen.getByRole('button', {
+          name: 'Enregistrer',
+        })
+      )
+
+      const errorMessage = await screen.findByText(
+        'Le code SIRET doit correspondre à un établissement de votre structure'
+      )
+      expect(errorMessage).toBeInTheDocument()
+    })
+
+    describe('banner behavior', () => {
+      it('should not display the banner initially', () => {
+        renderSiretOrComment(props)
+        expect(
+          screen.queryByText('Vous avez changé de SIRET.')
+        ).not.toBeInTheDocument()
+      })
+
+      it('should display the banner after a valid SIRET is entered', async () => {
+        vi.mocked(getSiretData).mockResolvedValue(
+          structureDataBodyModelFactory()
+        )
+
+        renderSiretOrComment(props)
+
+        const siretInput = screen.getByLabelText(/SIRET de la structure/i)
+        await userEvent.clear(siretInput)
+        await userEvent.type(siretInput, '123 456 789 01233')
+
+        expect(
+          await screen.findByText('Vous avez changé de SIRET.')
+        ).toBeVisible()
+      })
+
+      it('should not display the banner when SIRET API call fails (not diffusible)', async () => {
+        vi.mocked(getSiretData).mockResolvedValue({
+          ...structureDataBodyModelFactory(),
+          isDiffusible: false,
+        })
+
+        renderSiretOrComment(props)
+
+        const siretInput = screen.getByLabelText(/SIRET de la structure/i)
+        await userEvent.clear(siretInput)
+        await userEvent.type(siretInput, '123 456 789 01233')
+
+        await waitFor(() => {
+          expect(getSiretData).toHaveBeenCalled()
+        })
+
+        expect(
+          screen.queryByText('Vous avez changé de SIRET.')
+        ).not.toBeInTheDocument()
+      })
+
+      it('should display the banner after a RIDET change', async () => {
+        renderSiretOrComment({
+          ...props,
+          formContext: {
+            ...defaultFormContext,
+            isCaledonian: true,
+            siren: '1234567',
+          },
+        })
+
+        const ridetInput = screen.getByLabelText(/RIDET de la structure/i)
+        await userEvent.clear(ridetInput)
+        await userEvent.type(ridetInput, '1234567890')
+
+        expect(screen.getByText('Vous avez changé de SIRET.')).toBeVisible()
+      })
+    })
+
+    it('should reset address fields when SIRET changes and isOpenToPublic', async () => {
+      vi.mocked(getSiretData).mockResolvedValue(structureDataBodyModelFactory())
+
+      const formMethods = renderSiretOrComment(props, {
+        comment: '',
+        siret: '12345678901234',
+        addressAutocomplete: 'Ancienne adresse conservée',
+      })
+
+      const siretInput = screen.getByLabelText(/SIRET de la structure/i)
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '123 456 789 01234')
+
+      await waitFor(() => {
+        expect(getSiretData).toHaveBeenCalledWith('123 456 789 01234')
+      })
+
+      expect(formMethods.getValues('addressAutocomplete')).toBe('')
+      expect(props.onAddressUpdate).toHaveBeenCalledTimes(1)
+    })
+    it('should keep address fields when SIRET changes and isOpenToPublic is false', async () => {
+      vi.mocked(getSiretData).mockResolvedValue(structureDataBodyModelFactory())
+
+      const formMethods = renderSiretOrComment(props, {
+        comment: '',
+        siret: '12345678901234',
+        addressAutocomplete: 'Ancienne adresse conservée',
+        isOpenToPublic: 'false',
+      })
+
+      const siretInput = screen.getByLabelText(/SIRET de la structure/i)
+      await userEvent.clear(siretInput)
+      await userEvent.type(siretInput, '123 456 789 01234')
+
+      await waitFor(() => {
+        expect(getSiretData).toHaveBeenCalledWith('123 456 789 01234')
+      })
+
+      expect(formMethods.getValues('addressAutocomplete')).toBe(
+        'Ancienne adresse conservée'
+      )
+      expect(props.onAddressUpdate).not.toHaveBeenCalled()
+    })
+  })
+})

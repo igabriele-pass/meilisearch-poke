@@ -1,0 +1,36 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  height: 100vh; /* full sidebar height */
+  justify-content: space-between;
+
+  &-list {
+    margin-bottom: var(--size-spacing-m);
+  }
+}
+
+.footer {
+  padding: var(--size-spacing-m) 0;
+
+  & .review {
+    padding: var(--size-spacing-s) var(--size-spacing-l);
+    align-items: center;
+    display: flex;
+
+    &:hover {
+      background-color: var(--color-background-subtle);
+    }
+  }
+}
+
+.separator {
+  margin-top: auto;
+
+  &-line {
+    background-color: var(--separator-color-subtle);
+    height: rem.torem(1px);
+  }
+}

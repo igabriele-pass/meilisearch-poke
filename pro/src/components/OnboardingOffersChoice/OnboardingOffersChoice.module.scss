@@ -1,0 +1,23 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.card-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(rem.torem(300px), 1fr));
+  gap: var(--size-spacing-xl);
+  margin: var(--size-spacing-xxs) 0 rem.torem(22px);
+}
+
+.card-description-highlight {
+  color: var(--color-text-brand-primary);
+}
+
+.skip-link-wrapper {
+  width: 100%;
+  display: flex;
+  justify-content: center;
+
+  @media (max-width: size.$laptop) {
+    margin-bottom: var(--size-spacing-xxxxl);
+  }
+}

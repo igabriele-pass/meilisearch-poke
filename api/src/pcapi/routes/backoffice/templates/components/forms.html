@@ -1,0 +1,139 @@
+{% macro build_filters_form(form, action) %}
+  <form action="{{ action }}"
+        name="{{ action | action_to_name }}"
+        method="get"
+        class="mb-4 mt-3">
+    <div class="row">
+      <div class="col-11">
+        {% set row1_fields = [] %}
+        {% set select_multiple = [] %}
+        {% set switches = [] %}
+        {% for form_field in form %}
+          {% if "Hidden" in form_field.type %}
+            {{ form_field }}
+          {% elif form_field.type in ("PCSelectMultipleField", "PCQuerySelectMultipleField", "PCTomSelectField") and not form_field.search_inline %}
+            {% set _ = select_multiple.append(form_field) %}
+          {% elif form_field.type == "PCSwitchBooleanField" %}
+            {% set _ = switches.append(form_field) %}
+          {% else %}
+            {% set _ = row1_fields.append(form_field) %}
+          {% endif %}
+        {% endfor %}
+        <div class="input-group mb-3 px-1">{% for form_field in row1_fields %}{{ form_field }}{% endfor %}</div>
+        <div class="input-group mb-1">
+          {% for form_field in select_multiple %}<div class="col-2 p-1">{{ form_field }}</div>{% endfor %}
+        </div>
+        <div class="input-group mb-1">
+          {% for form_field in switches %}<div class="col-2 p-1">{{ form_field }}</div>{% endfor %}
+        </div>
+      </div>
+      <div class="col-1">
+        <div class="py-2">
+          <button type="submit"
+                  class="btn btn-primary">Appliquer</button>
+        </div>
+      </div>
+    </div>
+    <div class="w-100 my-4">
+      {% for form_field in form %}
+        {% for error in form_field.errors %}<p class="text-warning lead">{{ error }}</p>{% endfor %}
+      {% endfor %}
+    </div>
+  </form>
+{% endmacro %}
+{% macro build_filters_form_ng(form, action) %}
+  {% set row1_fields = [] %}
+  {% set select_multiple = [] %}
+  {% set switches = [] %}
+  {% set limit_fields = [] %}
+  <form action="{{ action }}"
+        name="{{ action | action_to_name }}"
+        method="get">
+    {% for form_field in form %}
+      {% if "Hidden" in form_field.type %}
+        {{ form_field }}
+      {% elif "limit" in form_field.name %}
+        {% set _ = limit_fields.append(form_field) %}
+      {% elif form_field.type in ("PCSelectMultipleField", "PCQuerySelectMultipleField", "PCTomSelectField") and not form_field.search_inline %}
+        {% set _ = select_multiple.append(form_field) %}
+      {% elif form_field.type == "PCSwitchBooleanField" %}
+        {% set _ = switches.append(form_field) %}
+      {% else %}
+        {% set _ = row1_fields.append(form_field) %}
+      {% endif %}
+    {% endfor %}
+    {% if form.errors %}
+      <div class="w-100 my-4">
+        {% for form_field in form %}
+          {% for error in form_field.errors %}<p class="text-warning lead">{{ error }}</p>{% endfor %}
+        {% endfor %}
+      </div>
+    {% endif %}
+    <div class="row">
+      <div class="mb-3">
+        <div class="input-group">{% for form_field in row1_fields %}{{ form_field }}{% endfor %}</div>
+        <div class="input-group hstack gap-1px">
+          {% for form_field in select_multiple %}
+            <div class="col-2 pt-2 {% if loop.index % 6 != 1 %}ps-2{% endif %}">{{ form_field }}</div>
+          {% endfor %}
+        </div>
+        <div class="input-group pt-2">
+          {% for form_field in switches %}<div>{{ form_field }}</div>{% endfor %}
+        </div>
+      </div>
+      <div class="text-center d-flex justify-content-between">
+        {% if limit_fields %}
+          {{ limit_fields[0] }}
+        {% else %}
+          <div></div>
+        {% endif %}
+        <button type="submit"
+                class="btn py-2 px-3 btn-primary">
+          Rechercher<i class="bi bi-search ms-2"></i>
+        </button>
+      </div>
+    </div>
+  </form>
+{% endmacro %}
+{% macro build_form_fields_group(form) %}
+  <div class="form-group">
+    {% for form_field in form %}
+      <div class="w-100 my-4">
+        {% for error in form_field.errors %}<p class="text-warning lead">{{ error }}</p>{% endfor %}
+      </div>
+      {{ form_field }}
+    {% endfor %}
+  </div>
+{% endmacro %}
+{% macro build_advanced_filters_form(form, action, id) %}
+  <form {% if id %}id="{{ id }}"{% endif %}
+        action="{{ action }}"
+        name="{{ action }}"
+        method="get">
+    {% if form.errors %}
+      <div class="w-100 my-4">
+        {% for form_field in form %}
+          {% for error in form_field.errors %}<p class="text-warning lead">{{ error }}</p>{% endfor %}
+        {% endfor %}
+      </div>
+    {% endif %}
+    <div class="row">
+      <div>
+        {{ form.sort }}
+        {{ form.order }}
+        {% if form.algolia_search %}{{ form.algolia_search }}{% endif %}
+        {% if form.llm_search %}{{ form.llm_search }}{% endif %}
+        {% if form.q %}{{ form.q }}{% endif %}
+        {% if form.search_type %}{{ form.search_type }}{% endif %}
+        <div class="input-group mb-3 w-100">{{ form.search }}</div>
+        <div class="text-center d-flex justify-content-between">
+          {{ form.limit }}
+          <button type="submit"
+                  class="btn py-2 px-3 btn-primary">
+            Rechercher<i class="bi bi-search ms-2"></i>
+          </button>
+        </div>
+      </div>
+    </div>
+  </form>
+{% endmacro %}

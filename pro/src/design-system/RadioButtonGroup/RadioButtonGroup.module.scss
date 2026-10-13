@@ -1,0 +1,66 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.radio-button-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.radio-button-group-legend {
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-xs);
+}
+
+.radio-button-group-description {
+  @include fonts.body-accent-s;
+
+  color: var(--color-text-subtle);
+  margin-top: var(--size-spacing-xs);
+}
+
+.label-as-text .radio-button-group-description {
+  @include fonts.body-accent-xs;
+}
+
+.radio-button-group-error {
+  @include fonts.body-accent-s;
+
+  margin-top: var(--size-spacing-xs);
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-xs);
+  color: var(--color-text-error);
+
+  &-icon {
+    width: rem.torem(16px);
+    height: rem.torem(16px);
+    min-width: rem.torem(16px);
+    color: var(--color-icon-error);
+  }
+}
+
+.radio-button-group-options {
+  display: flex;
+  flex-wrap: wrap;
+  margin-top: var(--size-spacing-s);
+  gap: var(--size-spacing-l);
+  width: 100%;
+
+  &.display-horizontal.sizing-fill .radio-button-group-option {
+    flex-grow: 1;
+    flex-basis: 0;
+  }
+
+  &.display-vertical {
+    gap: var(--size-spacing-xl);
+
+    .radio-button-group-option {
+      width: 100%;
+    }
+
+    &.variant-detailed {
+      gap: var(--size-spacing-s);
+    }
+  }
+}

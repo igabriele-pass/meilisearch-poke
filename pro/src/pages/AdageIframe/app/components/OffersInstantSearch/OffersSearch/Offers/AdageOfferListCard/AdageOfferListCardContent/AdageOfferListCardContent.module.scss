@@ -1,0 +1,37 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+
+.offer-offerer {
+  margin-top: var(--size-spacing-l);
+}
+
+.offer-formats {
+  margin-top: var(--size-spacing-l);
+
+  &-list {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--size-spacing-l);
+
+    &-pipe {
+      color: var(--separator-color-subtle);
+      margin-right: var(--size-spacing-l);
+    }
+  }
+
+  &-format {
+    @include fonts.body-accent-xs;
+
+    text-transform: uppercase;
+  }
+}
+
+.offer-description {
+  margin-top: var(--size-spacing-l);
+  white-space: pre-line;
+  line-height: rem.torem(24px);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}

@@ -1,0 +1,111 @@
+import datetime
+import decimal
+import typing
+
+from pydantic import BaseModel as BaseModelV2
+from pydantic import ConfigDict
+from pydantic import StrictInt
+from pydantic.v1 import EmailStr
+from pydantic.v1 import HttpUrl
+from pydantic.v1 import root_validator
+from pydantic.v1 import validator
+
+from pcapi.core.offers import models as offers_models
+from pcapi.routes.provider.individual_offers.v1 import serialization as individual_offers_v1_serialization
+from pcapi.routes.serialization import BaseModel
+from pcapi.routes.serialization import artist_serialize
+from pcapi.serialization import utils as serialization_utils
+
+
+class CreateOffer(BaseModel):
+    name: str
+    subcategory_id: str
+    audio_disability_compliant: bool
+    mental_disability_compliant: bool
+    motor_disability_compliant: bool
+    visual_disability_compliant: bool
+
+    artist_offer_links: list[artist_serialize.ArtistOfferLinkBodyModel] | None = None
+    booking_contact: EmailStr | None = None
+    booking_email: EmailStr | None = None
+    description: str | None = None
+    duration_minutes: int | None = None
+    external_ticket_office_url: HttpUrl | None = None
+    ean: str | None = None
+    extra_data: typing.Any = None
+    has_cultural_outreach_claim: bool | None = None
+    id_at_provider: str | None = None
+    is_duo: bool | None = None
+    url: HttpUrl | None = None
+    video_url: HttpUrl | None = None
+    withdrawal_delay: int | None = None
+    withdrawal_details: str | None = None
+    withdrawal_type: offers_models.WithdrawalTypeEnum | None = None
+
+    # is_national must be placed after url so that the validator
+    # can access the url field in the dict of values
+    # (which contains only previously validated fields)
+    is_national: bool | None = None
+
+    @root_validator(pre=True)
+    def set_ean_from_extra_data(cls, values: dict) -> dict:
+        if values.get("extraData"):
+            ean = values["extraData"].get("ean")
+            if ean:
+                values["ean"] = ean
+                values["extraData"].pop("ean")
+        return values
+
+    @validator("is_duo")
+    def validate_is_duo(cls, is_duo: bool | None) -> bool:
+        return bool(is_duo)
+
+    @validator("is_national")
+    def validate_is_national(cls, is_national: bool | None, values: dict) -> bool:
+        url = values.get("url")
+        is_national = True if url else bool(is_national)
+        return is_national
+
+    class Config:
+        alias_generator = serialization_utils.to_camel
+        extra = "forbid"
+
+
+class SerializedProductsStock(typing.TypedDict):
+    quantity: StrictInt | individual_offers_v1_serialization.UNLIMITED_LITERAL | None
+    price: int
+    booking_limit_datetime: datetime.datetime | None
+    publication_datetime: datetime.datetime | None
+    booking_allowed_datetime: datetime.datetime | None
+    external_ticket_office_url: serialization_utils.ValidHttpUrlStr | None
+
+
+class CreateOrUpdateEANOffersRequest(BaseModelV2):
+    serialized_products_stocks: dict[str, SerializedProductsStock]
+    venue_id: int
+    provider_id: int
+    address_id: int | None = None
+    address_label: str | None = None
+
+    model_config = ConfigDict(
+        url_preserve_empty_path=True,
+    )
+
+
+class CreateOfferHighlightRequestBodyModel(BaseModel):
+    highlight_ids: list[int]
+
+
+class ThingStockUpsertInput(typing.TypedDict):
+    id: int | None
+    activation_codes: list[str] | None
+    activation_codes_expiration_datetime: datetime.datetime | None
+    booking_limit_datetime: datetime.datetime | None
+    price: decimal.Decimal | None
+    quantity: int | None
+
+
+class PriceCategoryInput(typing.TypedDict):
+    id: int | None
+    label: str
+    price: decimal.Decimal

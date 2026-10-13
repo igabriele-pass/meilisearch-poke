@@ -1,0 +1,52 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.title {
+  @include fonts.title2;
+
+  margin-bottom: var(--size-spacing-l);
+}
+
+.exposure-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-spacing-l);
+  margin-bottom: var(--size-spacing-xxl);
+}
+
+.lifted-views {
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-xs);
+  margin-top: var(--size-spacing-s);
+  color: var(--color-text-success);
+  align-self: stretch;
+}
+
+.lifted-views-icon {
+  flex-shrink: 0;
+}
+
+.lifted-views-text {
+  @include fonts.body-accent-s;
+}
+
+.bookings-button {
+  margin-top: var(--size-spacing-s);
+}
+
+.card {
+  flex: 1 1 100%;
+}
+
+@media (min-width: size.$laptop) {   
+   .card {    
+    flex: 0 0 rem.torem(368px);
+  }
+} 
+
+.card-offer-title {
+  margin-top: auto;
+  margin-bottom: auto;
+}

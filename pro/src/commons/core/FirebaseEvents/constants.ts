@@ -1,0 +1,141 @@
+export enum Events {
+  CLICKED_CANCELED_SELECTED_OFFERS = 'hasClickedCancelOffers',
+  CLICKED_DISABLED_SELECTED_OFFERS = 'hasClickedDisabledOffers',
+  CLICKED_CONSULT_CGU = 'hasClickedConsultCGU',
+  CLICKED_CREATE_ACCOUNT = 'hasClickedCreateAccount',
+  CLICKED_SEE_LATER_FROM_SUCCESS_OFFER_CREATION_MODAL = 'hasClickedSeeLaterFromSuccessOfferCreationModal',
+  CLICKED_SAVE_VENUE = 'hasClickedSaveVenue',
+  CLICKED_ADMIN_DOWNLOAD_BOOKINGS = 'hasClickedAdminDownloadBooking',
+  CLICKED_ADMIN_DOWNLOAD_BOOKINGS_CSV = 'hasClickedAdminDownloadBookingCsv',
+  CLICKED_ADMIN_DOWNLOAD_BOOKINGS_XLS = 'hasClickedAdminDownloadBookingXls',
+  CLICKED_ADMIN_DOWNLOAD_COLLECTIVE_OFFERS = 'hasClickedAdminDownloadCollectiveOffers',
+  CLICKED_ADMIN_DOWNLOAD_COLLECTIVE_OFFERS_CSV = 'hasClickedAdminDownloadCollectiveOffersCsv',
+  CLICKED_ADMIN_DOWNLOAD_COLLECTIVE_OFFERS_XLS = 'hasClickedAdminDownloadCollectiveOffersXls',
+  CLICKED_EDIT_COLLECTIVE_OFFER = 'hasClickedEditCollectiveOffer',
+  CLICKED_FORGOTTEN_PASSWORD = 'hasClickedForgottenPassword',
+  CLICKED_UNKNOWN_SIRET = 'hasClickedUnknownSiret',
+  CLICKED_HELP_CENTER = 'hasClickedHelpCenter',
+  CLICKED_LOGOUT = 'hasClickedLogout',
+  CLICKED_OFFER_FORM_NAVIGATION = 'hasClickedOfferFormNavigation',
+  CLICKED_ONBOARDING_FORM_NAVIGATION = 'HasClickedOnboardingFormNavigation',
+  CLICKED_CANCEL_OFFER_CREATION = 'hasClickedCancelOfferCreation',
+  CLICKED_PARTNER_BLOCK_DMS_APPLICATION_LINK = 'hasClickedPartnerBlockDmsApplicationLink',
+  CLICKED_PARTNER_BLOCK_COLLECTIVE_HELP_LINK = 'hasClickedPartnerBlockCollectiveHelpLink',
+  CLICKED_PRO = 'hasClickedPro',
+  CLICKED_DUPLICATE_TEMPLATE_OFFER = 'hasClickedDuplicateTemplateOffer',
+  CLICKED_DUPLICATE_BOOKABLE_OFFER = 'hasClickedDuplicateBookableOffer',
+  CLICKED_BEST_PRACTICES_STUDIES = 'hasClickedBestPracticesAndStudies',
+  CLICKED_RESET_FILTERS = 'hasClickedResetFilter',
+  CLICKED_SHOW_STATUS_FILTER = 'hasClickedShowStatusFilter',
+  CLICKED_OMNI_SEARCH_CRITERIA = 'hasClickedOmniSearchCriteria',
+  CLICKED_PAGINATION_NEXT_PAGE = 'hasClickedPaginationNextPage',
+  CLICKED_PAGINATION_PREVIOUS_PAGE = 'hasClickedPaginationPreviousPage',
+  CLICKED_CONTACT_OUR_TEAMS = 'hasClickedContactOurTeams',
+  CLICKED_ARCHIVE_COLLECTIVE_OFFER = 'hasClickedArchiveCollectiveOffer',
+  CLICKED_SAVE_DRAFT_AND_EXIT_COLLECTIVE_OFFER = 'hasClickedSaveDraftAndExitCollectiveOffer',
+  CLICKED_SEE_TEMPLATE_OFFER_EXAMPLE = 'hasClickedSeeTemplateOfferExample',
+  PAGE_VIEW = 'page_view',
+  SIGNUP_FORM_ABORT = 'signupFormAbort',
+  SIGNUP_FORM_SUCCESS = 'signupFormSuccess',
+  DELETE_DRAFT_OFFER = 'DeleteDraftOffer',
+  CLICKED_EAC_DMS_LINK = 'hasClickedEacDmsLink',
+  CLICKED_CREATE_OFFER_FROM_REQUEST = 'hasClickedCreateOfferFromRequest',
+  CLICKED_ADD_IMAGE = 'hasClickedAddImage',
+  DRAG_OR_SELECTED_IMAGE = 'hasDragOrSelectedImage',
+  CLICKED_SAVE_IMAGE = 'hasClickedSaveImage',
+  CLICKED_DOWNLOAD_OFFER_BOOKINGS = 'hasDownloadedBookings',
+  CLICKED_INVOICES_DOWNLOAD = 'hasClickedInvoicesDownload',
+  CLICKED_PUBLISH_FUTURE_OFFER_EARLIER = 'hasClickedPublishFutureOfferEarlier',
+  CLICKED_NEW_EVOLUTIONS = 'hasClickedNewEvolutions',
+  CLICKED_CONSULT_HELP = 'hasClickedConsultHelp',
+  UPDATED_BOOKING_LIMIT_DATE = 'hasUpdatedBookingLimitDate',
+  CLICKED_GENERATE_TEMPLATE_DESCRIPTION = 'hasClickedGenerateTemplateDescription',
+  CLICKED_VALIDATE_ADD_RECURRENCE_DATES = 'hasClickedValidateAddRecurrenceDates',
+  OFFER_FORM_VIDEO_URL_ERROR = 'videoUrlError',
+  VENUE_FORM_VOLUNTEERING_URL_ERROR = 'volunteeringUrlError',
+  CLICKED_COPY_TEMPLATE_OFFER_LINK = 'hasClickedCopyTemplateOfferLink',
+  CLICKED_VIEW_APP_OFFER = 'hasClickedViewAppOffer',
+  CLICKED_HEADER_ADMIN_BUTTON = 'hasClickedHeaderAdminButton',
+  CLICKED_INDIVIDUAL_OFFER_MODIFICATION = 'hasClickedSaveOfferModifications',
+  CLICKED_COLLECTIVE_OFFER_MODIFICATION = 'hasClickedSaveCollectiveOfferModifications',
+  CLICKED_COLLECTIVE_TEMPLATE_OFFER_MODIFICATION = 'hasClickedSaveCollectiveTemplateOfferModifications',
+  CLICKED_EXPOSURE_SHOW_RESERVATIONS = 'hasClickedExposureShowReservations',
+}
+
+export enum VenueEvents {
+  CLICKED_VENUE_ADD_RIB_BUTTON = 'hasClickedVenueAddRibButton',
+}
+
+export enum OFFER_FORM_NAVIGATION_MEDIUM {
+  OFFERS_TRASH_ICON = 'OffersTrashicon',
+}
+
+export enum INDIVIDUAL_OFFERS_NAVIGATION_SOURCE {
+  HEADLINE_OFFER = 'HeadlineOffer',
+  TITLE_LINK = 'IndividualOffersTitleLink',
+  ACTIONS_MENU_VIEW_OFFER = 'IndividualOffersActionsMenuViewOffer',
+  ACTIONS_MENU_EDIT_OFFER_STOCK = 'IndividualOffersActionsMenuEditOfferStock',
+}
+
+export enum SynchronizationEvents {
+  CLICKED_SYNCHRONIZE_OFFER = 'hasClickedSynchronizeOffer',
+  CLICKED_IMPORT = 'hasClickedImport',
+  CLICKED_VALIDATE_IMPORT = 'hasClickedValidateImport',
+}
+
+export enum OffererLinkEvents {
+  CLICKED_ADD_COLLABORATOR = 'hasClickedAddCollaborator',
+  CLICKED_SEND_INVITATION = 'hasSentInvitation',
+}
+
+export enum BankAccountEvents {
+  CLICKED_ADD_BANK_ACCOUNT = 'hasClickedAddBankAccount',
+  CLICKED_ADD_VENUE_TO_BANK_ACCOUNT = 'HasClickedAddVenueToBankAccount',
+  CLICKED_BANK_ACCOUNT_HAS_PENDING_CORRECTIONS = 'HasClickedHasBankAccountWithPendingCorrections',
+  CLICKED_CHANGE_VENUE_TO_BANK_ACCOUNT = 'HasClickedChangeVenueToBankAccount',
+  CLICKED_CONTINUE_TO_DS = 'HasClickedContinueToDS',
+  CLICKED_BANK_DETAILS_RECORD_FOLLOW_UP = 'HasClickedBankDetailsRecordFollowUp',
+  CLICKED_SAVE_VENUE_TO_BANK_ACCOUNT = 'HasClickedSaveVenueToBankAccount',
+}
+
+export enum SettlementEvents {
+  CLICKED_SETTLEMENT_ACCORDION = 'hasClickedSettlementAccordion',
+  CLICKED_EDIT_BANK_ACCOUNT_AFTER_REJECT = 'hasClickedEditBankAccountAfterReject',
+}
+
+export const OnboardingDidacticEvents = {
+  HAS_CLICKED_START_COLLECTIVE_DIDACTIC_ONBOARDING:
+    'hasClickedStartCollectiveDidacticOnboarding',
+  HAS_CLICKED_ALREADY_SUBMITTED_COLLECTIVE_CASE_DIDACTIC_ONBOARDING:
+    'hasClickedAlreadySubmittedCollectiveCaseDidacticOnboarding',
+  HAS_CLICKED_SUBMIT_COLLECTIVE_CASE_DIDACTIC_ONBOARDING:
+    'hasClickedSubmitCollectiveCaseDidacticOnboarding',
+}
+
+export enum EngagementEvents {
+  HAS_REQUESTED_HIGHLIGHTS = 'hasRequestedHighlights',
+  CLICKED_CONFIRMED_ADD_HEADLINE_OFFER = 'hasClickedConfirmedAddHeadlineOffer',
+  HAS_MADE_RECOMMENDATION = 'hasMadeRecommendation',
+}
+
+export enum WelcomeCarouselEvents {
+  HAS_CLICKED_USER_TYPE = 'hasClickedUserType',
+  HAS_CLICKED_ADAGE_LINK = 'hasClickedAdageLink',
+  CLICKED_SEE_WEBINAR = 'hasClickedSeeWebinar',
+  CLICKED_SEE_INDIV_OFFERS = 'hasClickedSeeIndivOffers',
+  CLICKED_SEE_COLLECTIVE_OFFERS = 'hasClickedSeeCollectiveOffers',
+}
+
+export enum HomepageEvents {
+  CLICKED_PARTNER_PAGE = 'hasClickedPartnerPage',
+  CLICKED_FILL_PARTNER_PAGE = 'hasClickedFillPartnerPage',
+  CLICKED_HEADLINE_OFFER = 'hasClickedHeadlineOffer',
+  CLICKED_CULTURAL_SURVEY = 'hasClickedCulturalSurvey',
+  CLICKED_WEBINAR = 'hasClickedWebinar',
+  CLICKED_NEWSLETTER = 'hasClickedNewsletter',
+  CLICKED_RECOMMENDATION = 'hasClickedRecommendation',
+  CLICKED_SEE_ALL_OFFERS = 'hasClickedSeeAllOffers',
+  CLICKED_TOP_OFFER = 'hasClickedTopOffer',
+  CLICKED_CREATE_OFFER = 'hasClickedCreateOffer',
+  CHANGED_STATS_V2_PERIOD = 'hasChangedStatsV2PeriodChanged',
+}

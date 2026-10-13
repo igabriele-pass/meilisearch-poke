@@ -1,0 +1,64 @@
+name: 3 [CD] Create release
+
+run-name: "Create a release from ${{ inputs.ref }}"
+
+on:
+  workflow_call:
+    inputs:
+      tag-number:
+        type: string
+        required: true
+      ref:
+        type: string
+        required: true
+      base-ref-is-a-branch:
+        type: boolean
+        required: true
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: { required: true }
+      PASSCULTURE_GITHUB_ACTION_APP_ID: { required: true }
+
+permissions: write-all
+
+jobs:
+  create-docker-images-on-registry:
+    name: Build and tag version
+    uses: ./.github/workflows/cd_sub_create_docker_images_on_registry.yml
+    with:
+      base_ref: ${{ inputs.ref }}
+      tag_number: ${{ inputs.tag-number }}
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+
+  create-front-pro-releases-on-firebase:
+    name: Create front pro releases
+    strategy:
+      fail-fast: true
+      matrix:
+        environment: [staging, production, integration]
+    uses: ./.github/workflows/cd_sub_deploy_front_pro.yml
+    with:
+      ENV: ${{ matrix.environment }}
+      CHANNEL: "${{ inputs.tag-number }}"
+      EXPIRES: "30d"
+      PUSH_RELEASE_TO_SENTRY: true
+      REF: ${{ inputs.ref }}
+      version: "${{ inputs.tag-number }}"
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID}}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY}}
+
+  create-pre-release-on-github:
+    name: Create pre release on GitHub
+    needs:
+      - create-docker-images-on-registry
+      - create-front-pro-releases-on-firebase
+    uses: ./.github/workflows/cd_sub_create_pre_release_on_github.yml
+    with:
+      base_ref: ${{ inputs.ref }}
+      tag_number: ${{ inputs.tag-number }}
+      base_ref_is_a_branch: ${{ inputs.base-ref-is-a-branch }}
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}

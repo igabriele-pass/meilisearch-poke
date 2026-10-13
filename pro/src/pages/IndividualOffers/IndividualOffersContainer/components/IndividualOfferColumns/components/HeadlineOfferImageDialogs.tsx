@@ -1,0 +1,149 @@
+import { useState } from 'react'
+import { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import type { ListOffersOfferResponseModel } from '@/apiClient/v1'
+import {
+  GET_OFFER_QUERY_KEY,
+  GET_OFFERS_QUERY_KEY,
+} from '@/commons/config/swrQueryKeys'
+import { useHeadlineOfferContext } from '@/commons/context/HeadlineOfferContext/HeadlineOfferContext'
+import { useQuerySearchFilters } from '@/commons/core/Offers/hooks/useQuerySearchFilters'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { UploaderModeEnum } from '@/commons/utils/imageUploadTypes'
+import {
+  ModalImageUpsertOrEdit,
+  type OnImageUploadArgs,
+} from '@/components/ModalImageUpsertOrEdit/ModalImageUpsertOrEdit'
+import { useStoredFilterConfig } from '@/components/OffersTableSearch/utils'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonColor, ButtonVariant } from '@/design-system/Button/types'
+import { SimpleModal } from '@/design-system/SimpleModal/SimpleModal'
+import strokeVisualArtIcon from '@/icons/stroke-visual-art.svg'
+import type { IndividualOffersFilters } from '@/pages/IndividualOffers/common/types'
+import { computeIndividualApiFilters } from '@/pages/IndividualOffers/utils/computeIndividualApiFilters'
+
+type HeadlineOfferImageDialogsProps = {
+  isFirstDialogOpen: boolean
+  offerId: number
+  setIsFirstDialogOpen: (state: boolean) => void
+  isInOfferJourney?: boolean
+  refToFocusOnClose?: React.RefObject<HTMLButtonElement | null>
+}
+
+export const HeadlineOfferImageDialogs = ({
+  isFirstDialogOpen,
+  setIsFirstDialogOpen,
+  offerId,
+  isInOfferJourney = false,
+  refToFocusOnClose,
+}: HeadlineOfferImageDialogsProps) => {
+  const { mutate } = useSWRConfig()
+
+  const { headlineOffer, upsertHeadlineOffer } = useHeadlineOfferContext()
+  const isReplacingHeadlineOffer = !!headlineOffer?.id
+
+  const [isImageUploaderOpen, setIsImageUploaderOpen] = useState(false)
+  const snackBar = useSnackBar()
+  const { storedFilters } = useStoredFilterConfig('individual')
+  const urlSearchFilters = useQuerySearchFilters()
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+  const finalSearchFilters = {
+    ...urlSearchFilters,
+    ...(storedFilters as Partial<IndividualOffersFilters>),
+    venueId: selectedPartnerVenue.id,
+  }
+
+  const apiFilters = computeIndividualApiFilters({
+    finalSearchFilters,
+    selectedVenueId: selectedPartnerVenue.id,
+  })
+
+  const onImageUpload = async ({
+    imageFile,
+    credit,
+    cropParams,
+  }: OnImageUploadArgs) => {
+    try {
+      setIsImageUploaderOpen(false)
+
+      const thumbnail = {
+        thumb: imageFile,
+        credit: credit ?? '',
+        croppingRectHeight: cropParams?.height,
+        croppingRectWidth: cropParams?.width,
+        croppingRectX: cropParams?.x,
+        croppingRectY: cropParams?.y,
+        offerId: offerId,
+      }
+
+      await mutate(
+        [GET_OFFERS_QUERY_KEY, apiFilters],
+        api.createThumbnail({ body: thumbnail }),
+        {
+          populateCache: (updatedThumbnail, offersList = []) => {
+            return offersList.map((item: ListOffersOfferResponseModel) =>
+              item.id === offerId && updatedThumbnail
+                ? { ...item, thumbUrl: updatedThumbnail.url }
+                : item
+            )
+          },
+          revalidate: false,
+        }
+      )
+      if (isInOfferJourney) {
+        await mutate([GET_OFFER_QUERY_KEY, offerId])
+      }
+      await upsertHeadlineOffer({
+        offerId,
+        context: {
+          actionType: isReplacingHeadlineOffer ? 'replace' : 'add',
+          requiredImageUpload: true,
+        },
+      })
+    } catch {
+      snackBar.error(
+        'Une erreur est survenue lors de la sauvegarde de votre image'
+      )
+    }
+  }
+
+  return (
+    <>
+      <SimpleModal
+        iconPath={strokeVisualArtIcon}
+        title="Ajoutez une image pour mettre votre offre à la une"
+        isOpen={isFirstDialogOpen}
+        onClose={() => setIsFirstDialogOpen(false)}
+        refToFocusOnClose={refToFocusOnClose}
+        actionButtons={[
+          <Button
+            onClick={() => setIsFirstDialogOpen(false)}
+            variant={ButtonVariant.SECONDARY}
+            color={ButtonColor.NEUTRAL}
+            label="Annuler"
+            key="cancel"
+          />,
+          <Button
+            onClick={() => {
+              setIsFirstDialogOpen(false)
+              setIsImageUploaderOpen(true)
+            }}
+            variant={ButtonVariant.PRIMARY}
+            color={ButtonColor.BRAND}
+            label="Ajouter une image"
+            key="confirm"
+          />,
+        ]}
+      />
+      <ModalImageUpsertOrEdit
+        mode={UploaderModeEnum.OFFER}
+        onImageUpload={onImageUpload}
+        open={isImageUploaderOpen}
+        onOpenChange={() => setIsImageUploaderOpen(false)}
+      />
+    </>
+  )
+}

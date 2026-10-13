@@ -1,0 +1,113 @@
+import { screen, waitForElementToBeRemoved } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import { AdageFrontRoles, type AuthenticatedResponse } from '@/apiClient/adage'
+import { apiAdage } from '@/apiClient/api'
+import * as useIsElementVisible from '@/commons/hooks/useIsElementVisible'
+import * as useSnackBar from '@/commons/hooks/useSnackBar'
+import {
+  defaultAdageUser,
+  defaultCollectiveTemplateOffer,
+} from '@/commons/utils/factories/adageFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { AdageUserContextProvider } from '@/pages/AdageIframe/app/providers/AdageUserContext'
+
+import { NewOfferPlaylist } from './NewOfferPlaylist'
+
+vi.mock('@/apiClient/api', () => ({
+  apiAdage: {
+    logConsultPlaylistElement: vi.fn(),
+    newTemplateOffersPlaylist: vi.fn(),
+  },
+}))
+
+const mockTrackPlaylistElementClicked = vi.fn()
+const mockOnWholePlaylistSeen = vi.fn()
+
+const renderNewOfferPlaylist = (user: AuthenticatedResponse) => {
+  return renderWithProviders(
+    <AdageUserContextProvider adageUser={user}>
+      <NewOfferPlaylist
+        onWholePlaylistSeen={mockOnWholePlaylistSeen}
+        trackPlaylistElementClicked={mockTrackPlaylistElementClicked}
+      />
+    </AdageUserContextProvider>
+  )
+}
+
+describe('AdageDiscovery', () => {
+  const snackBarError = vi.fn()
+  const user = {
+    ...defaultAdageUser,
+    role: AdageFrontRoles.REDACTOR,
+    uai: 'uai',
+    departmentCode: '30',
+    institutionName: 'COLLEGE BELLEVUE',
+    institutionCity: 'ALES',
+  }
+
+  beforeEach(async () => {
+    vi.spyOn(apiAdage, 'logConsultPlaylistElement')
+    vi.spyOn(apiAdage, 'newTemplateOffersPlaylist').mockResolvedValue({
+      collectiveOffers: [defaultCollectiveTemplateOffer],
+    })
+
+    const snackBarsImport = (await vi.importActual(
+      '@/commons/hooks/useSnackBar'
+    )) as ReturnType<typeof useSnackBar.useSnackBar>
+    vi.spyOn(useSnackBar, 'useSnackBar').mockImplementation(() => ({
+      ...snackBarsImport,
+      error: snackBarError,
+    }))
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderNewOfferPlaylist(user)
+
+    await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should render new offer playlist', async () => {
+    renderNewOfferPlaylist(user)
+
+    expect(
+      await screen.findByText('Les offres publiées récemment')
+    ).toBeInTheDocument()
+  })
+
+  it('should call tracker for new offer playlist element', async () => {
+    renderNewOfferPlaylist(user)
+
+    await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+
+    const newOfferPlaylistElement = await screen.findByText('Mon offre vitrine')
+    newOfferPlaylistElement.addEventListener('click', (e) => {
+      e.preventDefault()
+    })
+    await userEvent.click(newOfferPlaylistElement)
+
+    expect(mockTrackPlaylistElementClicked).toHaveBeenNthCalledWith(1, {
+      index: 0,
+      offerId: 1,
+      playlistId: 0,
+      playlistType: 'offer',
+    })
+  })
+
+  it('should call tracker when whole classroom playlist is seen', async () => {
+    renderNewOfferPlaylist(user)
+    vi.spyOn(useIsElementVisible, 'useIsElementVisible')
+      .mockReturnValueOnce([true, true])
+      .mockReturnValueOnce([true, true])
+
+    await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+
+    expect(mockOnWholePlaylistSeen).toHaveBeenNthCalledWith(1, {
+      playlistId: 0,
+      playlistType: 'offer',
+      numberOfTiles: 1,
+    })
+  })
+})

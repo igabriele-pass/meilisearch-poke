@@ -1,0 +1,190 @@
+import enum
+import typing
+import uuid
+from datetime import datetime
+
+import sqlalchemy as sa
+import sqlalchemy.orm as sa_orm
+
+from pcapi import settings
+from pcapi.core.offers.models import Offer
+from pcapi.models import Model
+from pcapi.models.pc_object import PcObject
+from pcapi.utils.db import MagicEnum
+
+
+if typing.TYPE_CHECKING:
+    from pcapi.core.offers.models import Product
+
+
+class ArtistType(enum.Enum):
+    """
+    A link Artist <> Product also bears a type
+    An artist can be an author or a musician for different products
+    """
+
+    AUTHOR = "author"
+    FILM_ACTOR = "film_actor"
+    FILM_DIRECTOR = "film_director"
+    PERFORMER = "performer"
+    STAGE_DIRECTOR = "stage_director"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+class ArtistOfferLink(PcObject, Model):
+    __tablename__ = "artist_offer_link"
+
+    offer_id: sa_orm.Mapped[int] = sa_orm.mapped_column(
+        sa.BigInteger, sa.ForeignKey("offer.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    offer: sa_orm.Mapped["Offer"] = sa_orm.relationship(
+        "Offer", foreign_keys=[offer_id], back_populates="artistOfferLinks", viewonly=True
+    )
+    artist_type: sa_orm.Mapped[ArtistType] = sa_orm.mapped_column(
+        MagicEnum(ArtistType, use_values=True), nullable=False
+    )
+    custom_name: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    artist_id: sa_orm.Mapped[str | None] = sa_orm.mapped_column(
+        sa.Text, sa.ForeignKey("artist.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    artist: sa_orm.Mapped["Artist"] = sa_orm.relationship("Artist", foreign_keys=[artist_id], viewonly=True)
+
+    __table_args__ = (
+        sa.UniqueConstraint(
+            "offer_id",
+            "artist_type",
+            "artist_id",
+            name="unique_offer_artist_constraint",
+        ),
+        sa.UniqueConstraint(
+            "offer_id",
+            "artist_type",
+            "custom_name",
+            name="unique_offer_custom_artist_constraint",
+        ),
+        sa.CheckConstraint(
+            "(artist_id IS NOT NULL) OR (custom_name IS NOT NULL)",
+            name="check_has_artist_or_custom_name",
+        ),
+    )
+
+    @property
+    def artist_name(self) -> str | None:
+        return self.artist.name if self.artist else self.custom_name
+
+
+class ArtistProductLink(PcObject, Model):
+    __tablename__ = "artist_product_link"
+
+    artist_id: sa_orm.Mapped[str] = sa_orm.mapped_column(
+        sa.Text, sa.ForeignKey("artist.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    artist: sa_orm.Mapped["Artist"] = sa_orm.relationship("Artist", foreign_keys=[artist_id], viewonly=True)
+    product_id: sa_orm.Mapped[int] = sa_orm.mapped_column(
+        sa.BigInteger, sa.ForeignKey("product.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    product: sa_orm.Mapped["Product"] = sa_orm.relationship("Product", back_populates="artistLinks", viewonly=True)
+    artist_type: sa_orm.Mapped[ArtistType | None] = sa_orm.mapped_column(
+        MagicEnum(ArtistType, use_values=True), nullable=True
+    )
+    date_created: sa_orm.Mapped[datetime] = sa_orm.mapped_column(
+        sa.DateTime, nullable=False, server_default=sa.func.now()
+    )
+    date_modified: sa_orm.Mapped[datetime | None] = sa_orm.mapped_column(
+        sa.DateTime, nullable=True, onupdate=sa.func.now()
+    )
+
+
+class ArtistMusicPlatform(PcObject, Model):
+    __tablename__ = "artist_music_platform"
+
+    artist_id: sa_orm.Mapped[str] = sa_orm.mapped_column(
+        sa.Text, sa.ForeignKey("artist.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    artist: sa_orm.Mapped["Artist"] = sa_orm.relationship("Artist", back_populates="music_platform")
+    spotify_id: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    isni_id: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    apple_music_id: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    deezer_id: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    genius_id: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    soundcloud_id: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+
+
+class Artist(Model):
+    __tablename__ = "artist"
+    app_search_score = sa_orm.mapped_column(sa.Float, nullable=False, server_default="0.0", default=0.0)
+    biography: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    # URL of the most popular product image linked to the artist, used as a fallback when image is NULL
+    computed_image: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    date_created: sa_orm.Mapped[datetime] = sa_orm.mapped_column(
+        sa.DateTime, nullable=False, server_default=sa.func.now()
+    )
+    date_modified: sa_orm.Mapped[datetime | None] = sa_orm.mapped_column(
+        sa.DateTime, nullable=True, onupdate=sa.func.now()
+    )
+    description: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    id: sa_orm.Mapped[str] = sa_orm.mapped_column(
+        sa.Text, primary_key=True, nullable=False, default=lambda _: str(uuid.uuid4())
+    )
+    # DEPRECATED: Wikimedia URL of the artist image (replaced by mediation_uuid)
+    image: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    image_author: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    image_license: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    image_license_url: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    is_blacklisted: sa_orm.Mapped[bool] = sa_orm.mapped_column(
+        sa.Boolean, nullable=False, server_default=sa.false(), default=False
+    )
+    is_eligible_for_search: sa_orm.Mapped["bool"] = sa_orm.query_expression()
+    # identifier of the artist image stored in object storage
+    mediation_uuid: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    music_platform: sa_orm.Mapped["ArtistMusicPlatform | None"] = sa_orm.relationship(
+        "ArtistMusicPlatform", back_populates="artist", uselist=False, cascade="all, delete-orphan"
+    )
+    name: sa_orm.Mapped[str] = sa_orm.mapped_column(sa.Text, nullable=False, index=True)
+    products: sa_orm.Mapped[list["Product"]] = sa_orm.relationship(
+        "Product", back_populates="artists", secondary=ArtistProductLink.__table__
+    )
+    offers: sa_orm.Mapped[list["Offer"]] = sa_orm.relationship("Offer", secondary=ArtistOfferLink.__table__)
+    pro_search_score = sa_orm.mapped_column(sa.Float, nullable=False, server_default="0.0", default=0.0)
+    wikidata_id: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+    wikipedia_url: sa_orm.Mapped[str | None] = sa_orm.mapped_column(sa.Text, nullable=True)
+
+    __table_args__ = (
+        sa.Index(
+            "ix_artist_trgm_unaccent_name",
+            sa.func.immutable_unaccent("name"),
+            postgresql_using="gin",
+            postgresql_ops={
+                "description": "gin_trgm_ops",
+            },
+        ),
+        sa.Index(
+            "ix_unique_artist_wikidata_id",
+            "wikidata_id",
+            unique=True,
+        ),
+    )
+
+    # Artists expose several image sources, by descending priority for the native app (see thumbUrl):
+    #  - mediationImageUrl: full public bucket URL, used directly as <img src> (same format as offers)
+    #  - image:             DEPRECATED Wikimedia URL, kept as fallback during data migration
+    #  - computed_image:    URL of a linked product image, last-resort fallback (set by a cron)
+    # mediationUrl is NOT a URL: it is the bucket object path (bucket name + path) consumed by the
+    # pro frontend's image resizing service as its `filename` query param. Hence two distinct properties.
+    @property
+    def thumbUrl(self) -> str | None:
+        return self.mediationImageUrl or self.image or self.computed_image
+
+    @property
+    def mediationImageUrl(self) -> str | None:
+        if self.mediation_uuid:
+            return f"{settings.OBJECT_STORAGE_URL}/{settings.ARTIST_THUMBS_FOLDER_NAME}/{self.mediation_uuid}"
+        return None
+
+    @property
+    def mediationUrl(self) -> str | None:
+        if self.mediation_uuid:
+            return f"{settings.GCP_BUCKET_NAME}/{settings.ARTIST_THUMBS_FOLDER_NAME}/{self.mediation_uuid}"
+        return None

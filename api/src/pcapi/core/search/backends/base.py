@@ -1,0 +1,66 @@
+import typing
+from collections import abc
+
+
+if typing.TYPE_CHECKING:
+    import pcapi.core.artist.models as artists_models
+    import pcapi.core.educational.models as educational_models
+    import pcapi.core.offerers.models as offerers_models
+    import pcapi.core.offers.models as offers_models
+
+
+class SearchBackend:
+    def __str__(self) -> str:  # useful in logs
+        return str(self.__class__.__name__)
+
+    def count_offers_to_index_from_queue(self, from_error_queue: bool = False) -> int:
+        raise NotImplementedError()
+
+    def check_offer_id_is_indexed(self, offer_id: int) -> bool:
+        raise NotImplementedError()
+
+    def index_artists(self, artists: "abc.Collection[artists_models.Artist]") -> None:
+        raise NotImplementedError()
+
+    def index_offers(
+        self, offers: "abc.Collection[offers_models.Offer]", last_30_days_bookings: dict[int, int]
+    ) -> None:
+        raise NotImplementedError()
+
+    def index_collective_offer_templates(
+        self, collective_offer_templates: "abc.Collection[educational_models.CollectiveOfferTemplate]"
+    ) -> None:
+        raise NotImplementedError()
+
+    def index_venues(self, venues: "abc.Collection[offerers_models.Venue]") -> None:
+        raise NotImplementedError()
+
+    def unindex_offer_ids(self, offer_ids: abc.Collection[int]) -> None:
+        raise NotImplementedError()
+
+    def unindex_all_offers(self) -> None:
+        raise NotImplementedError()
+
+    def unindex_artist_ids(self, artist_ids: abc.Collection[str]) -> None:
+        raise NotImplementedError()
+
+    def unindex_all_artists(self) -> None:
+        raise NotImplementedError()
+
+    def unindex_venue_ids(self, venue_ids: abc.Collection[int]) -> None:
+        raise NotImplementedError()
+
+    def unindex_all_venues(self) -> None:
+        raise NotImplementedError()
+
+    def unindex_all_collective_offer_templates(self) -> None:
+        raise NotImplementedError()
+
+    def unindex_collective_offer_template_ids(self, collective_offer_template_ids: abc.Collection[int]) -> None:
+        raise NotImplementedError()
+
+    def clean_processing_queues(self) -> None:
+        raise NotImplementedError()
+
+    def search_offer_ids(self, query: str = "", count: int = 20, **params: typing.Any) -> list[int]:
+        raise NotImplementedError()

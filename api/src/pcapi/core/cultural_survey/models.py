@@ -1,0 +1,107 @@
+import enum
+from datetime import datetime
+
+import sqlalchemy as sa
+import sqlalchemy.orm as sa_orm
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.ext.mutable import MutableList
+
+from pcapi.models import Model
+from pcapi.models.pc_object import PcObject
+from pcapi.utils.date import get_naive_utc_now
+
+
+class CulturalSurveyQuestionEnum(enum.Enum):
+    SORTIES = "SORTIES"
+    FESTIVALS = "FESTIVALS"
+    SPECTACLES = "SPECTACLES"
+    ACTIVITES = "ACTIVITES"
+    PROJECTIONS = "PROJECTIONS"
+    LIVRES = "LIVRES"
+    MUSIQUES = "MUSIQUES"
+
+
+class CulturalSurveyAnswerEnum(enum.Enum):
+    FESTIVAL = "FESTIVAL"
+    SPECTACLE = "SPECTACLE"
+    BIBLIOTHEQUE = "BIBLIOTHEQUE"
+    EVENEMENT_JEU = "EVENEMENT_JEU"
+    CONCERT = "CONCERT"
+    CINEMA = "CINEMA"
+    MUSEE = "MUSEE"
+    CONFERENCE = "CONFERENCE"
+    COURS = "COURS"
+    SANS_SORTIES = "SANS_SORTIES"
+    FESTIVAL_MUSIQUE = "FESTIVAL_MUSIQUE"
+    FESTIVAL_AVANT_PREMIERE = "FESTIVAL_AVANT_PREMIERE"
+    FESTIVAL_SPECTACLE = "FESTIVAL_SPECTACLE"
+    FESTIVAL_LIVRE = "FESTIVAL_LIVRE"
+    FESTIVAL_CINEMA = "FESTIVAL_CINEMA"
+    FESTIVAL_AUTRE = "FESTIVAL_AUTRE"
+    SPECTACLE_HUMOUR = "SPECTACLE_HUMOUR"
+    SPECTACLE_THEATRE = "SPECTACLE_THEATRE"
+    SPECTACLE_RUE = "SPECTACLE_RUE"
+    SPECTACLE_OPERA = "SPECTACLE_OPERA"
+    SPECTACLE_CIRQUE = "SPECTACLE_CIRQUE"
+    SPECTACLE_DANSE = "SPECTACLE_DANSE"
+    SPECTACLE_AUTRE = "SPECTACLE_AUTRE"
+    MATERIEL_ART_CREATIF = "MATERIEL_ART_CREATIF"
+    PODCAST = "PODCAST"
+    LIVRE = "LIVRE"
+    JOUE_INSTRUMENT = "JOUE_INSTRUMENT"
+    PRESSE_EN_LIGNE = "PRESSE_EN_LIGNE"
+    JEU_VIDEO = "JEU_VIDEO"
+    FILM_DOMICILE = "FILM_DOMICILE"
+    SANS_ACTIVITES = "SANS_ACTIVITES"
+    PROJECTION_FESTIVAL = "PROJECTION_FESTIVAL"
+    PROJECTION_CINEMA = "PROJECTION_CINEMA"
+    PROJECTION_VISITE = "PROJECTION_VISITE"
+    PROJECTION_CONCERT = "PROJECTION_CONCERT"
+    PROJECTION_CD_VINYLE = "PROJECTION_CD_VINYLE"
+    PROJECTION_SPECTACLE = "PROJECTION_SPECTACLE"
+    PROJECTION_ACTIVITE_ARTISTIQUE = "PROJECTION_ACTIVITE_ARTISTIQUE"
+    PROJECTION_LIVRE = "PROJECTION_LIVRE"
+    PROJECTION_CONFERENCE = "PROJECTION_CONFERENCE"
+    PROJECTION_JEU = "PROJECTION_JEU"
+    PROJECTION_AUTRE = "PROJECTION_AUTRE"
+    MANGAS = "MANGAS"
+    ROMANCE = "ROMANCE"
+    FANTASY = "FANTASY"
+    THRILLER = "THRILLER"
+    ROMANS = "ROMANS"
+    SOCIETE = "SOCIETE"
+    PHILOSOPHIE = "PHILOSOPHIE"
+    CULTURE = "CULTURE"
+    HISTOIRE = "HISTOIRE"
+    LIVRES_AUCUN = "LIVRES_AUCUN"
+    RAP = "RAP"
+    POP = "POP"
+    ELECTRO = "ELECTRO"
+    METAL = "METAL"
+    FILMS = "FILMS"
+    JAZZ = "JAZZ"
+    CLASSIQUE = "CLASSIQUE"
+    MUSIQUES_AUCUN = "MUSIQUES_AUCUN"
+
+
+class UserCulturalSurvey(PcObject, Model):
+    __tablename__ = "user_cultural_survey"
+
+    userId: sa_orm.Mapped[int] = sa_orm.mapped_column(
+        sa.BigInteger,
+        sa.ForeignKey("user.id"),
+        nullable=False,
+        unique=True,
+    )
+
+    answers: sa_orm.Mapped[list[dict]] = sa_orm.mapped_column(
+        MutableList.as_mutable(postgresql.JSONB),
+        nullable=False,
+    )
+
+    createdAt: sa_orm.Mapped[datetime] = sa_orm.mapped_column(
+        sa.DateTime,
+        nullable=False,
+        default=get_naive_utc_now,
+        server_default=sa.func.utcnow(),
+    )

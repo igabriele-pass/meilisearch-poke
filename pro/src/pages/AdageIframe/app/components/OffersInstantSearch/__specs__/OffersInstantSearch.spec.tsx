@@ -1,0 +1,125 @@
+import { screen, waitForElementToBeRemoved } from '@testing-library/react'
+import { axe } from 'vitest-axe'
+
+import { apiAdage } from '@/apiClient/api'
+import { defaultAdageUser } from '@/commons/utils/factories/adageFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { SnackBarContainer } from '@/components/SnackBarContainer/SnackBarContainer'
+import { AdageUserContextProvider } from '@/pages/AdageIframe/app/providers/AdageUserContext'
+
+import { OffersInstantSearch } from '../OffersInstantSearch'
+import * as utils from '../utils'
+
+const venue = {
+  id: 1436,
+  name: 'Librairie de Paris',
+  publicName: "Librairie de Par's",
+  relative: [],
+  departementCode: '75',
+}
+
+vi.mock('@/apiClient/api', () => ({
+  apiAdage: {
+    getVenueById: vi.fn(() => {
+      return venue
+    }),
+    getVenueBySiret: vi.fn(() => {
+      return venue
+    }),
+  },
+}))
+
+vi.mock('react-instantsearch', async () => {
+  return {
+    ...(await vi.importActual('react-instantsearch')),
+    Configure: vi.fn(() => <div />),
+    InstantSearch: vi.fn(({ children }) => <div>{children}</div>),
+    useStats: () => ({ nbHits: 1 }),
+    useSearchBox: () => ({ refine: vi.fn() }),
+    useInfiniteHits: () => ({
+      hits: [],
+    }),
+    useInstantSearch: () => ({ scopedResults: [] }),
+    Index: vi.fn(() => <div />),
+  }
+})
+
+function renderOffersInstantSearch() {
+  return renderWithProviders(
+    <AdageUserContextProvider adageUser={defaultAdageUser}>
+      <OffersInstantSearch />
+      <SnackBarContainer />
+    </AdageUserContextProvider>
+  )
+}
+
+describe('OffersInstantSearch', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderOffersInstantSearch()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show an error message when the venue id is invalid', async () => {
+    const mockLocation = {
+      ...window.location,
+      search: '?venue=1436',
+    }
+    window.location = mockLocation as string & Location
+
+    vi.spyOn(apiAdage, 'getVenueById').mockRejectedValueOnce(null)
+
+    renderOffersInstantSearch()
+
+    expect(
+      (
+        await screen.findAllByText(
+          'Structure inconnue. Tous les résultats sont affichés.'
+        )
+      ).length
+    ).toBeGreaterThan(0)
+  })
+
+  it('should show an error message when the siret is invalid', async () => {
+    const mockLocation = {
+      ...window.location,
+      search: '?siret=1436',
+    }
+    window.location = mockLocation as string & Location
+
+    vi.spyOn(apiAdage, 'getVenueBySiret').mockRejectedValueOnce(null)
+
+    renderOffersInstantSearch()
+
+    expect(
+      (
+        await screen.findAllByText(
+          'Structure inconnue. Tous les résultats sont affichés.'
+        )
+      ).length
+    ).toBeGreaterThan(0)
+  })
+
+  it('should filter on the venue specified in the url', async () => {
+    const mockLocation = {
+      ...window.location,
+      search: '?venue=1436',
+    }
+    window.location = mockLocation as string & Location
+
+    const setFiltersSpy = vi
+      .spyOn(utils, 'adageFiltersToFacetFilters')
+      .mockReturnValue({
+        queryFilters: [],
+        filtersKeys: [],
+        locationsFilter:
+          'offer.locationType:ADDRESS<score=3> OR offer.locationType:SCHOOL<score=2> OR offer.locationType:TO_BE_DEFINED<score=1>',
+      })
+
+    renderOffersInstantSearch()
+
+    await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+
+    expect(setFiltersSpy).toHaveBeenCalledOnce()
+  })
+})

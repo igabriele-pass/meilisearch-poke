@@ -1,0 +1,160 @@
+import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { addDays } from 'date-fns'
+import { FormProvider, useForm } from 'react-hook-form'
+import { axe } from 'vitest-axe'
+
+import {
+  getIndividualOfferFactory,
+  getOfferStockFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import {
+  EDIT_STOCK_FORM_ID,
+  type EditStockFormValues,
+  StocksCalendarTableEditStock,
+  type StocksCalendarTableEditStockProps,
+} from '../StocksCalendarTableEditStock'
+
+function renderStocksCalendarTableEditStock(
+  props?: Partial<StocksCalendarTableEditStockProps>
+) {
+  function StocksCalendarTableEditStockWrapper() {
+    const form = useForm<EditStockFormValues>({
+      defaultValues: {
+        date: '2021-10-15T12:00:00Z',
+        time: '12:00',
+        priceCategory: '1',
+        bookingLimitDate: '2021-09-15T21:59:59Z',
+        remainingQuantity: 1,
+        ...props,
+      },
+    })
+    return (
+      <>
+        <FormProvider {...form}>
+          <StocksCalendarTableEditStock
+            departmentCode="56"
+            stock={getOfferStockFactory()}
+            priceCategories={[
+              { id: 1, hasStocks: false, label: 'tarif', price: 12 },
+            ]}
+            onUpdateStock={() => vi.fn()}
+            offer={getIndividualOfferFactory()}
+            {...props}
+          />
+        </FormProvider>
+        <button type="submit" form={EDIT_STOCK_FORM_ID}>
+          Valider
+        </button>
+      </>
+    )
+  }
+  return renderWithProviders(<StocksCalendarTableEditStockWrapper />)
+}
+
+describe('StocksCalendarTableEditStock', () => {
+  it('should render without accessibility violations', async () => {
+    const beginningDate = addDays(new Date(), 2).toISOString().split('T')[0]
+    const limitDate = addDays(new Date(), 3).toISOString().split('T')[0]
+    const priceCategoryId = 1
+    const remainingQuantity = 322
+    const { container } = renderStocksCalendarTableEditStock({
+      stock: getOfferStockFactory({
+        beginningDatetime: beginningDate,
+        bookingLimitDatetime: limitDate,
+        priceCategoryId: priceCategoryId,
+        remainingQuantity: remainingQuantity,
+      }),
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should set the stock initial form values on init', () => {
+    const beginningDate = addDays(new Date(), 2).toISOString().split('T')[0]
+    const limitDate = addDays(new Date(), 3).toISOString().split('T')[0]
+    const priceCategoryId = 1
+    const remainingQuantity = 322
+
+    renderStocksCalendarTableEditStock({
+      stock: getOfferStockFactory({
+        beginningDatetime: beginningDate,
+        bookingLimitDatetime: limitDate,
+        priceCategoryId: priceCategoryId,
+        remainingQuantity: remainingQuantity,
+      }),
+    })
+
+    expect(screen.getAllByLabelText('Date *')[0]).toHaveValue(beginningDate)
+    expect(screen.getByLabelText(/Tarif/)).toHaveValue(
+      priceCategoryId.toString()
+    )
+    expect(screen.getByLabelText('Places restantes')).toHaveValue(
+      remainingQuantity
+    )
+    expect(screen.getAllByLabelText('Date *')[1]).toHaveValue(limitDate)
+  })
+
+  it('should check the unlimited checkbox initially if the quantity does not exist', () => {
+    renderStocksCalendarTableEditStock({
+      stock: getOfferStockFactory({
+        // @ts-expect-error - to remove when GetStocksResponseModel will be migrated to pydanticV2
+        remainingQuantity: null,
+      }),
+    })
+
+    expect(screen.getByLabelText('Illimité')).toBeChecked()
+  })
+
+  it('should clear the quantity input when the unlimited checkbox is checked', async () => {
+    renderStocksCalendarTableEditStock({
+      stock: getOfferStockFactory({
+        remainingQuantity: 12,
+      }),
+    })
+
+    await userEvent.click(screen.getByLabelText('Illimité'))
+
+    expect(screen.getByLabelText('Places restantes')).toHaveValue(null)
+  })
+
+  it('should uncheck the unlimited checkbox when the quantity input is filled', async () => {
+    renderStocksCalendarTableEditStock({
+      stock: getOfferStockFactory({
+        // @ts-expect-error - to remove when GetStocksResponseModel will be migrated to pydanticV2
+        remainingQuantity: null,
+      }),
+    })
+
+    await userEvent.type(screen.getByLabelText('Places restantes'), '12')
+
+    expect(screen.getByLabelText('Illimité')).not.toBeChecked()
+  })
+
+  it('should let edit quantity with 0', async () => {
+    renderStocksCalendarTableEditStock({
+      stock: getOfferStockFactory({
+        remainingQuantity: 12,
+      }),
+    })
+
+    await userEvent.clear(screen.getByLabelText('Places restantes'))
+    await userEvent.type(screen.getByLabelText('Places restantes'), '0')
+    await userEvent.click(screen.getByRole('button', { name: 'Valider' }))
+
+    expect(
+      screen.queryByText('Veuillez indiquer une quantité supérieure à 0')
+    ).not.toBeInTheDocument()
+  })
+
+  it('should disable the date and time edition if the offer is an allociné synchro', () => {
+    renderStocksCalendarTableEditStock({
+      offer: getIndividualOfferFactory({ lastProvider: { name: 'Allociné' } }),
+    })
+
+    expect(screen.getAllByLabelText(/Date/)[0]).toBeDisabled()
+    expect(screen.getByLabelText(/Horaire/)).toBeDisabled()
+  })
+})

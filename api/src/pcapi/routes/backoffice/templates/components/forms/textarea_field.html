@@ -1,0 +1,26 @@
+<div class="form-floating col mb-3 pc-field-{{ field.name }}">
+  {% set textarea_field_id = random_hash() %}
+  <textarea name="{{ field.name }}"
+            data-original-name="{{ field.name }}"
+            class="form-control pc-override-custom-textarea-enter value-element-form {% if field.flags.required %}pc-required{% endif %} pc-textarea-counter"
+            rows="{{ field.rows }}"
+            id="{{ textarea_field_id }}"
+            {% if field.allow_line_breaks %}data-allow-line-breaks="true" {% endif +%}
+            {% if field.flags.required %}required {% endif +%}
+            {% if field.flags.readonly %}readonly {% endif +%}
+            {% if field.flags.minlength %}minlength="{{ field.flags.minlength }}"{% endif %}
+            {% if field.flags.maxlength %}maxlength="{{ field.flags.maxlength }}"{% endif %}>{{ field.data | empty_string_if_null }}</textarea>
+  <label class="label-element-form"
+         data-original-name="{{ field.name }}"
+         for="{{ textarea_field_id }}">{{ field.label.text }}</label>
+  {% if field.can_be_cleared %}<i class="bi bi-x-lg pc-clear-input position-absolute top-0 end-0 pe-3 py-3"></i>{% endif %}
+  {% if not field.flags.readonly %}
+    <div class="d-flex align-items-center text-muted pt-1">
+      <small>
+        <span class="pc-textarea-counter-container">{{ field.data | empty_string_if_null | length }}</span>
+        {% if field.flags.maxlength %}/ {{ field.flags.maxlength }}{% endif %}
+      </small>
+      {% if field.allow_line_breaks %}<small class="ms-auto">Maj+Entrée pour ajouter une nouvelle ligne</small>{% endif %}
+    </div>
+  {% endif %}
+</div>

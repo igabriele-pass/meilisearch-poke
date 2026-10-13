@@ -1,0 +1,115 @@
+@use "styles/mixins/_rem.scss" as rem;
+
+$margin-between-steps: rem.torem(32px);
+$margin-between-content-and-time-line: rem.torem(16px);
+$icon-size: rem.torem(16px);
+$time-line-width: rem.torem(2px);
+$vertical-offset-icon-from-step: calc(
+  (#{var(--typography-body-line-height)} - $icon-size) / 2
+);
+
+.container {
+  display: flex;
+  flex-direction: column;
+}
+
+.icon-line-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: rem.torem(20px);
+  height: auto;
+  margin-top: var(--size-spacing-xxs);
+}
+
+.icon-container {
+  display: flex;
+  width: rem.torem(20px);
+  height: rem.torem(20px);
+}
+
+.line {
+  margin-top: var(--size-spacing-xs);
+  margin-bottom: var(--size-spacing-xs);
+  width: rem.torem(2px);
+  height: 100%;
+  background-image: radial-gradient(
+    ellipse rem.torem(4px) rem.torem(4px),
+    var(--color-border-disabled) 100%,
+    transparent 100%
+  );
+  background-size: rem.torem(2px) rem.torem(10px);
+  background-repeat: repeat-y;
+  background-position: center;
+}
+
+.line-error {
+  background-image: inherit;
+  background-color: var(--color-icon-error);
+  border-radius: var(--size-border-radius-s);
+}
+
+.line-success {
+  background-image: radial-gradient(
+    var(--color-icon-success) 100%,
+    transparent 100%
+  );
+  border-radius: var(--size-border-radius-s);
+}
+
+.line-disabled,
+.line-waiting {
+  background-image: radial-gradient(
+    ellipse rem.torem(2px) rem.torem(4px),
+    var(--color-border-disabled) 100%,
+    transparent 100%
+  );
+}
+
+.icon-error {
+  width: rem.torem(20px);
+  height: rem.torem(20px);
+  color: var(--color-icon-error);
+}
+
+.icon-success {
+  color: var(--color-icon-success);
+  width: rem.torem(20px);
+  height: rem.torem(20px);
+}
+
+.icon-waiting {
+  width: rem.torem(12px);
+  height: rem.torem(12px);
+  margin: var(--size-spacing-xs) auto;
+}
+
+.icon-disabled {
+  width: rem.torem(12px);
+  height: rem.torem(12px);
+  color: var(--color-icon-disabled);
+  margin: var(--size-spacing-xs) auto;
+}
+
+.icon-wrong {
+  color: var(--color-icon-error);
+}
+
+.step {
+  display: flex;
+  min-height: rem.torem(58px);
+
+  &:last-child {
+    min-height: 0;
+  }
+}
+
+.step-content {
+  margin-left: var(--size-spacing-l);
+  margin-bottom: var(--size-spacing-xxl);
+  width: 100%;
+}
+
+.step-content-last {
+  margin-bottom: unset;
+}

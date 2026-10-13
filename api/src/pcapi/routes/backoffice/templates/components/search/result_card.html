@@ -1,0 +1,61 @@
+{% import "components/badges.html" as badges %}
+<div class="card shadow">
+  <div class="card-body">
+    <h5 class="mb-3">
+      {% if not row.isActive or row.roles or (result_type != "user" and row.tags) or (result_type == "user" and (row.proValidationStatus.value in ("VALIDATED", "PENDING", "NEW"))) %}
+        {% call badges.badges_container() %}
+          {% if not row.isActive %}{{ row.isActive | format_state | format_badge("primary") }}{% endif %}
+          {% for role in row.roles %}{{ role | format_role(deposits=row.deposits) | format_badge("primary") }}{% endfor %}
+          {% if result_type == "user" %}
+            {# only set for pro user, don't fetch from user_offerer for others #}
+            {{ badges.build_pro_user_status_badge(row) }}
+          {% else %}
+            {% for tag in row.tags %}{{ tag | format_badge("secondary") }}{% endfor %}
+          {% endif %}
+        {% endcall %}
+      {% endif %}
+    </h5>
+    {% if result_type == "user" %}
+      {# ConsultCard tracker only for pro #}
+      {% set link = get_link_to_detail(row.id, form=search_form, search_rank=index, total_items=rows.total) %}
+    {% else %}
+      {% set link = get_link_to_detail(row.id, form=search_form) %}
+    {% endif %}
+    <h5 class="card-title">
+      <a href="{{ link }}"
+         class="link-primary">{{ row.full_name }}</a>
+    </h5>
+    <h6 class="card-subtitle mb-4 text-muted">User ID : {{ row.id }}</h6>
+    <div class="fs-6">
+      <p>
+        <span class="fw-bold">Email :</span> {{ row.email }}
+      </p>
+      {% if result_type == "user" %}
+        {# pro user #}
+        {% if row.phoneNumber %}
+          <p>
+            <span class="fw-bold">Tél :</span> {{ row.phoneNumber | empty_string_if_null }}
+          </p>
+        {% endif %}
+      {% else %}
+        {% if row.birth_date %}
+          <p>
+            <span class="fw-bold">Date de naissance :</span> {{ row.birth_date | format_date }}
+          </p>
+        {% endif %}
+      {% endif %}
+      {% set suspension_reason = row.suspension_reason_expression %}
+      {% if suspension_reason %}
+        <p>
+          <span class="fw-bold">Raison de suspension :</span> {{ suspension_reason | format_reason_label }}
+          <span class="fw-bold">le</span> {{ row.suspension_date_expression | format_date }}
+        </p>
+      {% endif %}
+    </div>
+    <div class="d-flex flex-row-reverse">
+      <a href="{{ link }}"
+         class="btn btn-md btn-outline-primary-subtle-bg">CONSULTER CE PROFIL <i class="bi bi-arrow-right"></i>
+      </a>
+    </div>
+  </div>
+</div>

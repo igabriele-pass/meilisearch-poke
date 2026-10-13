@@ -1,0 +1,160 @@
+import pytest
+
+from pcapi.core.educational import models
+from pcapi.core.educational.factories import CancelledCollectiveBookingFactory
+from pcapi.core.educational.factories import CollectiveBookingFactory
+from pcapi.core.educational.factories import ConfirmedCollectiveBookingFactory
+from pcapi.core.educational.factories import EducationalInstitutionFactory
+from pcapi.core.educational.factories import EducationalYearFactory
+from pcapi.core.offerers.factories import VenueFactory
+from pcapi.core.testing import assert_no_duplicated_queries
+
+from tests.conftest import TestClient
+from tests.routes.adage.v1.conftest import expected_serialized_prebooking
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+class Returns200Test:
+    def test_get_collective_bookings(self, client: TestClient):
+        educational_year = EducationalYearFactory()
+        educational_institution = EducationalInstitutionFactory()
+        booking1 = CollectiveBookingFactory(
+            educationalYear=educational_year,
+            educationalInstitution=educational_institution,
+            status="CONFIRMED",
+        )
+        booking2 = CollectiveBookingFactory(
+            educationalYear=educational_year,
+            educationalInstitution=educational_institution,
+            status="PENDING",
+        )
+
+        client = client.with_eac_token()
+
+        with assert_no_duplicated_queries():
+            response = client.get(
+                f"/adage/v1/years/{educational_year.adageId}/educational_institution/{educational_institution.institutionId}/prebookings"
+            )
+
+        assert response.status_code == 200
+        assert len(response.json["prebookings"]) == 2
+        assert expected_serialized_prebooking(booking1) in response.json["prebookings"]
+        assert expected_serialized_prebooking(booking2) in response.json["prebookings"]
+
+    def test_get_collective_bookings_refused(self, client: TestClient):
+        booking = CancelledCollectiveBookingFactory(
+            cancellationReason=models.CollectiveBookingCancellationReasons.REFUSED_BY_HEADMASTER
+        )
+        year_adage_id = booking.educationalYear.adageId
+        institution_id = booking.educationalInstitution.institutionId
+
+        with assert_no_duplicated_queries():
+            response = client.with_eac_token().get(
+                f"/adage/v1/years/{year_adage_id}/educational_institution/{institution_id}/prebookings"
+            )
+
+        assert response.status_code == 200
+        assert response.json == {"prebookings": [{**expected_serialized_prebooking(booking), "status": "REFUSED"}]}
+
+    def test_get_collective_bookings_with_address(self, client: TestClient):
+        educational_year = EducationalYearFactory()
+        educational_institution = EducationalInstitutionFactory()
+        venue = VenueFactory()
+        booking = ConfirmedCollectiveBookingFactory(
+            educationalYear=educational_year,
+            educationalInstitution=educational_institution,
+            collectiveStock__collectiveOffer__venue=venue,
+            collectiveStock__collectiveOffer__locationType=models.CollectiveLocationType.ADDRESS,
+            collectiveStock__collectiveOffer__offererAddress=venue.offererAddress,
+            collectiveStock__collectiveOffer__locationComment=None,
+        )
+        offer = booking.collectiveStock.collectiveOffer
+
+        with assert_no_duplicated_queries():
+            response = client.with_eac_token().get(
+                f"/adage/v1/years/{educational_year.adageId}/educational_institution/{educational_institution.institutionId}/prebookings"
+            )
+
+        assert response.status_code == 200
+        assert response.json == {
+            "prebookings": [
+                {
+                    **expected_serialized_prebooking(booking),
+                    "address": offer.offererAddress.address.fullAddress,
+                }
+            ]
+        }
+
+    def test_get_collective_bookings_filter_UAI(self, client: TestClient):
+        educational_year = EducationalYearFactory()
+        educational_institution = EducationalInstitutionFactory()
+        booking1 = CollectiveBookingFactory(
+            educationalYear=educational_year,
+            educationalInstitution=educational_institution,
+            status="CONFIRMED",
+        )
+        other_educational_institution = EducationalInstitutionFactory(institutionId="Pouet")
+        CollectiveBookingFactory(
+            educationalYear=educational_year,
+            educationalInstitution=other_educational_institution,
+            status="PENDING",
+        )
+
+        client = client.with_eac_token()
+
+        response = client.get(
+            f"/adage/v1/years/{educational_year.adageId}/educational_institution/{educational_institution.institutionId}/prebookings"
+        )
+
+        assert response.status_code == 200
+        assert response.json == {"prebookings": [expected_serialized_prebooking(booking1)]}
+
+    def test_get_collective_bookings_filter_year_id(self, client: TestClient):
+        educational_year = EducationalYearFactory()
+        educational_institution = EducationalInstitutionFactory()
+        booking1 = CollectiveBookingFactory(
+            educationalYear=educational_year,
+            educationalInstitution=educational_institution,
+            status="CONFIRMED",
+        )
+        other_educational_year = EducationalYearFactory(adageId="Pouet")
+        CollectiveBookingFactory(
+            educationalYear=other_educational_year,
+            educationalInstitution=educational_institution,
+            status="PENDING",
+        )
+
+        client = client.with_eac_token()
+
+        response = client.get(
+            f"/adage/v1/years/{educational_year.adageId}/educational_institution/{educational_institution.institutionId}/prebookings"
+        )
+
+        assert response.status_code == 200
+        assert response.json == {"prebookings": [expected_serialized_prebooking(booking1)]}
+
+    def test_get_collective_bookings_filter_redactor_email(self, client: TestClient):
+        educational_year = EducationalYearFactory()
+        educational_institution = EducationalInstitutionFactory()
+        booking1 = CollectiveBookingFactory(
+            educationalYear=educational_year,
+            educationalInstitution=educational_institution,
+            status="CONFIRMED",
+        )
+        CollectiveBookingFactory(
+            educationalYear=educational_year,
+            educationalInstitution=educational_institution,
+            status="PENDING",
+            educationalRedactor__email="redactor@example.com",
+        )
+
+        client = client.with_eac_token()
+
+        response = client.get(
+            f"/adage/v1/years/{educational_year.adageId}/educational_institution/{educational_institution.institutionId}/prebookings?redactorEmail={booking1.educationalRedactor.email}"
+        )
+
+        assert response.status_code == 200
+        assert response.json == {"prebookings": [expected_serialized_prebooking(booking1)]}

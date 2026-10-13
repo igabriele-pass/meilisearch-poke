@@ -1,0 +1,114 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/variables/_forms.scss" as forms;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_forms.scss" as formsM;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_a11y.scss" as a11y;
+
+.radio-group-title {
+  @include fonts.title2;
+}
+
+.section {
+  margin-bottom: var(--size-spacing-xxl);
+
+  &[data-last-section] {
+    margin-bottom: 0;
+  }
+}
+
+.legend {
+  @include fonts.title4;
+
+  display: flex;
+  align-items: center;
+  gap: rem.torem(10px);
+  margin-bottom: var(--size-spacing-l);
+}
+
+.day-inputs {
+  display: flex;
+  margin-bottom: var(--size-spacing-l);
+  gap: var(--size-spacing-xxs);
+
+  @media (min-width: size.$tablet) {
+    gap: var(--size-spacing-l);
+  }
+}
+
+.days-error {
+  @include fonts.body-accent-s;
+
+  display: flex;
+  color: var(--color-text-error);
+  margin-bottom: var(--size-spacing-m);
+}
+
+.beginning-time-list {
+  display: flex;
+  flex-wrap: wrap;
+  margin-bottom: var(--size-spacing-s);
+  gap: var(--size-spacing-l);
+  max-width: rem.torem(576px);
+}
+
+.date-input {
+  width: rem.torem(235px);
+  margin-bottom: 0;
+}
+
+.monthly-option-input {
+  width: auto;
+  flex-grow: 1;
+}
+
+.booking-date-limit-input {
+  margin-bottom: 0;
+  max-width: rem.torem(400px);
+}
+
+.form {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+
+  &-content {
+    flex-grow: 1;
+  }
+}
+
+.recurrence-section {
+  margin-bottom: var(--size-spacing-l);
+}
+
+.time-slot {
+  position: relative;
+  width: rem.torem(100px);
+
+  &-picker {
+    min-width: rem.torem(110px);
+  }
+
+  &-clear {
+    position: absolute;
+    z-index: 1;
+    top: calc(var(--typography-body-line-height) / 2 + rem.torem(8px));
+    right: calc(-1 * rem.torem(16px));
+
+    &-button {
+      border: none;
+      border-radius: var(--size-border-radius-pill);
+      cursor: pointer;
+      display: flex;
+
+      &-icon {
+        width: rem.torem(20px);
+        height: rem.torem(20px);
+      }
+    }
+  }
+}
+
+.visually-hidden {
+  @include a11y.visually-hidden;
+}

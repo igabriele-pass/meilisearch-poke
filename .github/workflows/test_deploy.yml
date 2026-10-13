@@ -1,0 +1,30 @@
+name: "9 [test] deploy ops"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 1 * * *" # Every night at 15 past 1
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-to-ops:
+    name: "Deploy to ops"
+    uses: ./.github/workflows/cd_sub_deploy_app.yml
+    with:
+      environment: opsv2
+      environment_short_name: opsv2
+      app_version: latest
+      workflow_cluster_name: gke-infra-prd-eu9
+      workflow_project_id: pc-infra-prd
+      app_cluster_name: gke-backend-tst-eu9
+      app_project_id: pc-backend-tst
+      location: europe-west9
+      is_new_infra: true
+      workload_identity_provider_secret_name: gcp_metier_ops_workload_identity_provider # to delete after migration
+      deploy_api: true
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }} # to delete after migration
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }} # to delete after migration

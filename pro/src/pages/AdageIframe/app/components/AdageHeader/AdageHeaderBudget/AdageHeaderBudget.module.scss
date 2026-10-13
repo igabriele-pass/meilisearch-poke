@@ -1,0 +1,43 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+
+.adage-header-budget {
+  border-left: none;
+  border-top: 1px solid var(--color-border-subtle);
+  padding: var(--size-spacing-s);
+  width: 100%;
+
+  &-link {
+    @include fonts.body-accent-xs;
+
+    display: block;
+    margin-bottom: var(--size-spacing-xs);
+  }
+
+  &-value {
+    @include fonts.title4;
+
+    white-space: nowrap;
+    color: var(--color-text-brand-primary);
+    margin-left: 0;
+  }
+}
+
+@media (min-width: size.$tablet) {
+  .adage-header-budget {
+    border-left: 1px solid var(--color-border-subtle);
+    border-top: none;
+    padding: 0 0 0 var(--size-spacing-xxl);
+    width: unset;
+
+    &-link {
+      display: flex;
+      align-items: center;
+    }
+
+    &-value {
+      margin-left: rem.torem(20px);
+    }
+  }
+}

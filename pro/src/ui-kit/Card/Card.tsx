@@ -1,0 +1,113 @@
+import cn from 'classnames'
+import type { ReactNode } from 'react'
+
+import { SvgIcon } from '../SvgIcon/SvgIcon'
+import styles from './Card.module.scss'
+
+interface CardProps {
+  children: ReactNode
+  className?: string
+  variant?: 'default' | 'info'
+}
+
+interface CardHeaderProps {
+  title: string
+  subtitle?: string
+  className?: string
+  titleTag?: 'h2' | 'h3' | 'h4' | 'p'
+  titleClassName?: string
+  subtitleClassName?: string
+  icon?: string
+  children?: ReactNode
+}
+
+interface CardContentProps {
+  children: ReactNode
+  className?: string
+}
+
+interface CardFooterProps {
+  children: ReactNode
+  className?: string
+}
+
+interface CardImageProps {
+  src: string
+  alt: string
+  className?: string
+}
+
+const CardHeader = ({
+  title,
+  subtitle,
+  className,
+  titleTag: TitleTag = 'h2',
+  titleClassName,
+  subtitleClassName,
+  icon,
+  children,
+}: CardHeaderProps) => (
+  <div
+    className={cn(
+      {
+        [styles['card-header-container']]: !!icon,
+      },
+      className
+    )}
+  >
+    {icon && <SvgIcon src={icon} className={styles['card-header-icon']} />}
+    <div className={styles['card-header']}>
+      <div className={styles['card-title-wrapper']}>
+        <TitleTag className={cn(styles['card-title'], titleClassName)}>
+          {title}
+        </TitleTag>
+        {subtitle && (
+          <p className={cn(styles['card-subtitle'], subtitleClassName)}>
+            {subtitle}
+          </p>
+        )}
+      </div>
+      {children}
+    </div>
+  </div>
+)
+
+const CardContent = ({ children, className }: CardContentProps) => (
+  <div className={cn(styles['card-content'], className)}>{children}</div>
+)
+
+const CardFooter = ({ children, className }: CardFooterProps) => (
+  <div className={cn(styles['card-footer'], className)}>{children}</div>
+)
+
+const CardImage = ({ src, alt, className }: CardImageProps) => (
+  <img
+    src={src}
+    alt={alt}
+    className={cn(styles['card-image'], className)}
+    aria-hidden={!alt}
+  />
+)
+
+export const Card = ({
+  children,
+  className,
+  variant = 'default',
+}: CardProps) => (
+  <div
+    className={cn(
+      styles['card'],
+      {
+        [styles['card-info']]: variant === 'info',
+      },
+      className
+    )}
+  >
+    {children}
+  </div>
+)
+
+Card.Header = CardHeader
+Card.Content = CardContent
+Card.Footer = CardFooter
+Card.Image = CardImage

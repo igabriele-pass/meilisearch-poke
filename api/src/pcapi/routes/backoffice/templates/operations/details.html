@@ -1,0 +1,231 @@
+{% extends "layouts/details.html" %}
+{% import "components/badges.html" as badges with context %}
+{% from "components/forms.html" import build_filters_form_ng with context %}
+{% from "components/dynamic/modal.html" import build_dynamic_modal with context %}
+{% from "components/description.html" import description_detail_vertical %}
+{% set can_manage_event = has_permission("MANAGE_SPECIAL_EVENTS") %}
+{% set rows_count = rows.total %}
+{% set compact_display = True %}
+{% set pagination = True %}
+{% set table_id = "operation-table" %}
+{% set table_name = table_id %}
+{% set search_block = build_filters_form_ng(response_form, dst_response) %}
+{% set before_table = self.before_table() %}
+{% set table_header = self.table_header() %}
+{% set table_body = self.table_body() %}
+{% set multi_select_menu = self.multi_select_menu() %}
+{% set after_table = self.after_table() %}
+{% block title %}{{ special_event.title }}{% endblock %}
+{% block header_extra %}
+  {% if special_event.isFinished %}
+    {{ "• Terminé" | format_badge("danger") }}
+  {% else %}
+    {{ "• En cours" | format_badge("primary") }}
+  {% endif %}
+{% endblock %}
+{% block before_table %}
+  <div>
+    <h3>Candidatures</h3>
+    <hr />
+  </div>
+{% endblock before_table %}
+{% block table_header %}
+  {% if can_manage_event %}
+    <th data-pc-column-name="Checkbox">
+      <input type="checkbox"
+             class="form-check-input fs-6 mt-0"
+             name="pc-table-multi-select-check-all" />
+    </th>
+    <th>Actions</th>
+  {% else %}
+    <th>Détails</th>
+  {% endif %}
+  <th>ID</th>
+  <th>Candidat</th>
+  <th>Email</th>
+  <th>Dép.</th>
+  <th>État de la candidature</th>
+  <th>Candidatures totales</th>
+  <th>Participations effectives</th>
+  <th>Éligibilité</th>
+  <th>Tags</th>
+  <th>Date de réponse</th>
+{% endblock table_header %}
+{% block table_body %}
+  {% with items = rows.items %}
+    {% include "operations/details/rows.html" %}
+  {% endwith %}
+{% endblock table_body %}
+{% block multi_select_menu %}
+  <div class="counter-container text-nowrap">
+    <span class="counter">0</span> réponse(s) sélectionnée(s)
+  </div>
+  {% if can_manage_event %}
+    <div data-toggle="pc-batch-confirm-btn-group"
+         data-toggle-id="table-container-individual-offer-fraud-btn-group"
+         data-pc-table-multi-select-id="{{ table_id }}"
+         data-input-ids-name="object_ids"
+         class="d-flex">
+      <button disabled
+              type="button"
+              class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-response-preselected-modal">À contacter</button>
+      <button disabled
+              type="button"
+              class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-response-rejected-modal">Rejeter</button>
+      <button disabled
+              type="button"
+              class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-response-waiting-modal">En attente</button>
+      <button disabled
+              type="button"
+              class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-response-validated-modal">Confirmer</button>
+      <button disabled
+              type="button"
+              class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-response-withdrawn-modal">Désister</button>
+      <button disabled
+              type="button"
+              class="btn rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-response-backup-modal">Backup</button>
+    </div>
+  {% endif %}
+{% endblock multi_select_menu %}
+{% block after_table %}
+  {% if can_manage_event %}
+    {{ build_dynamic_modal(url_for("backoffice.operations.update_date_event", special_event_id=special_event.id) , "update-event-date-modal") }}
+    {{ build_dynamic_modal(url_for("backoffice.operations.update_end_import_date", special_event_id=special_event.id) , "update-end-import-date-modal") }}
+    {{ build_dynamic_modal(url_for("backoffice.operations.get_update_venue_form", special_event_id=special_event.id) , "update-venue-modal") }}
+    {{ build_dynamic_modal(url_for("backoffice.operations.get_batch_update_responses_status_form", special_event_id=special_event.id, response_status="preselected") , "batch-response-preselected-modal", form="form-ids-" + table_name) }}
+    {{ build_dynamic_modal(url_for("backoffice.operations.get_batch_update_responses_status_form", special_event_id=special_event.id, response_status="backup") , "batch-response-backup-modal", form="form-ids-" + table_name) }}
+    {{ build_dynamic_modal(url_for("backoffice.operations.get_batch_update_responses_status_form", special_event_id=special_event.id, response_status="validated") , "batch-response-validated-modal", form="form-ids-" + table_name) }}
+    {{ build_dynamic_modal(url_for("backoffice.operations.get_batch_update_responses_status_form", special_event_id=special_event.id, response_status="withdrawn") , "batch-response-withdrawn-modal", form="form-ids-" + table_name) }}
+    {{ build_dynamic_modal(url_for("backoffice.operations.get_batch_update_responses_status_form", special_event_id=special_event.id, response_status="waiting") , "batch-response-waiting-modal", form="form-ids-" + table_name) }}
+    {{ build_dynamic_modal(url_for("backoffice.operations.get_batch_update_responses_status_form", special_event_id=special_event.id, response_status="rejected") , "batch-response-rejected-modal", form="form-ids-" + table_name) }}
+  {% endif %}
+{% endblock after_table %}
+{# structure for main column (uses the blocks above) #}
+{% block main_column_container %}
+  <div class="vstack gap-3">
+    <!-- TITLE + TAGS -->
+    <div class="d-flex">
+      <!-- OFFER NAME -->
+      <h2 class="flex-fill">
+        {{ self.title() }}
+        <!-- TAGS -->
+        {{ self.header_extra() }}
+      </h2>
+    </div>
+    {% include "components/presentation/list.html" %}
+  </div>
+{% endblock main_column_container %}
+{% block side_column %}
+  <!-- BUTTONS -->
+  <div class="btn-group align-self-start">
+    <a type="button"
+       class="btn btn-outline-primary-subtle-bg"
+       href="https://admin.typeform.com/form/{{ special_event.externalId }}/create"
+       data-bs-toggle="tooltip"
+       data-bs-placement="top"
+       data-bs-title="Voir le formulaire sur Typeform"
+       target="_blank"
+       rel="noreferrer noopener">
+      Accès Typeform
+      <i class="bi bi-box-arrow-up-right"></i>
+    </a>
+  </div>
+  <div>
+    <dl>
+      <dt class="hstack gap-1">
+        <span>Date de l'opération</span>
+        {% if can_manage_event %}
+          <button type="button"
+                  class="btn btn-outline-primary-subtle-bg border-0 px-2 py-1"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="top"
+                  data-bs-title="Modifier la date de l'évènement">
+            <span data-bs-toggle="modal"
+                  data-bs-target="#update-event-date-modal">
+              <i class="bi bi-pencil-square"></i>
+            </span>
+          </button>
+        {% endif %}
+      </dt>
+      <dd>
+        {{ special_event.eventDate |format_date }}
+      </dd>
+    </dl>
+    <dl>
+      <dt class="hstack gap-1">
+        <span>Date de clôture des candidatures</span>
+        {% if can_manage_event %}
+          <button type="button"
+                  class="btn btn-outline-primary-subtle-bg border-0 px-2 py-1"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="top"
+                  data-bs-title="Modifier la date de clôture des candidatures">
+            <span data-bs-toggle="modal"
+                  data-bs-target="#update-end-import-date-modal">
+              <i class="bi bi-pencil-square"></i>
+            </span>
+          </button>
+        {% endif %}
+      </dt>
+      <dd>
+        {{ special_event.endImportDate |format_date }}
+      </dd>
+    </dl>
+    <dl>
+      <dt class="hstack gap-1">
+        <span>Partenaire culturel</span>
+        {% if can_manage_event %}
+          <button type="button"
+                  class="btn btn-outline-primary-subtle-bg border-0 px-2 py-1"
+                  data-bs-toggle="tooltip"
+                  data-bs-placement="top"
+                  data-bs-title="Modifier le partenaire culturel de l'évènement">
+            <span data-bs-toggle="modal"
+                  data-bs-target="#update-venue-modal">
+              <i class="bi bi-pencil-square"></i>
+            </span>
+          </button>
+        {% endif %}
+      </dt>
+      <dd>
+        {% if special_event.venueId %}
+          <a class="link-primary"
+             data-bs-toggle="tooltip"
+             data-bs-placement="top"
+             data-bs-title="Voir le partenaire culturel"
+             target="_top"
+             href="{{ url_for('backoffice.venue.get', venue_id=special_event.venueId) }}">{{ special_event.venueId }} - {{ special_event.venue.publicName }}</a>
+        {% else %}
+          <br />
+        {% endif %}
+      </dd>
+    </dl>
+    <hr />
+    {% include "operations/details/stats.html" %}
+    <hr />
+    {% call description_detail_vertical("ID de l'opération") %}
+      {{ special_event.id }}
+    {% endcall %}
+    {% call description_detail_vertical("Date d'import") %}
+      {{ special_event.dateCreated | format_date }}
+    {% endcall %}
+  </div>
+{% endblock side_column %}

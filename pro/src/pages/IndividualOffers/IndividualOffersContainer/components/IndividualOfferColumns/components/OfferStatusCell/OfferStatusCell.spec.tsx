@@ -1,0 +1,98 @@
+import { screen } from '@testing-library/react'
+import { addDays, format, subDays } from 'date-fns'
+import { axe } from 'vitest-axe'
+
+import { OfferStatus } from '@/apiClient/v1'
+import { FORMAT_DD_MM_YYYY } from '@/commons/utils/date'
+import { listOffersOfferFactory } from '@/commons/utils/factories/individualApiFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+
+import { OfferStatusCell, type OfferStatusCellProps } from './OfferStatusCell'
+
+function renderOfferStatusCell(
+  props: OfferStatusCellProps,
+  options?: RenderWithProvidersOptions
+) {
+  return renderWithProviders(<OfferStatusCell {...props} />, {
+    storeOverrides: {
+      user: { selectedPartnerVenue: makeGetVenueResponseModel({ id: 1 }) },
+    },
+    ...options,
+  })
+}
+
+const defaultProps: OfferStatusCellProps = {
+  offer: listOffersOfferFactory(),
+}
+
+describe('OfferStatusCell', () => {
+  let dayInTheFuture: string
+  let dayInThePast: string
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2025-09-01T12:00:00.000Z'))
+
+    dayInTheFuture = addDays(new Date(), 2).toISOString()
+    dayInThePast = subDays(new Date(), 2).toISOString()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('should render without accessibility violations', async () => {
+    vi.useRealTimers()
+    const { container } = renderOfferStatusCell({
+      ...defaultProps,
+      offer: listOffersOfferFactory({
+        publicationDatetime: dayInTheFuture,
+        status: OfferStatus.SCHEDULED,
+      }),
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show the date of publication', () => {
+    renderOfferStatusCell({
+      ...defaultProps,
+      offer: listOffersOfferFactory({
+        publicationDatetime: dayInTheFuture,
+        status: OfferStatus.SCHEDULED,
+      }),
+    })
+
+    expect(
+      screen.getByText(new RegExp(format(dayInTheFuture, FORMAT_DD_MM_YYYY)))
+    ).toBeInTheDocument()
+  })
+
+  it('should show the status if the status is published', () => {
+    renderOfferStatusCell({
+      ...defaultProps,
+      offer: listOffersOfferFactory({
+        publicationDatetime: dayInTheFuture,
+        status: OfferStatus.PUBLISHED,
+      }),
+    })
+
+    expect(screen.getByText('publiée')).toBeInTheDocument()
+  })
+
+  it('should show the status if the offer was published in the past', () => {
+    renderOfferStatusCell({
+      ...defaultProps,
+      offer: listOffersOfferFactory({
+        publicationDatetime: dayInThePast,
+        status: OfferStatus.PUBLISHED,
+      }),
+    })
+
+    expect(screen.getByText('publiée')).toBeInTheDocument()
+  })
+})

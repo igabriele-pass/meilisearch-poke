@@ -1,0 +1,172 @@
+import { screen } from '@testing-library/react'
+import { axe } from 'vitest-axe'
+
+import { CollectiveOfferDisplayedStatus } from '@/apiClient/v1'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { BookingWaitingBanner } from './BookingWaitingBanner'
+
+describe('BookingWaitingBanner', () => {
+  it('should render without accessibility violations', async () => {
+    const inThreeDays = new Date()
+    const { container } = renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PUBLISHED}
+        bookingLimitDatetime={inThreeDays.toISOString()}
+        canEditDates
+      />
+    )
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show expiration warning when offer expires within 7 days', () => {
+    const inThreeDays = new Date()
+    inThreeDays.setDate(inThreeDays.getDate() + 3)
+
+    renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PUBLISHED}
+        bookingLimitDatetime={inThreeDays.toISOString()}
+        canEditDates
+      />
+    )
+
+    expect(screen.getByText(/Expire dans 3 jours/)).toBeInTheDocument()
+
+    const banner = screen.getByTestId('banner')
+    expect(banner.className).toMatch(/warning/)
+  })
+
+  it('should show "Expire aujourd\'hui" when offer expires today', () => {
+    const today = new Date()
+
+    renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PUBLISHED}
+        bookingLimitDatetime={today.toISOString()}
+        canEditDates
+      />
+    )
+
+    expect(screen.getByText(/Expire aujourd'hui/)).toBeInTheDocument()
+  })
+
+  it('should not show expiration warning when offer expires in more than 7 days', () => {
+    const inTenDays = new Date()
+    inTenDays.setDate(inTenDays.getDate() + 10)
+
+    renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PUBLISHED}
+        bookingLimitDatetime={inTenDays.toISOString()}
+        canEditDates
+      />
+    )
+
+    expect(screen.queryByText(/Expire/)).not.toBeInTheDocument()
+
+    const banner = screen.getByTestId('banner')
+    expect(banner.className).toMatch(/banner default/)
+  })
+
+  it('should show a mailto link when contact email is provided and offer expires soon', () => {
+    const inThreeDays = new Date()
+    inThreeDays.setDate(inThreeDays.getDate() + 3)
+
+    renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PREBOOKED}
+        bookingLimitDatetime={inThreeDays.toISOString()}
+        contactEmail="contact@etablissement.fr"
+        canEditDates
+      />
+    )
+
+    expect(
+      screen.getByRole('link', { name: /Contacter l'établissement/ })
+    ).toHaveAttribute('href', 'mailto:contact@etablissement.fr')
+  })
+
+  it('should not show a mailto link when contact email is provided and offer expires in more than 7 days', () => {
+    const inTenDays = new Date()
+    inTenDays.setDate(inTenDays.getDate() + 10)
+
+    renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PREBOOKED}
+        bookingLimitDatetime={inTenDays.toISOString()}
+        contactEmail="contact@etablissement.fr"
+        canEditDates
+      />
+    )
+
+    expect(
+      screen.queryByRole('link', { name: /Contacter l'établissement/ })
+    ).not.toBeInTheDocument()
+  })
+
+  it('should show teacher prebook action warning when offer is published', () => {
+    const inTenDays = new Date()
+    inTenDays.setDate(inTenDays.getDate() + 10)
+
+    renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PUBLISHED}
+        bookingLimitDatetime={inTenDays.toISOString()}
+        canEditDates
+      />
+    )
+
+    expect(
+      screen.getByText(
+        /L'enseignant doit impérativement préréserver l'offre avant le/
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('should show head of school book action warning when offer is prebooked', () => {
+    const inTenDays = new Date()
+    inTenDays.setDate(inTenDays.getDate() + 10)
+
+    renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PREBOOKED}
+        bookingLimitDatetime={inTenDays.toISOString()}
+        canEditDates
+      />
+    )
+
+    expect(
+      screen.getByText(
+        /Le chef d'établissement doit impérativement confirmer la préréservation de l'offre avant le/
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('should not show edit dates link if canEditDates is false', () => {
+    const inThreeDays = new Date()
+    inThreeDays.setDate(inThreeDays.getDate() + 3)
+    renderWithProviders(
+      <BookingWaitingBanner
+        offerId={123}
+        offerStatus={CollectiveOfferDisplayedStatus.PREBOOKED}
+        bookingLimitDatetime={inThreeDays.toISOString()}
+        canEditDates={false}
+      />
+    )
+    expect(
+      screen.queryByRole('link', {
+        name: /Modifier la date limite de réservation/i,
+      })
+    ).not.toBeInTheDocument()
+  })
+})

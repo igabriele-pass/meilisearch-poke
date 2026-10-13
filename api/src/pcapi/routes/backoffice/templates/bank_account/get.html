@@ -1,0 +1,121 @@
+{% import "components/clipboard.html" as clipboard %}
+{% from "components/generic_modal.html" import build_modal_form with context %}
+{% import "components/links.html" as links with context %}
+{% from "components/presentation/details/tabs.html" import build_details_tab %}
+{% from "components/presentation/details/tabs.html" import build_details_tabs_wrapper %}
+{% from "components/presentation/details/tabs.html" import build_details_tab_content %}
+{% from "components/presentation/details/tabs.html" import build_details_tabs_content_wrapper %}
+{% from "components/dynamic/spinner.html" import build_loading_spinner with context %}
+{% extends "layouts/pro.html" %}
+{% block pro_main_content %}
+  <div class="row row-cols-1 g-4 py-3 pc-strip-query-string">
+    <div class="col">
+      <div class="card shadow">
+        <div class="card-body">
+          <div class="d-flex flex-fill align-items-center">
+            <h2 class="card-title text-primary">{{ bank_account.label }}</h2>
+            <span class="fs-5 ps-4">{{ "Compte bancaire" | format_badge("warning") }}</span>
+            <div class="d-flex row-reverse justify-content-end flex-grow-1">
+              {% if edit_form %}
+                {% set edit_bank_account_aria_described_by_id = random_hash() %}
+                {{ build_modal_form("edit-bank-account", url_for("backoffice.bank_account.update_bank_account", bank_account_id=bank_account.id) , edit_form, "Modifier les informations", "Modifier les informations du compte bancaire", "Enregistrer") }}
+              {% endif %}
+              {% if dms_stats %}
+                <a href="{{ dms_stats.url }}"
+                   target="_blank"
+                   rel="noreferrer noopener"
+                   class="card-link">
+                  <button class="btn btn-outline-primary lead fw-bold mt-2 mx-3"
+                          type="button">ACCÉDER AU DOSSIER DN CB</button>
+                </a>
+              {% endif %}
+            </div>
+          </div>
+          <p class="card-subtitle text-muted mb-3 h5">
+            Bank Account ID : {{ bank_account.id }} {{ clipboard.copy_to_clipboard(bank_account.id, "Copier l'ID du compte bancaire") }}
+          </p>
+          <p class="card-subtitle text-muted mb-3 h5">
+            Humanized ID : {{ humanized_bank_account_id }} {{ clipboard.copy_to_clipboard(humanized_bank_account_id, "Copier l'ID humanisé") }}
+          </p>
+          <div class="row pt-3">
+            <div class="col-4">
+              <div class="fs-6">
+                <p class="mb-1">
+                  <span class="fw-bold">IBAN :</span>
+                  {{ bank_account.iban }}
+                </p>
+                <p class="mb-1">
+                  <span class="fw-bold">Entité juridique :</span>
+                  {{ links.build_offerer_name_to_details_link(bank_account.offerer) }}
+                </p>
+              </div>
+            </div>
+            <div class="col-4">
+              <div class="fs-6">
+                <p class="mb-1">
+                  <span class="fw-bold">État du compte bancaire :</span>
+                  {{ bank_account.status.value | format_dms_status }}
+                </p>
+                {% if dms_stats %}
+                  <p class="mb-1">
+                    <span class="fw-bold">Statut DN CB :</span>
+                    {{ dms_stats.status | format_dms_status }}
+                  </p>
+                  {% if dms_stats.status == "accepte" %}
+                    <p class="mb-4">
+                      <span class="fw-bold">Date de validation du dossier DN CB :</span>
+                      {{ dms_stats.lastChangeDate | format_date }}
+                    </p>
+                  {% else %}
+                    <p class="mb-4">
+                      <span class="fw-bold">Date de dépôt du dossier DN CB :</span>
+                      {{ dms_stats.subscriptionDate | format_date }}
+                    </p>
+                  {% endif %}
+                {% else %}
+                  <p class="mb-4">
+                    {% if dms_error %}
+                      <span class="fw-bold">Erreur DN CB :</span> {{ dms_error }}
+                    {% else %}
+                      <span class="fw-bold">Pas de dossier DN CB</span>
+                    {% endif %}
+                  </p>
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="mt-4">
+        {% call build_details_tabs_wrapper() %}
+          {{ build_details_tab("linked-venues", "Partenaires culturels associés", active_tab == 'linked_venues') }}
+          {{ build_details_tab("history", "Historique du compte bancaire", active_tab == 'history') }}
+          {{ build_details_tab("invoices", "Justificatifs", active_tab == 'invoices') }}
+        {% endcall %}
+        {% call build_details_tabs_content_wrapper() %}
+          {% call build_details_tab_content("linked-venues", active_tab == 'linked_venues') %}
+            <div id="bank_account_venues_frame"
+                 hx-trigger="intersect once"
+                 hx-get="{{ url_for('backoffice.bank_account.get_linked_venues', bank_account_id=bank_account.id) }}">
+              {{ build_loading_spinner() }}
+            </div>
+          {% endcall %}
+          {% call build_details_tab_content("history", active_tab == 'history') %}
+            <div id="bank_account_history_frame"
+                 hx-trigger="intersect once"
+                 hx-get="{{ url_for('backoffice.bank_account.get_history', bank_account_id=bank_account.id) }}">
+              {{ build_loading_spinner() }}
+            </div>
+          {% endcall %}
+          {% call build_details_tab_content("invoices", active_tab == 'invoices') %}
+            <div id="bank_account_invoices_frame"
+                 hx-trigger="intersect once"
+                 hx-get="{{ url_for('backoffice.bank_account.get_invoices', bank_account_id=bank_account.id) }}">
+              {{ build_loading_spinner() }}
+            </div>
+          {% endcall %}
+        {% endcall %}
+      </div>
+    </div>
+  </div>
+{% endblock pro_main_content %}

@@ -1,0 +1,44 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.cinema-provider-form {
+  margin-bottom: 0;
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+
+  &-content {
+    flex-grow: 1;
+  }
+
+  &-buttons {
+    display: flex;
+    align-items: center;
+    gap: var(--size-spacing-l);
+  }
+
+  &-footer {
+    margin-top: auto;
+  }
+}
+
+.form-layout-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--size-spacing-xl);
+  margin-bottom: var(--size-spacing-l);
+}
+
+.price-input,
+.nb-places-input {
+  width: 100%;
+
+  @media (min-width: size.$tablet) {
+    width: rem.torem(260px);
+  }
+}
+
+.allocine-provider-form-banner {
+  margin: var(--size-spacing-xxl) 0;
+}

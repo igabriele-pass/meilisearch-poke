@@ -1,0 +1,567 @@
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { forwardRef } from 'react'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import {
+  type GetIndividualOfferResponseModel,
+  VenueState,
+} from '@/apiClient/v1'
+import * as useAnalytics from '@/app/App/analytics/firebase'
+import {
+  IndividualOfferContext,
+  type IndividualOfferContextValues,
+} from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import {
+  INDIVIDUAL_OFFER_WIZARD_STEP_IDS,
+  OFFER_WIZARD_MODE,
+} from '@/commons/core/Offers/constants'
+import { getIndividualOfferUrl } from '@/commons/core/Offers/utils/getIndividualOfferUrl'
+import { imageFileFactory } from '@/commons/utils/factories/imageUploadArgsFactories'
+import {
+  getIndividualOfferFactory,
+  individualOfferContextValuesFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { UploaderModeEnum } from '@/commons/utils/imageUploadTypes'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { SnackBarContainer } from '@/components/SnackBarContainer/SnackBarContainer'
+import * as imageUploadModule from '@/pages/IndividualOffer/commons/useIndividualOfferImageUpload'
+
+import { VideoUploaderContextProvider } from '../commons/context/VideoUploaderContext/VideoUploaderContext'
+import { IndividualOfferMediaScreen } from './IndividualOfferMediaScreen'
+
+vi.mock('@/components/ImageDragAndDrop/getImageDimensions', () => ({
+  getImageDimensions: vi.fn((file) => {
+    return Promise.resolve({
+      width: (file as any).width || 0,
+      height: (file as any).height || 0,
+    })
+  }),
+}))
+
+vi.mock('react-avatar-editor', () => {
+  const MockAvatarEditor = forwardRef((_props, _ref) => {
+    return <div data-testid="mock-avatar-editor" />
+  })
+  MockAvatarEditor.displayName = 'MockAvatarEditor'
+  return { __esModule: true, default: MockAvatarEditor }
+})
+
+// This is to avoid "Already caught: Warning:
+// An update to IndividualOfferMediaScreen
+// inside a test was not wrapped in act(...)."
+const waitForScrollToFirstErrorHookUseEffect = async () => {
+  await screen.findByRole('heading', {
+    name: LABELS.mainSection,
+  })
+}
+
+const defaultSelectedPartnerVenue = makeGetVenueResponseModel({ id: 1 })
+
+const renderIndividualOfferMediaScreen = async ({
+  props = {},
+  mode = OFFER_WIZARD_MODE.CREATION,
+  features = [],
+  isVenueClosed = false,
+}: {
+  props?: { offer?: GetIndividualOfferResponseModel }
+  mode?: OFFER_WIZARD_MODE
+  features?: string[]
+  isVenueClosed?: boolean
+} = {}) => {
+  const finalOffer = getIndividualOfferFactory(props.offer)
+  const finalContextValue: IndividualOfferContextValues =
+    individualOfferContextValuesFactory({ offer: finalOffer })
+
+  const selectedPartnerVenue = isVenueClosed
+    ? makeGetVenueResponseModel({ id: 1, state: VenueState.CLOSED })
+    : defaultSelectedPartnerVenue
+
+  const res = renderWithProviders(
+    <IndividualOfferContext.Provider value={finalContextValue}>
+      <VideoUploaderContextProvider
+        offerId={finalOffer.id}
+        initialVideoData={finalOffer.videoData}
+      >
+        <>
+          <IndividualOfferMediaScreen offer={finalOffer} />
+          <SnackBarContainer />
+        </>
+      </VideoUploaderContextProvider>
+    </IndividualOfferContext.Provider>,
+    {
+      initialRouterEntries: [
+        getIndividualOfferUrl({
+          step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.MEDIA,
+          mode,
+          offerId: finalOffer.id,
+        }),
+      ],
+      features,
+      storeOverrides: {
+        user: {
+          currentUser: sharedCurrentUserFactory(),
+          selectedPartnerVenue,
+        },
+      },
+    }
+  )
+
+  await waitForScrollToFirstErrorHookUseEffect()
+  return res
+}
+
+const mockLogEvent = vi.fn()
+const mockHandleImageOnSubmit = vi.fn()
+const mockNavigate = vi.fn()
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    updateOfferVideo: vi.fn(),
+    getOfferVideoMetadata: vi.fn(),
+  },
+}))
+vi.mock('react-router', async () => {
+  const actual = await vi.importActual('react-router')
+  return {
+    ...actual,
+    useNavigate: () => mockNavigate,
+  }
+})
+const MOCK_DATA = {
+  videoUrl: 'https://www.youtube.com/watch?v=0R5PZxOgoz8',
+}
+
+const LABELS = {
+  mainSection: 'Illustrez votre offre',
+  imageSubSection: 'Ajoutez une image',
+  imageInput: 'Importez une image',
+  imageUpsertOrEditModalButton: 'Importer',
+  videoSubSection: 'Ajoutez une vidéo',
+  videoInput: 'Lien URL Youtube',
+  videoError:
+    'Veuillez renseigner une URL provenant de la plateforme Youtube. Les chaînes ne sont pas acceptées.',
+  previousButtonCreationMode: 'Retour',
+  nextButtonCreationMode: 'Enregistrer et continuer',
+  nextButtonEditionMode: 'Enregistrer les modifications',
+  videoButton: 'Ajouter une URL Youtube',
+  deleteVideoButton: 'Supprimer',
+}
+
+const getSubmitLabel = (mode: OFFER_WIZARD_MODE) => {
+  return mode === OFFER_WIZARD_MODE.CREATION
+    ? LABELS.nextButtonCreationMode
+    : LABELS.nextButtonEditionMode
+}
+
+const updateVideoUrlAndSubmit = async ({
+  text = MOCK_DATA.videoUrl,
+  mode = OFFER_WIZARD_MODE.CREATION,
+}: {
+  text?: string
+  mode?: OFFER_WIZARD_MODE
+} = {}) => {
+  if (text) {
+    await userEvent.click(screen.getByText(LABELS.videoButton))
+
+    const videoInput = screen.getByRole('textbox', {
+      name: LABELS.videoInput,
+    })
+
+    await userEvent.type(videoInput, text)
+    await userEvent.click(screen.getByText('Ajouter'))
+  } else {
+    await userEvent.click(screen.getByText(LABELS.deleteVideoButton))
+  }
+  const label = getSubmitLabel(mode)
+  await userEvent.click(screen.getByRole('button', { name: label }))
+}
+
+describe('IndividualOfferMediaScreen', () => {
+  beforeEach(() => {
+    vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:mock-url')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+  })
+
+  it('should render (without accessibility violations)', async () => {
+    const { container } = await renderIndividualOfferMediaScreen()
+    expect(container).toBeInTheDocument()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should always render an image input', async () => {
+    await renderIndividualOfferMediaScreen()
+
+    expect(
+      screen.getByRole('heading', { name: LABELS.imageSubSection })
+    ).toBeInTheDocument()
+    const input = screen.getByLabelText(LABELS.imageInput)
+    expect(input).toBeInTheDocument()
+    expect(input).toHaveAttribute('type', 'file')
+  })
+
+  it('should always render a video url button', async () => {
+    await renderIndividualOfferMediaScreen()
+
+    expect(
+      screen.getByRole('heading', { name: LABELS.videoSubSection })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: LABELS.videoButton })
+    ).toBeInTheDocument()
+  })
+
+  describe('about image (and credit)', () => {
+    it('should log an event when an image is uploaded (drag or selected)', async () => {
+      vi.spyOn(useAnalytics, 'useAnalytics').mockImplementation(() => ({
+        logEvent: mockLogEvent,
+      }))
+      await renderIndividualOfferMediaScreen()
+
+      const imageInput = screen.getByLabelText('Importez une image')
+      await userEvent.upload(
+        imageInput,
+        Object.assign(imageFileFactory('fake_img.jpg'), {
+          width: 100,
+          height: 100,
+        })
+      )
+      await waitFor(() => {
+        expect(mockLogEvent).toHaveBeenCalledWith(
+          Events.DRAG_OR_SELECTED_IMAGE,
+          {
+            imageType: UploaderModeEnum.OFFER,
+            imageCreationStage: 'add image',
+          }
+        )
+      })
+    })
+
+    it('should not call the api handler until an image has been upserted', async () => {
+      vi.spyOn(
+        imageUploadModule,
+        'useIndividualOfferImageUpload'
+      ).mockReturnValue({
+        hasUpsertedImage: false,
+        handleImageOnSubmit: mockHandleImageOnSubmit,
+      } as any)
+      await renderIndividualOfferMediaScreen()
+
+      await userEvent.click(screen.getByText(LABELS.nextButtonCreationMode))
+      expect(mockHandleImageOnSubmit).not.toHaveBeenCalled()
+    })
+
+    it('should call the api handler when an image has been upserted', async () => {
+      vi.spyOn(
+        imageUploadModule,
+        'useIndividualOfferImageUpload'
+      ).mockReturnValue({
+        hasUpsertedImage: true,
+        handleImageOnSubmit: mockHandleImageOnSubmit.mockResolvedValue({
+          url: 'http://image.url/thumb.jpg',
+          credit: 'Un crédit',
+        }),
+      } as any)
+      const knownOffer = getIndividualOfferFactory()
+      await renderIndividualOfferMediaScreen({ props: { offer: knownOffer } })
+
+      await userEvent.click(screen.getByText(LABELS.nextButtonCreationMode))
+      expect(mockHandleImageOnSubmit).toHaveBeenCalled()
+    })
+
+    it('should disable the field when the venue is closed', async () => {
+      await renderIndividualOfferMediaScreen({
+        props: {
+          offer: getIndividualOfferFactory(),
+        },
+        isVenueClosed: true,
+      })
+
+      const imageInput = screen.getByLabelText(LABELS.imageInput)
+      expect(imageInput).toBeDisabled()
+    })
+
+    describe('when the offer is product based', () => {
+      it('should disable image input', async () => {
+        await renderIndividualOfferMediaScreen({
+          props: {
+            offer: getIndividualOfferFactory({
+              productId: 1,
+            }),
+          },
+        })
+
+        const input = screen.getByLabelText(LABELS.imageInput)
+        expect(input).toBeDisabled()
+        expect(
+          screen.getByText(
+            'Des informations proviennent d’un EAN et ne peuvent pas être modifiées depuis l’espace partenaire'
+          )
+        ).toBeInTheDocument()
+      })
+
+      it('should never call the api handler', async () => {
+        vi.spyOn(api, 'getOfferVideoMetadata').mockResolvedValue({
+          videoDuration: 3,
+          videoThumbnailUrl: 'http://youtube.image.com',
+          videoTitle: 'Ma super vidéo',
+          videoUrl: MOCK_DATA.videoUrl,
+        })
+
+        vi.spyOn(
+          imageUploadModule,
+          'useIndividualOfferImageUpload'
+        ).mockReturnValue({
+          hasUpsertedImage: true,
+          handleImageOnSubmit: mockHandleImageOnSubmit,
+        } as any)
+
+        await renderIndividualOfferMediaScreen({
+          props: {
+            offer: getIndividualOfferFactory({
+              productId: 1,
+            }),
+          },
+        })
+
+        await updateVideoUrlAndSubmit()
+
+        expect(api.updateOfferVideo).toHaveBeenCalled()
+        expect(mockHandleImageOnSubmit).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('when the offer is synchronized', () => {
+      it('should allow image udpate', async () => {
+        await renderIndividualOfferMediaScreen({
+          props: {
+            offer: getIndividualOfferFactory({
+              lastProvider: { name: 'Provider Name' },
+            }),
+          },
+        })
+
+        const input = screen.getByLabelText(LABELS.imageInput)
+        expect(input).not.toBeDisabled()
+      })
+    })
+  })
+
+  describe('about video url input', () => {
+    it('should not call the update offer video api until the video url has changed', async () => {
+      await renderIndividualOfferMediaScreen()
+
+      await userEvent.click(screen.getByText(LABELS.nextButtonCreationMode))
+      expect(api.updateOfferVideo).not.toHaveBeenCalled()
+    })
+
+    it('should call the update offer video api when the video url has changed', async () => {
+      vi.spyOn(api, 'getOfferVideoMetadata').mockResolvedValue({
+        videoDuration: 3,
+        videoThumbnailUrl: 'http://youtube.image.com',
+        videoTitle: 'Ma super vidéo',
+        videoUrl: 'http://youtube.url',
+      })
+      vi.spyOn(api, 'updateOfferVideo').mockResolvedValue({
+        videoDuration: 3,
+        videoThumbnailUrl: 'http://youtube.image.com',
+        videoTitle: 'Ma super vidéo',
+        videoUrl: MOCK_DATA.videoUrl,
+      })
+
+      const knownOffer = getIndividualOfferFactory()
+      await renderIndividualOfferMediaScreen({ props: { offer: knownOffer } })
+
+      await updateVideoUrlAndSubmit()
+      expect(api.updateOfferVideo).toHaveBeenCalledWith({
+        path: { offer_id: knownOffer.id },
+        body: {
+          videoUrl: MOCK_DATA.videoUrl,
+        },
+      })
+    })
+
+    it('should call the update offer video api when the video url has been deleted (empty string)', async () => {
+      vi.spyOn(api, 'updateOfferVideo').mockResolvedValue({})
+
+      const knownOffer = getIndividualOfferFactory({
+        videoData: {
+          videoUrl: MOCK_DATA.videoUrl,
+          videoDuration: 3,
+          videoThumbnailUrl: 'my image',
+          videoTitle: 'my title',
+        },
+      })
+      await renderIndividualOfferMediaScreen({ props: { offer: knownOffer } })
+
+      await updateVideoUrlAndSubmit({ text: '' })
+      expect(api.updateOfferVideo).toHaveBeenCalledWith({
+        path: { offer_id: knownOffer.id },
+        body: {
+          videoUrl: '',
+        },
+      })
+    })
+
+    it('should call both api handlers when the image and the video url have changed', async () => {
+      vi.spyOn(api, 'getOfferVideoMetadata').mockResolvedValue({
+        videoDuration: 3,
+        videoThumbnailUrl: 'http://youtube.image.com',
+        videoTitle: 'Ma super vidéo',
+        videoUrl: MOCK_DATA.videoUrl,
+      })
+      vi.spyOn(api, 'updateOfferVideo').mockResolvedValue({
+        videoDuration: 3,
+        videoThumbnailUrl: 'http://youtube.image.com',
+        videoTitle: 'Ma super vidéo',
+        videoUrl: MOCK_DATA.videoUrl,
+      })
+
+      vi.spyOn(
+        imageUploadModule,
+        'useIndividualOfferImageUpload'
+      ).mockReturnValue({
+        hasUpsertedImage: true,
+        handleImageOnSubmit: mockHandleImageOnSubmit.mockResolvedValue({
+          url: 'http://image.url/thumb.jpg',
+          credit: 'Un crédit',
+        }),
+      } as any)
+
+      const knownOffer = getIndividualOfferFactory()
+      await renderIndividualOfferMediaScreen({ props: { offer: knownOffer } })
+
+      await updateVideoUrlAndSubmit()
+
+      expect(mockHandleImageOnSubmit).toHaveBeenCalledWith(knownOffer.id)
+      expect(api.updateOfferVideo).toHaveBeenCalledWith({
+        path: { offer_id: knownOffer.id },
+        body: {
+          videoUrl: MOCK_DATA.videoUrl,
+        },
+      })
+    })
+  })
+
+  describe('about navigation', () => {
+    describe('previous step', () => {
+      it('on creation mode, should go back to informations page', async () => {
+        const knownOffer = getIndividualOfferFactory()
+        await renderIndividualOfferMediaScreen({ props: { offer: knownOffer } })
+
+        const previousButton = screen.getByRole('button', {
+          name: LABELS.previousButtonCreationMode,
+        })
+        await userEvent.click(previousButton)
+        expect(mockNavigate).toHaveBeenCalledWith(
+          `/offre/individuelle/${knownOffer.id}/creation/localisation`
+        )
+      })
+    })
+
+    describe('next step (successful submit)', () => {
+      describe('on creation mode', () => {
+        it('when the offer is an event, should go to tarifs page', async () => {
+          const mode = OFFER_WIZARD_MODE.CREATION
+          const eventOffer = getIndividualOfferFactory({ isEvent: true })
+          await renderIndividualOfferMediaScreen({
+            props: { offer: eventOffer },
+            mode,
+          })
+
+          const label = getSubmitLabel(mode)
+          await userEvent.click(screen.getByRole('button', { name: label }))
+          expect(mockNavigate).toHaveBeenCalledWith(
+            `/offre/individuelle/${eventOffer.id}/creation/tarifs`
+          )
+        })
+
+        it('when the offer is not an event, should go to stocks page', async () => {
+          const mode = OFFER_WIZARD_MODE.CREATION
+          const eventOffer = getIndividualOfferFactory({ isEvent: false })
+          await renderIndividualOfferMediaScreen({
+            props: { offer: eventOffer },
+            mode,
+          })
+
+          const label = getSubmitLabel(mode)
+          await userEvent.click(screen.getByRole('button', { name: label }))
+          expect(mockNavigate).toHaveBeenCalledWith(
+            `/offre/individuelle/${eventOffer.id}/creation/tarifs`
+          )
+        })
+      })
+
+      it('on edition mode, should show success snackbar and not navigate', async () => {
+        vi.spyOn(api, 'getOfferVideoMetadata').mockResolvedValue({
+          videoDuration: 3,
+          videoThumbnailUrl: 'http://youtube.image.com',
+          videoTitle: 'Ma super vidéo',
+          videoUrl: 'http://youtube.url',
+        })
+        vi.spyOn(api, 'updateOfferVideo').mockResolvedValue({})
+        const mode = OFFER_WIZARD_MODE.EDITION
+        const knownOffer = getIndividualOfferFactory()
+        await renderIndividualOfferMediaScreen({
+          props: { offer: knownOffer },
+          mode,
+        })
+
+        await updateVideoUrlAndSubmit({ mode })
+
+        await waitFor(() => {
+          expect(
+            screen.getAllByText('Votre offre a bien été modifiée.').length
+          ).toBeGreaterThan(0)
+        })
+        expect(mockNavigate).not.toHaveBeenCalled()
+      })
+
+      it('should log error when video upload fail in api', async () => {
+        vi.spyOn(api, 'updateOfferVideo').mockRejectedValue("c'est cassé")
+        const mode = OFFER_WIZARD_MODE.EDITION
+        const knownOffer = getIndividualOfferFactory()
+        await renderIndividualOfferMediaScreen({
+          props: { offer: knownOffer },
+          mode,
+        })
+
+        await updateVideoUrlAndSubmit({ mode })
+
+        await waitFor(() => {
+          expect(
+            screen.getAllByText(
+              'Une erreur est survenue lors de l’enregistrement de votre vidéo'
+            ).length
+          ).toBeGreaterThan(0)
+        })
+      })
+
+      it('should log error when image upload fail in api', async () => {
+        vi.spyOn(
+          imageUploadModule,
+          'useIndividualOfferImageUpload'
+        ).mockReturnValue({
+          hasUpsertedImage: true,
+          handleImageOnSubmit:
+            mockHandleImageOnSubmit.mockRejectedValue('oups'),
+        } as any)
+        await renderIndividualOfferMediaScreen()
+
+        await userEvent.click(screen.getByText(LABELS.nextButtonCreationMode))
+        expect(mockHandleImageOnSubmit).toHaveBeenCalled()
+        await waitFor(() => {
+          expect(
+            screen.getAllByText(
+              'Une erreur est survenue lors de l’enregistrement de votre image'
+            ).length
+          ).toBeGreaterThan(0)
+        })
+      })
+    })
+  })
+})

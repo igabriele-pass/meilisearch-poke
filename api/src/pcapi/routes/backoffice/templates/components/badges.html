@@ -1,0 +1,62 @@
+{% macro build_venue_badges(venue, has_fraudulent_booking) %}
+  {% call badges_container() %}
+    {% if venue.isPermanent %}
+      {{ "Partenaire culturel permanent" | format_badge("primary") }}
+    {% else %}
+      {{ "Partenaire culturel" | format_badge("primary") }}
+    {% endif %}
+    {% if venue.managingOfferer.isClosed %}{{ "Entité juridique fermée" | format_badge("danger") }}{% endif %}
+    {% if venue.is_closed %}{{ "Partenaire culturel fermé" | format_badge("danger") }}{% endif %}
+    {% if not venue.managingOfferer.isActive %}{{ "Suspendu" | format_badge("danger") }}{% endif %}
+    {{ build_fraudulent_booking_badge(has_fraudulent_booking, "Réservations frauduleuses") }}
+    {{ build_reimboursement_supspended_badge(venue.isReimbursementSuspended) }}
+  {% endcall %}
+{% endmacro %}
+{% macro build_offerer_badges(offerer, has_fraudulent_booking, has_reimbursement_suspended) %}
+  {% call badges_container() %}
+    {{ "Entité juridique" | format_badge("primary") }}
+    {{ offerer | format_offerer_status_badge }}
+    {% if not offerer.isActive %}{{ "Suspendue" | format_badge("danger") }}{% endif %}
+    {{ build_fraudulent_booking_badge(has_fraudulent_booking, "Réservations frauduleuses") }}
+    {{ build_reimboursement_supspended_badge(has_reimbursement_suspended) }}
+  {% endcall %}
+{% endmacro %}
+{% macro build_pro_user_status_badge(pro_user) %}
+  {% if pro_user.proValidationStatus.value == "VALIDATED" %}
+    {{ "Validé" | format_badge("success") }}
+  {% elif pro_user.proValidationStatus.value == "PENDING" %}
+    {{ "En attente" | format_badge("warning") }}
+  {% elif pro_user.proValidationStatus.value == "NEW" %}
+    {{ "Nouveau" | format_badge("info") }}
+  {% endif %}
+{% endmacro %}
+{% macro build_offer_offerer_fraud_badges(offerer) %}
+  {% if has_permission("PRO_FRAUD_ACTIONS") %}
+    {{ offerer.confidenceLevel | format_confidence_level_badge }}
+    {% if offerer.isTopActeur %}{{ "Top Acteur" | format_badge("secondary") }}{% endif %}
+  {% endif %}
+{% endmacro %}
+{% macro build_fraudulent_booking_badge(has_fraudulent_booking, content) %}
+  {% if has_fraudulent_booking and has_permission("READ_FRAUDULENT_BOOKING_INFO") %}
+    <span class="badge text-danger bg-danger-subtle d-inline-flex gap-1"><i class="bi bi-exclamation-triangle"></i>{{ content }}</span>
+  {% endif %}
+{% endmacro %}
+{% macro build_reimboursement_supspended_badge(has_reimbursement_suspended) %}
+  {% if has_reimbursement_suspended and has_permission("READ_PRO_REIMBURSEMENT_SUSPENSION") %}
+    {{ "Remboursements gelés" | format_badge('danger', 'exclamation-triangle') }}
+  {% endif %}
+{% endmacro %}
+{% macro build_offer_venue_fraud_badges(venue) %}
+  {% if has_permission("PRO_FRAUD_ACTIONS") %}{{ venue.confidenceLevel | format_confidence_level_badge }}{% endif %}
+{% endmacro %}
+{% macro badges_container() %}
+  <div class="d-inline-flex flex-wrap gap-2">{{ caller() }}</div>
+{% endmacro %}
+{% macro build_has_changed_email_icon(user) %}
+  {% if user.has_changed_email %}
+    <i class="bi bi-envelope-plus-fill text-warning pc-email-changed-icon px-1"
+       data-bs-toggle="tooltip"
+       data-bs-placement="top"
+       data-bs-title="L'utilisateur a déjà changé d'email"></i>
+  {% endif %}
+{% endmacro %}

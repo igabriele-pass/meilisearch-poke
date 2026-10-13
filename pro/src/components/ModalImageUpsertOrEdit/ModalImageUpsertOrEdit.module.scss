@@ -1,0 +1,70 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.modal-image-crop {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--size-spacing-s);
+  flex-grow: 1;
+
+  &-content {
+    flex-grow: 1;
+  }
+
+  &-subwrapper {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-spacing-l);
+
+    @media (min-width: size.$tablet) {
+      min-width: calc(rem.torem(size.$tablet) - size.$dialog-box-padding * 2);
+      flex-direction: row;
+    }
+  }
+
+  &-editor {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: stretch;
+    border: rem.torem(1px) solid var(--color-border-subtle);
+    border-radius: var(--size-border-radius-s);
+    max-width: rem.torem(410px);
+
+    &-loading {
+      visibility: hidden;
+    }
+  }
+
+  &-callout {
+    margin-top: var(--size-spacing-l);
+
+    &-list {
+      list-style-type: disc;
+      padding-left: var(--size-spacing-xl);
+    }
+  }
+
+  &-actions {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    gap: var(--size-spacing-l);
+    padding: var(--size-spacing-l);
+    align-items: flex-start;
+
+    > * {
+      flex: 1;
+    }
+  }
+
+  &-credit {
+    margin-top: var(--size-spacing-xl);
+
+    &-loading {
+      visibility: hidden;
+    }
+  }
+}

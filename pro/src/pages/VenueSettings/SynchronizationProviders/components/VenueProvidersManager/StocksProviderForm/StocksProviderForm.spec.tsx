@@ -1,0 +1,113 @@
+import { screen } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import * as useAnalytics from '@/app/App/analytics/firebase'
+import { SynchronizationEvents } from '@/commons/core/FirebaseEvents/constants'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import {
+  StocksProviderForm,
+  type StocksProviderFormProps,
+} from './StocksProviderForm'
+
+const mockLogEvent = vi.fn()
+
+const renderStocksProviderForm = (props: StocksProviderFormProps) => {
+  return renderWithProviders(<StocksProviderForm {...props} />)
+}
+
+describe('StocksProviderForm', () => {
+  let props: StocksProviderFormProps
+  const providerId = 66
+
+  beforeEach(() => {
+    props = {
+      providerId: providerId,
+      saveVenueProvider: vi.fn().mockReturnValue(true),
+      siret: '12345678901234',
+      hasOffererProvider: true,
+    }
+
+    vi.spyOn(useAnalytics, 'useAnalytics').mockImplementation(() => ({
+      logEvent: mockLogEvent,
+    }))
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderStocksProviderForm(props)
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display an import button', () => {
+    renderStocksProviderForm(props)
+
+    expect(
+      screen.getByRole('button', { name: 'Lancer la synchronisation' })
+    ).toBeInTheDocument()
+  })
+
+  describe('on form submit', () => {
+    it('should display the spinner while waiting for server response', async () => {
+      renderStocksProviderForm(props)
+      const submitButton = screen.getByRole('button', {
+        name: 'Lancer la synchronisation',
+      })
+
+      await userEvent.click(submitButton)
+
+      expect(
+        screen.getByText(
+          'Demander la synchronisation par API avec un logiciel tiers ?'
+        )
+      ).toBeInTheDocument()
+
+      const confirmImportButton = screen.getByRole('button', {
+        name: 'Continuer',
+      })
+      await userEvent.click(confirmImportButton)
+
+      expect(
+        screen.getByText('Vérification de votre rattachement')
+      ).toBeInTheDocument()
+      expect(props.saveVenueProvider).toHaveBeenCalledWith({
+        providerId: providerId,
+        venueIdAtOfferProvider: '12345678901234',
+      })
+    })
+
+    it('should track on import', async () => {
+      renderStocksProviderForm(props)
+
+      const submitButton = screen.getByRole('button', {
+        name: 'Lancer la synchronisation',
+      })
+      await userEvent.click(submitButton)
+
+      expect(mockLogEvent).toHaveBeenCalledTimes(1)
+      expect(mockLogEvent).toHaveBeenNthCalledWith(
+        1,
+        SynchronizationEvents.CLICKED_IMPORT,
+        {
+          providerId: providerId,
+        }
+      )
+
+      const confirmImportButton = screen.getByRole('button', {
+        name: 'Continuer',
+      })
+      await userEvent.click(confirmImportButton)
+
+      expect(mockLogEvent).toHaveBeenCalledTimes(2)
+      expect(mockLogEvent).toHaveBeenNthCalledWith(
+        2,
+        SynchronizationEvents.CLICKED_VALIDATE_IMPORT,
+        {
+          providerId: providerId,
+          saved: true,
+        }
+      )
+    })
+  })
+})

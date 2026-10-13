@@ -1,0 +1,30 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.income-card-amount {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-xs);
+}
+
+.income-card-label {
+  @include fonts.body-accent;
+
+  margin: 0;
+}
+
+.income-card-empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-m);
+
+  &-icon {
+    color: var(--color-icon-subtle);
+  }
+
+  &-text {
+    @include fonts.body;
+
+    color: var(--color-text-subtle);
+    text-align: left;
+  }
+}

@@ -1,0 +1,60 @@
+import { useCallback } from 'react'
+import { useFormContext } from 'react-hook-form'
+
+import type { OfferEducationalFormValues } from '@/commons/core/OfferEducational/types'
+import { offerInterventionOptions } from '@/commons/core/shared/interventionOptions'
+import { selectInterventionAreas } from '@/commons/utils/selectInterventionAreas'
+import { MultiSelect, type Option } from '@/ui-kit/form/MultiSelect/MultiSelect'
+
+interface InterventionAreaMultiSelectProps {
+  label: string
+  disabled: boolean
+}
+
+export const InterventionAreaMultiSelect = ({
+  label,
+  disabled,
+}: InterventionAreaMultiSelectProps): JSX.Element => {
+  const { setValue, watch, getFieldState } =
+    useFormContext<OfferEducationalFormValues>()
+
+  const handleInterventionAreaChange = useCallback(
+    (
+      selectedOption: Option[],
+      addedOptions: Option[],
+      removedOptions: Option[]
+    ) => {
+      const newSelectedOptions = selectInterventionAreas({
+        selectedOption,
+        addedOptions,
+        removedOptions,
+      })
+      setValue('interventionArea', Array.from(newSelectedOptions), {
+        shouldValidate: true,
+        shouldDirty: true,
+      })
+    },
+    [setValue]
+  )
+
+  return (
+    <MultiSelect
+      label={label}
+      required
+      buttonLabel="Département(s)"
+      options={offerInterventionOptions}
+      selectedOptions={offerInterventionOptions.filter((op) =>
+        watch('interventionArea')?.includes(op.id)
+      )}
+      defaultOptions={offerInterventionOptions.filter((option) =>
+        watch('interventionArea')?.includes(option.id)
+      )}
+      disabled={disabled}
+      hasSearch
+      searchLabel="Rechercher un département"
+      hasSelectAllOptions
+      onSelectedOptionsChanged={handleInterventionAreaChange}
+      error={getFieldState('interventionArea').error?.message}
+    />
+  )
+}

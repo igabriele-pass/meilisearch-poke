@@ -1,0 +1,58 @@
+@use "styles/mixins/_forms.scss" as formsM;
+@use "styles/variables/_forms.scss" as forms;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+
+.select-input {
+  @include formsM.input-theme;
+
+  line-height: rem.torem(36px);
+  padding-right: rem.torem(forms.$input-right-icon-padding);
+
+  @include formsM.input-theme-nested;
+
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+
+  @include fonts.body;
+
+  color: var(--color-text-default);
+  border-radius: var(--size-border-radius-m);
+  border: rem.torem(1px) solid var(--color-border-default);
+  cursor: pointer;
+
+  &:hover {
+    background: var(--color-background-subtle);
+    box-shadow: none;
+  }
+
+  &.has-value {
+    border-width: size.$input-border-width;
+  }
+
+  &:disabled {
+    border: rem.torem(1px) solid var(--color-border-disabled);
+    color: var(--color-text-disabled);
+    cursor: auto;
+  }
+
+  &.has-error {
+    @include formsM.input-theme-error;
+  }
+
+  &-icon {
+    @include formsM.input-icon-wrapper(16px);
+  }
+
+  &-wrapper {
+    position: relative;
+  }
+
+  &-placeholder {
+    @include fonts.body-italic;
+
+    color: var(--color-text-subtle);
+  }
+}

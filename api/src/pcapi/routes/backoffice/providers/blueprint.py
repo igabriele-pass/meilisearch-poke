@@ -1,0 +1,437 @@
+from secrets import token_urlsafe
+
+import sqlalchemy as sa
+import sqlalchemy.exc as sa_exc
+import sqlalchemy.orm as sa_orm
+from flask import Response
+from flask import flash
+from flask import redirect
+from flask import render_template
+from flask import request
+from flask import url_for
+from flask_login import current_user
+from markupsafe import Markup
+from werkzeug.exceptions import NotFound
+
+from pcapi.core.external.zendesk_sell import api as zendesk_sell_api
+from pcapi.core.history import api as history_api
+from pcapi.core.history import models as history_models
+from pcapi.core.offerers import api as offerers_api
+from pcapi.core.offerers import exceptions as offerers_exceptions
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offerers import repository as offerers_repository
+from pcapi.core.permissions import models as perm_models
+from pcapi.core.providers import api as providers_api
+from pcapi.core.providers import models as providers_models
+from pcapi.models import db
+from pcapi.models.validation_status_mixin import ValidationStatus
+from pcapi.routes.backoffice import blueprint as backoffice_blueprint
+from pcapi.routes.backoffice.forms import empty as empty_forms
+from pcapi.routes.backoffice.pro.utils import get_connect_as
+from pcapi.routes.backoffice.utils import access_control
+from pcapi.routes.backoffice.utils import response as response_utils
+from pcapi.utils import urls
+from pcapi.utils.transaction_manager import mark_transaction_as_invalid
+
+from . import forms
+
+
+providers_blueprint = backoffice_blueprint.child_backoffice_blueprint(
+    "providers",
+    __name__,
+    url_prefix="/pro/providers",
+    permission=perm_models.Permissions.READ_TECH_PARTNERS,
+)
+
+
+@providers_blueprint.route("", methods=["GET"])
+def list_providers() -> response_utils.BackofficeResponse:
+    is_active_count = (
+        sa.select(sa.func.jsonb_object_agg(sa.text("status_group"), sa.text("number")))
+        .select_from(
+            sa.select(
+                sa.case(
+                    (providers_models.VenueProvider.isActive, "active"),
+                    else_="inactive",
+                ).label("status_group"),
+                sa.func.count(providers_models.VenueProvider.id).label("number"),
+            )
+            .select_from(providers_models.VenueProvider)
+            .correlate(providers_models.Provider)
+            .filter(
+                providers_models.VenueProvider.providerId == providers_models.Provider.id,
+            )
+            .group_by("status_group")
+            .subquery()
+        )
+        .scalar_subquery()
+    )
+
+    rows = (
+        db.session.query(providers_models.Provider, is_active_count.label("is_active_count"))
+        .options(
+            sa_orm.load_only(
+                providers_models.Provider.id,
+                providers_models.Provider.name,
+                providers_models.Provider.logoUrl,
+                providers_models.Provider.enabledForPro,
+                providers_models.Provider.isActive,
+            )
+        )
+        .options(
+            sa_orm.joinedload(providers_models.Provider.offererProvider)
+            .joinedload(offerers_models.OffererProvider.offerer)
+            .load_only(offerers_models.Offerer.siren)
+        )
+        .options(sa_orm.joinedload(providers_models.Provider.apiKeys).load_only(offerers_models.ApiKey.id))
+        .order_by(sa.func.lower(sa.func.unaccent(providers_models.Provider.name)))
+        .all()
+    )
+
+    return render_template("providers/list.html", rows=rows)
+
+
+@providers_blueprint.route("/new", methods=["GET"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_TECH_PARTNERS)
+def get_create_provider_form() -> response_utils.BackofficeResponse:
+    form = forms.CreateProviderForm()
+
+    return render_template(
+        "components/dynamic/modal_form.html",
+        form=form,
+        dst=url_for("backoffice.providers.create_provider"),
+        div_id="create-provider",
+        modal_content_id="create-provider-modale-content",
+        target_id="#create-provider-modale-content",
+        title="Créer un partenaire technique qui se synchronisera avec le pass Culture",
+        button_text="Créer le partenaire",
+        close_on_validation=False,
+    )
+
+
+@providers_blueprint.route("/", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_TECH_PARTNERS)
+def create_provider() -> response_utils.BackofficeResponse:
+    form = forms.CreateProviderForm()
+
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return Response(
+            response="redirecting",
+            status=303,
+            headers={
+                "HX-Redirect": url_for("backoffice.providers.list_providers"),
+            },
+        )
+
+    try:
+        provider = providers_models.Provider(
+            name=form.name.data,
+            logoUrl=form.logo_url.data,
+            enabledForPro=form.enabled_for_pro.data,
+            isActive=form.is_active.data,
+            bookingExternalUrl=form.booking_external_url.data,
+            cancelExternalUrl=form.cancel_external_url.data,
+            notificationExternalUrl=form.notification_external_url.data,
+            hmacKey=token_urlsafe(64),
+        )
+        offerer, is_offerer_new = _get_or_create_offerer(form)
+        offerer_provider = offerers_models.OffererProvider(offerer=offerer, provider=provider)
+        api_key, clear_secret = offerers_api.generate_provider_api_key(provider)
+        db.session.add_all([provider, offerer, offerer_provider, api_key])
+
+        if is_offerer_new:
+            history_api.add_action(
+                history_models.ActionType.OFFERER_VALIDATED,
+                author=current_user,
+                offerer=offerer,
+                comment="Création et validation automatique via création de partenaire",
+            )
+
+        offerers_api.update_fraud_info(
+            offerer=offerer,
+            author_user=current_user,
+            confidence_level=offerers_models.OffererConfidenceLevel.MANUAL_REVIEW,
+            comment="Entité juridique de provider créée manuellement depuis le BO",
+        )
+
+        db.session.flush()
+    except sa_exc.IntegrityError:
+        mark_transaction_as_invalid()
+        flash("Ce partenaire existe déjà", "warning")
+        return Response(
+            response="redirecting",
+            status=303,
+            headers={
+                "HX-Redirect": url_for("backoffice.providers.list_providers"),
+            },
+        )
+
+    if is_offerer_new:
+        zendesk_sell_api.create_offerer(offerer)
+
+    form = empty_forms.EmptyGetForm()
+    return render_template(
+        "components/dynamic/modal_form.html",
+        dst=url_for("backoffice.providers.list_providers"),
+        form=form,
+        include_template="providers/list/create.html",
+        div_id="create-provider",
+        title=Markup("Le nouveau partenaire <b>{name}</b> a été créé.").format(name=provider.name),
+        button_text="Accepter",
+        key=provider.hmacKey,
+        clear_secret=clear_secret,
+        hide_cancel=True,
+        ajax_submit=False,
+    )
+
+
+def _get_or_create_offerer(form: forms.CreateProviderForm) -> tuple[offerers_models.Offerer, bool]:
+    offerer = offerers_repository.find_offerer_by_siren(form.siren.data)
+    if is_offerer_new := offerer is None:
+        offerer = offerers_models.Offerer(
+            name=form.name.data,
+            siren=form.siren.data,
+            validationStatus=ValidationStatus.VALIDATED,
+        )
+    elif not offerer.isValidated:
+        offerers_api.validate_offerer(offerer=offerer, author_user=current_user)
+    return offerer, is_offerer_new
+
+
+def _render_provider_details(
+    provider: providers_models.Provider, edit_form: forms.EditProviderForm | None = None
+) -> str:
+    delete_key_form = None
+    create_key_form = None
+    if access_control.has_current_user_permission(perm_models.Permissions.MANAGE_TECH_PARTNERS):
+        delete_key_form = empty_forms.EmptyForm()
+        create_key_form = empty_forms.EmptyForm()
+        if not edit_form:
+            edit_form = forms.EditProviderForm(
+                name=provider.name,
+                logo_url=provider.logoUrl,
+                enabled_for_pro=provider.enabledForPro,
+                is_active=provider.isActive,
+                booking_external_url=provider.bookingExternalUrl,
+                cancel_external_url=provider.cancelExternalUrl,
+                notification_external_url=provider.notificationExternalUrl,
+                provider_hmac_key=provider.hmacKey,
+            )
+            edit_form.provider_hmac_key.flags.copy_button = provider.hmacKey is not None
+
+    return render_template(
+        "providers/get.html",
+        provider=provider,
+        active_tab=request.args.get("active_tab", "venues"),
+        create_key_form=create_key_form,
+        delete_key_form=delete_key_form,
+        edit_form=edit_form,
+    )
+
+
+@providers_blueprint.route("/<int:provider_id>", methods=["GET"])
+def get_provider(provider_id: int) -> response_utils.BackofficeResponse:
+    provider = (
+        db.session.query(providers_models.Provider)
+        .filter(providers_models.Provider.id == provider_id)
+        .options(
+            sa_orm.joinedload(providers_models.Provider.offererProvider)
+            .joinedload(offerers_models.OffererProvider.offerer)
+            .load_only(offerers_models.Offerer.siren)
+        )
+        .options(sa_orm.joinedload(providers_models.Provider.apiKeys))
+        .one_or_none()
+    )
+
+    if not provider:
+        raise NotFound()
+
+    return _render_provider_details(provider)
+
+
+def _get_active_venue_providers_stats(provider_id: int) -> dict[str, int]:
+    query = sa.select(sa.func.jsonb_object_agg(sa.text("status_group"), sa.text("number"))).select_from(
+        sa.select(
+            sa.case(
+                (providers_models.VenueProvider.isActive, "active"),
+                else_="inactive",
+            ).label("status_group"),
+            sa.func.count(providers_models.VenueProvider.id).label("number"),
+        )
+        .filter(providers_models.VenueProvider.providerId == provider_id)
+        .group_by("status_group")
+        .subquery()
+    )
+    (data,) = db.session.execute(query).one()
+
+    return {
+        "active": data.get("active", 0) if data else 0,
+        "inactive": data.get("inactive", 0) if data else 0,
+    }
+
+
+@providers_blueprint.route("/<int:provider_id>/create-api-key", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_TECH_PARTNERS)
+def create_api_key(provider_id: int) -> response_utils.BackofficeResponse:
+    form = empty_forms.EmptyForm()
+
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return redirect(url_for("backoffice.providers.get_provider", provider_id=provider_id), code=303)
+
+    provider = (
+        db.session.query(providers_models.Provider).filter(providers_models.Provider.id == provider_id).one_or_none()
+    )
+
+    if not provider:
+        raise NotFound()
+
+    try:
+        api_key, clear_secret = offerers_api.generate_provider_api_key(provider)
+    except offerers_exceptions.CannotFindProviderOfferer:
+        flash(
+            "Ce partenaire technique n'est pas lié à une entité juridique. Impossible de lui créer une clé d'API. ",
+            "warning",
+        )
+        return Response(
+            response="redirecting",
+            status=303,
+            headers={
+                "HX-Redirect": url_for("backoffice.providers.get_provider", provider_id=provider_id),
+            },
+        )
+    db.session.add(api_key)
+
+    return render_template(
+        "providers/list/api_key.html",
+        clear_secret=clear_secret,
+    )
+
+
+@providers_blueprint.route("/<int:provider_id>/delete-api-key/<int:key_id>", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_TECH_PARTNERS)
+def delete_api_key(provider_id: int, key_id: int) -> response_utils.BackofficeResponse:
+    form = empty_forms.EmptyForm()
+
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return redirect(url_for("backoffice.providers.get_provider", provider_id=provider_id), code=303)
+
+    deleted = (
+        db.session.query(offerers_models.ApiKey)
+        .filter(
+            offerers_models.ApiKey.id == key_id,
+            offerers_models.ApiKey.providerId == provider_id,
+        )
+        .delete(synchronize_session=False)
+    )
+
+    if deleted:
+        flash("La clé a été supprimée", "info")
+    else:
+        flash("La clé n'a pas été trouvée pour ce provider", "warning")
+
+    return redirect(url_for("backoffice.providers.get_provider", provider_id=provider_id, active_tab="keys"), code=303)
+
+
+@providers_blueprint.route("/<int:provider_id>/stats", methods=["GET"])
+def get_stats(provider_id: int) -> response_utils.BackofficeResponse:
+    stats = _get_active_venue_providers_stats(provider_id)
+    return render_template(
+        "providers/get/stats.html",
+        stats=stats,
+        provider_id=provider_id,
+    )
+
+
+@providers_blueprint.route("/<int:provider_id>/venues", methods=["GET"])
+def get_venues(provider_id: int) -> response_utils.BackofficeResponse:
+    venues = (
+        db.session.query(offerers_models.Venue)
+        .join(
+            providers_models.VenueProvider,
+            sa.and_(
+                providers_models.VenueProvider.venueId == offerers_models.Venue.id,
+                providers_models.VenueProvider.providerId == provider_id,
+            ),
+        )
+        .options(
+            sa_orm.load_only(
+                offerers_models.Venue.id,
+                offerers_models.Venue.isSoftDeleted,
+                offerers_models.Venue.name,
+                offerers_models.Venue.publicName,
+                offerers_models.Venue.managingOffererId,
+                offerers_models.Venue.siret,
+            ),
+            sa_orm.contains_eager(offerers_models.Venue.venueProviders).load_only(
+                providers_models.VenueProvider.isActive, providers_models.VenueProvider.lastSyncDate
+            ),
+        )
+        .order_by(sa.func.lower(sa.func.unaccent(offerers_models.Venue.publicName)), offerers_models.Venue.id)
+        .all()
+    )
+
+    connect_as = {}
+    for venue in venues:
+        connect_as[venue.id] = get_connect_as(
+            object_type="venue",
+            object_id=venue.id,
+            pc_pro_path=urls.build_pc_pro_venue_parameters_path(venue),
+        )
+
+    return render_template(
+        "providers/get/venues.html",
+        connect_as=connect_as,
+        provider_id=provider_id,
+        venues=venues,
+    )
+
+
+@providers_blueprint.route("/<int:provider_id>/update", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_TECH_PARTNERS)
+def update_provider(provider_id: int) -> response_utils.BackofficeResponse:
+    provider = db.session.query(providers_models.Provider).filter_by(id=provider_id).one_or_none()
+    if not provider:
+        raise NotFound()
+
+    form = forms.EditProviderForm()
+    if not form.validate():
+        mark_transaction_as_invalid()
+        msg = Markup(
+            """
+            <button type="button"
+                    class="btn"
+                    data-bs-toggle="modal"
+                    data-bs-target="#edit-provider-modal">
+                Les données envoyées comportent des erreurs. Afficher
+            </button>
+            """
+        ).format()
+        flash(msg, "warning")
+        return _render_provider_details(provider, edit_form=form), 400
+
+    provider.name = form.name.data
+    provider.logoUrl = form.logo_url.data
+    provider.enabledForPro = form.enabled_for_pro.data
+    provider.isActive = form.is_active.data
+    provider.bookingExternalUrl = form.booking_external_url.data
+    provider.cancelExternalUrl = form.cancel_external_url.data
+    provider.notificationExternalUrl = form.notification_external_url.data
+
+    try:
+        db.session.add(provider)
+        db.session.flush()
+        if not form.is_active.data:
+            providers_api.disable_offers_linked_to_provider(provider_id, current_user)
+    except sa_exc.IntegrityError:
+        mark_transaction_as_invalid()
+        flash("Ce partenaire existe déjà", "warning")
+    else:
+        flash("Les informations ont été mises à jour", "success")
+
+    return redirect(url_for("backoffice.providers.get_provider", provider_id=provider_id), code=303)

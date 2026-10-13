@@ -1,0 +1,25 @@
+{% macro description_detail_vertical(title) %}
+  <dl>
+    <dt>{{ title }}</dt>
+    <dd>
+      {{ caller() }}
+    </dd>
+  </dl>
+{% endmacro %}
+{% macro description_detail_horizontal(title) %}
+  <dl class="row m-0">
+    <dt class="col-sm-3">{{ title }}</dt>
+    <dd class="col-sm-9">
+      {{ caller() }}
+    </dd>
+  </dl>
+{% endmacro %}
+{% macro description(title) %}
+  <dl class="mb-1">
+    <dt class="d-inline">{{ title }}</dt>
+    :
+    <dd class="d-inline">
+      {{ caller() }}
+    </dd>
+  </dl>
+{% endmacro %}

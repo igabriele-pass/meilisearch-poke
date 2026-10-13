@@ -1,0 +1,75 @@
+import { api } from '@/apiClient/api'
+import { isErrorAPIError } from '@/apiClient/helpers'
+import { memoize } from '@/commons/utils/memoize'
+import { unhumanizeSiret } from '@/commons/utils/siren'
+
+import type { StructureDataBodyModel } from 'apiClient/v1'
+
+const validateSiret = (siret: string): string => {
+  if (siret.length < 14) {
+    return 'SIRET trop court'
+  } else if (siret.length > 14) {
+    return 'SIRET trop long'
+  }
+  return ''
+}
+
+const getSiretDataRequest = async (
+  humanSiret: string
+): Promise<StructureDataBodyModel> => {
+  const siret = unhumanizeSiret(humanSiret || '')
+  if (humanSiret === '') {
+    return {
+      location: null,
+      apeCode: null,
+      isDiffusible: false,
+      name: null,
+      siren: null,
+      siret: '',
+    }
+  }
+  const error = validateSiret(siret)
+  if (error) {
+    throw new Error(error)
+  }
+  try {
+    return await api.getStructureData({ path: { search_input: siret } })
+  } catch (e) {
+    let message = 'Impossible de vérifier le SIRET saisi.'
+    if (isErrorAPIError(e) && e.status === 400) {
+      /* istanbul ignore next: DEBT, TO FIX */
+      if (e.body.global) {
+        message = e.body.global[0]
+      }
+    }
+    throw new Error(message)
+  }
+}
+
+const checkSiretRequest = async (humanSiret: string) => {
+  if (humanSiret === '') {
+    throw new Error('SIRET vide')
+  }
+  const siret = unhumanizeSiret(humanSiret || '')
+  const error = validateSiret(siret)
+  if (error) {
+    throw new Error(error)
+  }
+  try {
+    await api.checkStructure({ path: { search_input: siret } })
+  } catch (e) {
+    let message = 'Impossible de vérifier le SIRET saisi.'
+    if (isErrorAPIError(e) && e.status === 400) {
+      /* istanbul ignore next: DEBT, TO FIX */
+      if (e.body.global) {
+        message = e.body.global[0]
+      }
+    }
+    throw new Error(message)
+  }
+}
+
+// TODO (igabriele, 2026-01-20): Over-engineered custom memoization.
+export const getSiretData = memoize(getSiretDataRequest)
+
+export const checkSiret = memoize(checkSiretRequest)

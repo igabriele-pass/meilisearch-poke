@@ -1,0 +1,121 @@
+name: 2 [CI] Delete PR deployments
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "26 5-17 * * *"
+      timezone: "Europe/Paris"
+
+permissions: write-all
+
+jobs:
+  delete-pullrequest-deployment:
+    name: "Delete PR deployment"
+    runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: "Authentification to Google"
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_EHP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_EHP_SERVICE_ACCOUNT }}
+
+      # Get github api token
+      - name: "Get secrets (github)"
+        id: "secrets"
+        uses: google-github-actions/get-secretmanager-secrets@bc9c54b29fdffb8a47776820a7d26e77b379d262 # v3.0.0
+        with:
+          secrets: |-
+            DEPLOYMENT_SA:passculture-metier-ehp/pcapi-testing_deploy-service-account
+            DEPLOYMENT_WORKLOAD_IDENTITY_PROVIDER:passculture-metier-ehp/gcp_metier_ehp_workload_identity_provider
+
+      - name: Authenticate through github app ghactionci
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: github-token
+        with:
+          app-id: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+          private-key: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # Liste des repositories à cloner
+          repositories: |
+            pass-culture-deployment
+            pass-culture-main
+            rendered-manifests
+            pc-connect
+            pc-firestore-cli
+          permission-contents: write
+
+      # Checkout rendered-manifests repository
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: pass-culture/rendered-manifests
+          token: ${{ steps.github-token.outputs.token }}
+          path: ./rendered-manifests
+          ref: "pcapi/pullrequests"
+          persist-credentials: false
+
+      - name: "Authentification to Google"
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          service_account: ${{ steps.secrets.outputs.DEPLOYMENT_SA }}
+          workload_identity_provider: ${{ steps.secrets.outputs.DEPLOYMENT_WORKLOAD_IDENTITY_PROVIDER }}
+
+      # Set up Cloud SDK
+      - name: "Set up Cloud SDK"
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          version: ">= 363.0.0"
+
+      - name: "Connect to cluster"
+        uses: pass-culture/common-workflows/actions/pc-k8s-connect@46bfbcb2f617bd3dcc034e974ef6ffbe6106d3cb # pc-k8s-connect/v0.3.1
+        with:
+          cluster_scope: metier
+          cluster_environment: ehp
+          api_token_github: ${{ steps.github-token.outputs.token }}
+
+      - name: "Delete PR deployments"
+        run: |
+          set -xe
+          git config --global user.email "PassCulture-SA@passculture.team"
+          git config --global user.name "PassCulture-SA"
+          cd ./rendered-manifests
+          # Look for deployments older than 24 hours by looking at pcapi-pr namespaces created prior that delay
+          pullrequests_ids=$(kubectl get ns -o go-template --template '{{range .items}}{{.metadata.name}} {{.metadata.creationTimestamp}}{{"\n"}}{{end}}' | awk '{if ($1 ~ "pcapi-pr") print $0}' | awk '$2 <= "'"$(date -d'now-24 hours' -Ins --utc | sed 's/+0000/Z/')"'" { print $1 }' | cut -d "-" -f3)
+
+          files_modified=false
+          for id in $pullrequests_ids; do
+            [[ -d "testing-pr-$id" ]] && { git rm -r "testing-pr-$id"; files_modified=true; } || echo "path testing-pr-$id does not exist"
+            [[ -d "postgresql-pr-$id" ]] && { git rm -r "postgresql-pr-$id"; files_modified=true; } || echo "path postgresql-pr-$id does not exist"
+            [[ -d "redis-pr-$id" ]] && { git rm -r "redis-pr-$id"; files_modified=true; } || echo "path redis-pr-$id does not exist"
+          done
+          if [ "$files_modified" = true ]; then
+            git add .
+            git commit -m "Scheduled delete of pullrequests deployments"
+            git push
+          fi
+
+          #Set active project for DNS entry deletion
+          gcloud config set project passculture-metier-ehp
+
+          for id in $pullrequests_ids; do
+            while true; do
+              kubectl get application -n argocd | grep "$id" && sleep 5 || echo "application with id $id is deleted, continuing"; break
+            done
+            # Check for PR namespace and delete it
+            if kubectl get ns "pcapi-pr-$id"
+            then
+              kubectl delete ns "pcapi-pr-$id"
+            else
+              echo "namespace pcapi-pr-$id does not exist"
+            fi
+            # Delete DNS entry
+            gcloud dns record-sets delete "backend-$id.testing.passculture.team." --type=A --zone=testing-passculture-team || echo "record A backend-$id.testing.passculture.team does not exist"
+            gcloud dns record-sets delete "backoffice-$id.testing.passculture.team." --type=A --zone=testing-passculture-team || echo "record A backoffice-$id.testing.passculture.team does not exist"
+            gcloud dns record-sets delete "a-backend-$id.testing.passculture.team." --type=TXT --zone=testing-passculture-team || echo "record TXT backend-$id.testing.passculture.team does not exist"
+            gcloud dns record-sets delete "a-backoffice-$id.testing.passculture.team." --type=TXT --zone=testing-passculture-team || echo "record TXT backoffice-$id.testing.passculture.team does not exist"
+          done

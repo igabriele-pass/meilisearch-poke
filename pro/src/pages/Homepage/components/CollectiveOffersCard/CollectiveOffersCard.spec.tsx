@@ -1,0 +1,118 @@
+import { screen } from '@testing-library/react'
+import type { ComponentProps } from 'react'
+import { axe } from 'vitest-axe'
+
+import { CollectiveOfferDisplayedStatus } from '@/apiClient/v1'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import type { OffersCardVariant } from '../types'
+import {
+  CollectiveOffersCard,
+  type CollectiveOffersCardProps,
+} from './CollectiveOffersCard'
+
+vi.mock('@/ui-kit/Skeleton/Skeleton', () => ({
+  Skeleton: () => <div>skeleton</div>,
+}))
+
+vi.mock('../OffersEmptyStateCard/OffersEmptyStateCard', () => ({
+  OffersEmptyStateCard: () => <div>empty state</div>,
+}))
+
+vi.mock('../OffersRetentionCard/OffersRetentionCard', () => ({
+  OffersRetentionCard: ({ variant }: { variant: OffersCardVariant }) => (
+    <div>retention {variant.toLowerCase()}</div>
+  ),
+}))
+
+const defaultProps: CollectiveOffersCardProps<'TEMPLATE'> = {
+  variant: 'TEMPLATE',
+  isLoading: false,
+  hasOffers: false,
+  isReadOnly: false,
+  offersToDisplay: [],
+}
+
+const renderCollectiveOffersCard = (
+  props?: Partial<ComponentProps<typeof CollectiveOffersCard>>
+) =>
+  renderWithProviders(<CollectiveOffersCard {...defaultProps} {...props} />, {
+    storeOverrides: {
+      user: {
+        selectedPartnerVenue: makeGetVenueResponseModel({ id: 1 }),
+      },
+    },
+  })
+
+describe('CollectiveOffersCard', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderCollectiveOffersCard({ isLoading: true })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display skeleton when data is loading', () => {
+    renderCollectiveOffersCard({ isLoading: true })
+
+    expect(screen.getByText('skeleton')).toBeVisible()
+  })
+
+  it('should display empty state when venue has no offers yet', () => {
+    renderCollectiveOffersCard()
+
+    expect(screen.getByText('empty state')).toBeVisible()
+  })
+
+  it('should display retention empty state when venue has no more offers to display on homepage', () => {
+    renderCollectiveOffersCard({ hasOffers: true })
+    expect(screen.getByText('retention template')).toBeVisible()
+  })
+
+  it('should display bookable offers when venue has bookable offers to display on homepage', () => {
+    renderCollectiveOffersCard({
+      variant: 'BOOKABLE',
+      hasOffers: true,
+      offersToDisplay: [
+        {
+          allowedActions: [],
+          collectiveStock: null,
+          displayedStatus: CollectiveOfferDisplayedStatus.PUBLISHED,
+          id: 1,
+          imageUrl: null,
+          name: 'mon offre',
+        },
+      ],
+    })
+
+    expect(
+      screen.getByRole('heading', {
+        level: 2,
+        name: 'Offres réservables',
+      })
+    ).toBeVisible()
+  })
+
+  it('should display template offers when venue has active template offers', async () => {
+    renderCollectiveOffersCard({
+      hasOffers: true,
+      offersToDisplay: [
+        {
+          allowedActions: [],
+          dates: null,
+          displayedStatus: CollectiveOfferDisplayedStatus.UNDER_REVIEW,
+          id: 1,
+          imageUrl: null,
+          name: 'mon offre vitrine',
+        },
+      ],
+    })
+
+    expect(
+      await screen.findByRole('heading', {
+        level: 2,
+        name: 'Offres vitrines',
+      })
+    ).toBeVisible()
+  })
+})

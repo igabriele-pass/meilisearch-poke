@@ -1,0 +1,119 @@
+{% import "components/links.html" as links with context %}
+{% from "components/dynamic/spinner.html" import build_loading_spinner with context %}
+<div class="card my-1 border-0">
+  <div class="card-body my-2">
+    {% if is_invalid_siren %}
+      {{ "Erreur" | format_badge('warning', 'exclamation-triangle') }}
+      Le format du numéro SIREN est détecté comme invalide, nous ne pouvons pas récupérer de données sur l'entreprise.
+      <br />
+      Merci de vérifier qu'il n'y a pas erreur dans l'Annuaire des Entreprises&nbsp;:
+      à partir du SIREN {{ links.build_siren_to_external_link(offerer) }}
+      ou à partir du nom {{ links.build_search_company_external_link(offerer.name) }}.
+    {% else %}
+      <h5 class="card-title">Données INSEE</h5>
+      <div class="card-body">
+        {% if siren_info %}
+          <div class="row">
+            {% if not siren_info.diffusible %}
+              <p>
+                <span class="fw-bold">Attention !</span> Cette entreprise a choisi de rendre son nom et son adresse non-diffusibles.
+                <br />
+                Ces informations ne doivent être utilisées qu'à des fins de vérification et ne doivent en aucun cas être partagées.
+              </p>
+            {% endif %}
+            <div class="col-6">
+              <p class="mb-1">
+                <span class="fw-bold">Nom :</span> {{ siren_info.name }}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">SIRET du siège social :</span>
+                {% if siren_info.head_office_siret %}
+                  <a href="{{ url_for('backoffice.pro.search_pro', pro_type='VENUE', q=siren_info.head_office_siret) }}">
+                    {{ siren_info.head_office_siret }}
+                  </a>
+                {% endif %}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">Adresse :</span> {{ siren_info.address.street }}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">Code postal :</span> {{ siren_info.address.postal_code }}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">Ville :</span> {{ siren_info.address.city }}
+              </p>
+            </div>
+            <div class="col-6">
+              <p class="mb-1">
+                <span class="fw-bold">SIREN actif :</span> {{ siren_info.active | format_bool_badge }}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">Diffusible :</span> {{ siren_info.diffusible | format_bool_badge }}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">Catégorie juridique :</span> {{ siren_info.legal_category_code | format_legal_category_code }}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">Code APE :</span> {{ siren_info.ape_code | empty_string_if_null }}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">Activité principale :</span> {{ siren_info.ape_label | empty_string_if_null }}
+              </p>
+              <p class="mb-1">
+                <span class="fw-bold">Date de création :</span> {{ siren_info.creation_date | format_date }}
+              </p>
+              {% if siren_info.closure_date %}
+                <p class="mb-1">
+                  <span class="fw-bold">Date de fermeture :</span> {{ siren_info.closure_date | format_date }}
+                </p>
+              {% endif %}
+            </div>
+          </div>
+        {% else %}
+          {{ "Erreur" | format_badge('warning', 'exclamation-triangle') }}
+          {{ siren_error }}
+        {% endif %}
+      </div>
+    {% endif %}
+  </div>
+  {% if siren_info %}
+    <div class="card-body my-2">
+      <h5 class="card-title">Données RCS (Infogreffe)</h5>
+      <div class="card-body">
+        <div id="offerer_rcs_frame"
+             hx-trigger="intersect once"
+             hx-get="{{ url_for('backoffice.offerer.get_entreprise_rcs_info', offerer_id=offerer.id) }}">
+          {{ build_loading_spinner() }}
+        </div>
+      </div>
+    </div>
+    {% if has_permission("READ_PRO_SENSITIVE_INFO") %}
+      <div class="card-body my-2">
+        <h5 class="card-title">Données URSSAF</h5>
+        <div class="card-body">
+          <div id="offerer_urssaf_frame">
+            <a hx-get="{{ url_for('backoffice.offerer.get_entreprise_urssaf_info', offerer_id=offerer.id) }}"
+               hx-target="#offerer_urssaf_frame"
+               hx-trigger="click"
+               class="btn btn-md btn-outline-primary fw-bold pc-hide-on-click"><i class="bi bi-arrow-clockwise"></i> Vérifier</a>
+            <div class="d-none pc-show-on-click">{{ build_loading_spinner() }}</div>
+          </div>
+        </div>
+      </div>
+      {% if show_dgfip_card %}
+        <div class="card-body my-2">
+          <h5 class="card-title">Données DGFIP</h5>
+          <div class="card-body">
+            <div id="offerer_dgfip_frame">
+              <a hx-target="#offerer_dgfip_frame"
+                 hx-trigger="click"
+                 hx-get="{{ url_for('backoffice.offerer.get_entreprise_dgfip_info', offerer_id=offerer.id) }}"
+                 class="btn btn-md btn-outline-primary fw-bold pc-hide-on-click"><i class="bi bi-arrow-clockwise"></i> Vérifier</a>
+              <div class="d-none pc-show-on-click">{{ build_loading_spinner() }}</div>
+            </div>
+          </div>
+        </div>
+      {% endif %}
+    {% endif %}
+  {% endif %}
+</div>

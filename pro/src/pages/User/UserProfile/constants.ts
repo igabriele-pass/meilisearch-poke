@@ -1,0 +1,6 @@
+export enum Forms {
+  USER_IDENTITY,
+  USER_PHONE,
+  USER_EMAIL,
+  USER_PASSWORD,
+}

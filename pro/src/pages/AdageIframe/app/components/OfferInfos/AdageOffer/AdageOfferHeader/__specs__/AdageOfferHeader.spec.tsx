@@ -1,0 +1,277 @@
+import { screen } from '@testing-library/react'
+import { axe } from 'vitest-axe'
+
+import {
+  AdageFrontRoles,
+  type LocationResponseModelV2,
+  StudentLevels,
+} from '@/apiClient/adage'
+import { CollectiveLocationType } from '@/apiClient/v1'
+import {
+  defaultAdageUser,
+  defaultCollectiveOffer,
+  defaultCollectiveTemplateOffer,
+} from '@/commons/utils/factories/adageFactories'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+import { AdageUserContextProvider } from '@/pages/AdageIframe/app/providers/AdageUserContext'
+
+import {
+  AdageOfferHeader,
+  type AdageOfferHeaderProps,
+} from '../AdageOfferHeader'
+
+function renderAdageOfferHeader(
+  props: AdageOfferHeaderProps = {
+    offer: defaultCollectiveTemplateOffer,
+    adageUser: defaultAdageUser,
+    isPreview: false,
+  },
+  options?: RenderWithProvidersOptions
+) {
+  return renderWithProviders(
+    <AdageUserContextProvider adageUser={defaultAdageUser}>
+      <AdageOfferHeader {...props} />
+    </AdageUserContextProvider>,
+    {
+      ...options,
+    }
+  )
+}
+
+describe('AdageOfferHeader', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderAdageOfferHeader()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show the offer title', () => {
+    renderAdageOfferHeader()
+
+    expect(
+      screen.getByText(defaultCollectiveTemplateOffer.name)
+    ).toBeInTheDocument()
+  })
+
+  it("should show the offer title even if it's a preview of the offer", () => {
+    renderAdageOfferHeader({
+      offer: defaultCollectiveTemplateOffer,
+      adageUser: defaultAdageUser,
+      isPreview: true,
+    })
+
+    expect(
+      screen.getByText(defaultCollectiveTemplateOffer.name)
+    ).toBeInTheDocument()
+  })
+
+  it('should show the offer image if it has one', () => {
+    renderAdageOfferHeader({
+      offer: { ...defaultCollectiveTemplateOffer, imageUrl: 'test_url' },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(screen.getByRole('presentation')).toHaveAttribute('src', 'test_url')
+  })
+
+  it('should expose the image credit as the figure caption', () => {
+    renderAdageOfferHeader({
+      offer: {
+        ...defaultCollectiveTemplateOffer,
+        imageUrl: 'test_url',
+        imageCredit: 'Agence photo',
+      },
+      adageUser: defaultAdageUser,
+    })
+    const image = screen.getByRole('presentation')
+    const imageCredit = screen.getByText('Crédit image : Agence photo')
+
+    expect(image.closest('figure')).toContainElement(imageCredit)
+    expect(image).not.toHaveAttribute('aria-describedby')
+  })
+
+  it('should not show an image if the offer has no image', () => {
+    renderAdageOfferHeader({
+      offer: { ...defaultCollectiveTemplateOffer, imageUrl: null },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+  })
+
+  it('should show the action buttons if the offer is template', () => {
+    renderAdageOfferHeader()
+
+    expect(
+      screen.getByRole('button', { name: 'Mettre en favoris' })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('link', { name: 'Partager par email' })
+    ).toBeInTheDocument()
+  })
+
+  it('should not show the action buttons if the offer is bookable', () => {
+    renderAdageOfferHeader({
+      offer: defaultCollectiveOffer,
+      adageUser: defaultAdageUser,
+    })
+
+    expect(
+      screen.queryByRole('button', { name: 'Mettre en favoris' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('link', { name: 'Partager par email' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('should not show the favorite button if the user is not admin', () => {
+    renderAdageOfferHeader({
+      offer: defaultCollectiveTemplateOffer,
+      adageUser: { ...defaultAdageUser, role: AdageFrontRoles.READONLY },
+    })
+
+    expect(
+      screen.queryByRole('button', { name: 'Mettre en favoris' })
+    ).not.toBeInTheDocument()
+  })
+
+  it('should show the dates of a template offer that has specific dates', () => {
+    renderAdageOfferHeader({
+      offer: {
+        ...defaultCollectiveTemplateOffer,
+        dates: {
+          end: '2024-01-29T20:00:28.040559Z',
+          start: '2024-01-23T20:00:28.040547Z',
+        },
+      },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(
+      screen.getByText('Du 23 janvier au 29 janvier 2024 à 20h')
+    ).toBeInTheDocument()
+  })
+
+  it('should show that the offer is permanent if it has no dates', () => {
+    renderAdageOfferHeader({
+      offer: {
+        ...defaultCollectiveTemplateOffer,
+        dates: undefined,
+      },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(
+      screen.getByText(
+        'Tout au long de l’année scolaire (l’offre est permanente)'
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('should show "Multiniveaux" instead of the list of student levels when there are more than 1', () => {
+    renderAdageOfferHeader({
+      offer: {
+        ...defaultCollectiveTemplateOffer,
+        students: [StudentLevels.CAP_1RE_ANN_E, StudentLevels.COLL_GE_3E],
+      },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(screen.getByText('Multiniveaux')).toBeInTheDocument()
+  })
+
+  it('should show the institution and the price if the offer is bookable', () => {
+    renderAdageOfferHeader({
+      offer: {
+        ...defaultCollectiveOffer,
+        educationalInstitution: {
+          name: 'My institution',
+          city: 'Paris',
+          postalCode: '75000',
+          id: 1,
+          institutionType: 'collège',
+        },
+        stock: {
+          ...defaultCollectiveOffer.stock,
+          numberOfTickets: 100,
+          price: 12000,
+        },
+      },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(screen.getByText('120 € pour 100 participants')).toBeInTheDocument()
+    expect(screen.getByText(/My institution/)).toBeInTheDocument()
+  })
+
+  it('should show that the offer address displayed when location type is address', () => {
+    renderAdageOfferHeader({
+      offer: {
+        ...defaultCollectiveTemplateOffer,
+        location: {
+          locationType: CollectiveLocationType.ADDRESS,
+          locationComment: null,
+          location: {
+            ...(defaultCollectiveTemplateOffer.location
+              .location as LocationResponseModelV2),
+            id: 1,
+            isVenueLocation: false,
+            isManualEdition: false,
+            latitude: 48.8566,
+            longitude: 2.3522,
+            label: '123 this is a very specific address',
+            street: '123 Main St',
+            postalCode: '75000',
+            city: 'Paris',
+          },
+        },
+      },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(
+      screen.getByText(
+        '123 this is a very specific address - 123 Main St, 75000, Paris'
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('should show that the offer address is to be defined when location type is to be defined', () => {
+    renderAdageOfferHeader({
+      offer: {
+        ...defaultCollectiveTemplateOffer,
+        location: {
+          locationType: CollectiveLocationType.TO_BE_DEFINED,
+          locationComment: null,
+          location: null,
+        },
+      },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(
+      screen.getByText('À déterminer avec l’enseignant')
+    ).toBeInTheDocument()
+  })
+
+  it('should show that the offer address is in school when location type is school', () => {
+    renderAdageOfferHeader({
+      offer: {
+        ...defaultCollectiveTemplateOffer,
+        location: {
+          locationType: CollectiveLocationType.SCHOOL,
+          locationComment: null,
+          location: null,
+        },
+      },
+      adageUser: defaultAdageUser,
+    })
+
+    expect(
+      screen.getByText('Dans l’établissement scolaire')
+    ).toBeInTheDocument()
+  })
+})

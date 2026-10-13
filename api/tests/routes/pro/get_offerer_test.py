@@ -1,0 +1,743 @@
+import datetime
+
+import pytest
+
+import pcapi.core.educational.factories as collective_factories
+import pcapi.core.finance.factories as finance_factories
+import pcapi.core.finance.models as finance_models
+import pcapi.core.offerers.factories as offerers_factories
+import pcapi.core.offerers.models as offerers_models
+import pcapi.core.offers.factories as offers_factories
+import pcapi.core.providers.factories as providers_factories
+import pcapi.core.users.factories as users_factories
+from pcapi.core import testing
+from pcapi.core.categories import subcategories
+from pcapi.core.offers import models as offers_models
+from pcapi.models import db
+from pcapi.models.api_errors import OBJECT_NOT_FOUND_ERROR_MESSAGE
+from pcapi.models.validation_status_mixin import ValidationStatus
+from pcapi.utils import date as date_utils
+from pcapi.utils.date import format_into_utc_date
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+class GetOffererTest:
+    num_queries_without_venue = testing.AUTHENTICATION_QUERIES
+    num_queries_without_venue += 1  # check user_offerer exists
+    num_queries_without_venue += 1  # select offerer
+    num_queries_without_venue += 1  # + selectinload venues + google_places_info
+    num_queries_without_venue += 1  # select venue.id with non draft offers
+    num_queries_without_venue += 1  # select venues with offer and without bank account
+
+    num_queries = num_queries_without_venue
+    # both queries are linked to selectinload venues from select offerer
+    num_queries += 1  # selectinload provider
+    num_queries += 1  # selectinload collectiveDmsApplications
+
+    def test_basics(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue_1 = offerers_factories.VenueFactory(
+            managingOfferer=offerer,
+            withdrawalDetails="Venue withdrawal details",
+            activity=offerers_models.Activity.OTHER,
+        )
+        offers_factories.OfferFactory(venue=venue_1)
+        offerers_factories.VenueFactory(
+            managingOfferer=offerer,
+            withdrawalDetails="Other venue withdrawal details",
+            activity=offerers_models.Activity.OTHER,
+        )
+        venue_3 = offerers_factories.VenueFactory(
+            managingOfferer=offerer,
+            withdrawalDetails="More venue withdrawal details",
+            adageId="123",
+            adageInscriptionDate=date_utils.get_naive_utc_now(),
+            activity=offerers_models.Activity.FESTIVAL,
+        )
+        dms_app = collective_factories.CollectiveDmsApplicationFactory(venue=venue_3)
+        # older dms application, will not be in the result
+        collective_factories.CollectiveDmsApplicationFactory(
+            venue=venue_3, lastChangeDate=dms_app.lastChangeDate - datetime.timedelta(days=10)
+        )
+
+        offerer_id = offerer.id
+        expected_serialized_offerer = {
+            "allowedOnAdage": offerer.allowedOnAdage,
+            "canDisplayHighlights": False,
+            "hasBankAccountWithPendingCorrections": False,
+            "hasNonFreeOffer": False,
+            "hasPendingBankAccount": False,
+            "hasValidBankAccount": False,
+            "id": offerer.id,
+            "isActive": offerer.isActive,
+            "isClosed": False,
+            "isOnboarded": True,
+            "isValidated": offerer.isValidated,
+            "managedVenues": [
+                {
+                    "activity": offerers_models.DisplayableActivity.FESTIVAL.name
+                    if venue == venue_3
+                    else offerers_models.Activity.OTHER.name,
+                    "bannerMeta": venue.bannerMeta,
+                    "bannerUrl": venue.bannerUrl,
+                    "bookingEmail": venue.bookingEmail,
+                    "lastCollectiveDmsApplication": {
+                        "venueId": venue_3.id,
+                        "state": dms_app.state,
+                        "procedure": dms_app.procedure,
+                        "application": dms_app.application,
+                        "lastChangeDate": format_into_utc_date(dms_app.lastChangeDate),
+                        "depositDate": format_into_utc_date(dms_app.depositDate),
+                        "expirationDate": format_into_utc_date(dms_app.expirationDate),
+                        "buildDate": format_into_utc_date(dms_app.buildDate),
+                        "instructionDate": None,
+                        "processingDate": None,
+                        "userDeletionDate": None,
+                    }
+                    if venue.id == venue_3.id
+                    else None,
+                    "id": venue.id,
+                    "isPermanent": venue.isPermanent,
+                    "hasAdageId": bool(venue.adageId),
+                    "hasCreatedOffer": venue.has_individual_offers or venue.has_collective_offers,
+                    "hasVenueProviders": False,
+                    "name": venue.name,
+                    "publicName": venue.publicName,
+                    "siret": venue.siret,
+                    "withdrawalDetails": venue.withdrawalDetails,
+                    "state": venue.state,
+                }
+                for venue in sorted(offerer.managedVenues, key=lambda v: v.publicName)
+            ],
+            "name": offerer.name,
+            "siren": offerer.siren,
+            "venuesWithNonFreeOffersWithoutBankAccounts": [],
+            "isCaledonian": False,
+        }
+
+        client = client.with_session_auth(pro.email)
+        db.session.expire_all()
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        assert response.json == expected_serialized_offerer
+
+        db.session.refresh(offerer)
+        assert len(offerer.managedVenues) == 3
+
+    def test_closed_offerer_is_closed(self, client):
+        user_offerer = offerers_factories.UserOffererFactory()
+        user_offerer.offerer.validationStatus = ValidationStatus.CLOSED
+        client = client.with_session_auth(user_offerer.user.email)
+
+        response = client.get(f"/offerers/{user_offerer.offerer.id}")
+
+        assert response.status_code == 200
+        assert response.json["isClosed"] is True
+
+    def test_wrong_offerer_id_format(self, client):
+        pro = users_factories.ProFactory()
+
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(testing.AUTHENTICATION_QUERIES):
+            response = client.get("/offerers/ABC1234")
+            assert response.status_code == 404
+
+    def test_unknown_offerer(self, client):
+        pro = users_factories.ProFactory()
+
+        client = client.with_session_auth(pro.email)
+        num_queries = testing.AUTHENTICATION_QUERIES
+        num_queries += 1  # get_offerer_and_extradata
+        num_queries += 1  # rollback
+        num_queries += 1  # rollback
+        with testing.assert_num_queries(num_queries):
+            response = client.get("/offerers/1234")
+            assert response.status_code == 404
+            assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}
+
+    def test_unauthorized_offerer(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+
+        client = client.with_session_auth(pro.email)
+        offerer_id = offerer.id
+        num_queries = testing.AUTHENTICATION_QUERIES
+        num_queries += 1  # check user_offerer exists
+        num_queries += 1  # rollback
+        num_queries += 1  # rollback
+        with testing.assert_num_queries(num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 404
+            assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}
+
+    def test_serialize_venue_offer_created_flag(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue_with_offer = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offers_factories.OfferFactory(venue=venue_with_offer)
+
+        venue_with_collective_offer = offerers_factories.VenueFactory(managingOfferer=offerer)
+        collective_factories.CollectiveOfferFactory(venue=venue_with_collective_offer)
+
+        venue_with_collective_offer_template = offerers_factories.VenueFactory(managingOfferer=offerer)
+        collective_factories.CollectiveOfferTemplateFactory(venue=venue_with_collective_offer_template)
+
+        offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        managed_venues_list = sorted(response.json["managedVenues"], key=lambda d: d["id"])
+        assert managed_venues_list[0]["hasCreatedOffer"] is True
+        assert managed_venues_list[1]["hasCreatedOffer"] is True
+        assert managed_venues_list[2]["hasCreatedOffer"] is True
+        assert managed_venues_list[3]["hasCreatedOffer"] is False
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert response.json["hasNonFreeOffer"] is False
+
+    def test_closed_managed_venue_state(self, client):
+        user_offerer = offerers_factories.UserOffererFactory()
+        venue = offerers_factories.VenueFactory(
+            managingOfferer=user_offerer.offerer,
+            state=offerers_models.VenueState.CLOSED,
+        )
+        offerer_id = user_offerer.offerer.id
+        client = client.with_session_auth(user_offerer.user.email)
+
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+
+        assert response.status_code == 200
+        assert len(response.json["managedVenues"]) == 1
+        assert response.json["managedVenues"][0]["id"] == venue.id
+        assert response.json["managedVenues"][0]["state"] == "CLOSED"
+
+    def test_offerer_has_non_free_offer(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue_with_offer = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offers_factories.StockFactory(offer__venue=venue_with_offer)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        assert response.json["managedVenues"][0]["hasCreatedOffer"] is True
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == [venue_with_offer.id]
+        assert response.json["hasNonFreeOffer"] is True
+
+    @pytest.mark.parametrize(
+        "allowed_on_adage,offers_status,count_offer,adage_id,collective_ds_application,is_onboarded",
+        [
+            (False, offers_models.OfferValidationStatus.DRAFT, 1, None, None, False),
+            (False, offers_models.OfferValidationStatus.DRAFT, 3, None, None, False),
+            (False, offers_models.OfferValidationStatus.APPROVED, 1, None, None, True),
+            (False, offers_models.OfferValidationStatus.APPROVED, 3, None, None, True),
+            (False, None, 0, None, None, False),
+            (False, None, 0, "1", None, True),
+            (False, offers_models.OfferValidationStatus.DRAFT, 1, "1", None, True),
+            (False, offers_models.OfferValidationStatus.DRAFT, 3, "1", None, True),
+            (False, offers_models.OfferValidationStatus.DRAFT, 1, None, 1, True),
+            (False, None, 0, None, 1, True),
+            (False, None, 0, "1", 1, True),
+            (False, offers_models.OfferValidationStatus.DRAFT, 1, "1", 1, True),
+            (False, offers_models.OfferValidationStatus.DRAFT, 3, "1", 1, True),
+            (True, None, 0, None, None, True),
+        ],
+    )
+    def test_offerer_onboarding_status(
+        self, client, allowed_on_adage, offers_status, count_offer, adage_id, collective_ds_application, is_onboarded
+    ):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory(allowedOnAdage=allowed_on_adage)
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer, adageId=adage_id)
+        if collective_ds_application is not None:
+            collective_factories.CollectiveDmsApplicationFactory(venue=venue, procedure=collective_ds_application)
+        if count_offer:
+            offers_factories.OfferFactory.create_batch(count_offer, venue=venue, validation=offers_status)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        assert response.json["isOnboarded"] is is_onboarded
+
+    def test_offerer_has_inactive_non_free_offer(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue_with_offer = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offers_factories.StockFactory(offer__venue=venue_with_offer, offer__isActive=False)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        assert response.json["managedVenues"][0]["hasCreatedOffer"] is True
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert response.json["hasNonFreeOffer"] is False
+
+    def test_offerer_has_inactive_non_free_collective_offer(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue_with_offer = offerers_factories.VenueFactory(managingOfferer=offerer)
+        collective_factories.CollectiveStockFactory(
+            collectiveOffer__venue=venue_with_offer, collectiveOffer__isActive=False
+        )
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        assert response.json["managedVenues"][0]["hasCreatedOffer"] is True
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert response.json["hasNonFreeOffer"] is False
+        assert response.json["hasBankAccountWithPendingCorrections"] is False
+
+    def test_offerer_has_non_free_collective_offer(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue_with_collective_offer = offerers_factories.VenueFactory(managingOfferer=offerer, publicName="A")
+        collective_factories.CollectiveStockFactory(collectiveOffer__venue=venue_with_collective_offer)
+
+        offerers_factories.VenueFactory(managingOfferer=offerer, publicName="B")
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        assert response.json["managedVenues"][0]["hasCreatedOffer"] is True
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == [venue_with_collective_offer.id]
+        assert response.json["hasNonFreeOffer"] is True
+        assert response.json["hasBankAccountWithPendingCorrections"] is False
+
+    def test_offerer_has_free_offer(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue_with_offer = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offers_factories.StockFactory(offer__venue=venue_with_offer, price=0)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        assert response.json["managedVenues"][0]["hasCreatedOffer"] is True
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert response.json["hasNonFreeOffer"] is False
+        assert response.json["hasBankAccountWithPendingCorrections"] is False
+
+    def test_offerer_has_free_collective_offer(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue_with_collective_offer = offerers_factories.VenueFactory(managingOfferer=offerer, publicName="A")
+        collective_factories.CollectiveStockFactory(collectiveOffer__venue=venue_with_collective_offer, price=0)
+
+        offerers_factories.VenueFactory(managingOfferer=offerer, publicName="B")
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        assert response.json["managedVenues"][0]["hasCreatedOffer"] is True
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert response.json["hasNonFreeOffer"] is False
+        assert response.json["hasBankAccountWithPendingCorrections"] is False
+
+    def test_we_dont_display_anything_if_offerer_dont_have_any_bank_accounts_nor_venues(self, client):
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+
+        http_client = client.with_session_auth(pro_user.email)
+        offerer_id = offerer.id
+        with testing.assert_num_queries(self.num_queries_without_venue):
+            response = http_client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        offerer = response.json
+        assert offerer["hasValidBankAccount"] is False
+        assert offerer["hasPendingBankAccount"] is False
+        assert offerer["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert offerer["hasNonFreeOffer"] is False
+
+    def test_client_can_now_if_the_offerer_have_any_valid_bank_account(self, client):
+        _another_pro_user = users_factories.ProFactory()
+        another_offerer = offerers_factories.OffererFactory()
+        another_bank_account = finance_factories.BankAccountFactory(offerer=another_offerer)
+        another_venue = offerers_factories.VenueFactory(managingOfferer=another_offerer)
+        _another_link = offerers_factories.VenueBankAccountLinkFactory(
+            venue=another_venue, bankAccount=another_bank_account
+        )
+
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        offerers_factories.VenueFactory(managingOfferer=offerer)
+        offerers_factories.VenueWithoutSiretFactory(managingOfferer=offerer)
+        finance_factories.BankAccountFactory(offerer=offerer)
+
+        http_client = client.with_session_auth(pro_user.email)
+        offerer_id = offerer.id
+        with testing.assert_num_queries(self.num_queries):
+            response = http_client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        offerer = response.json
+        assert offerer["hasValidBankAccount"] is True
+        assert offerer["hasPendingBankAccount"] is False
+        assert offerer["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert offerer["hasNonFreeOffer"] is False
+        assert response.json["hasBankAccountWithPendingCorrections"] is False
+
+    def test_client_can_know_which_venues_have_non_free_offers_without_bank_accounts(self, client):
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        expected_venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        venue_linked = offerers_factories.VenueFactory(managingOfferer=offerer)
+        old_linked_venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        non_linked_venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        non_linked_venue_with_free_collective_offer = offerers_factories.VenueFactory(managingOfferer=offerer)
+        venue_linked_offer = offers_factories.OfferFactory(venue=venue_linked)
+        old_linked_venue_offer = offers_factories.OfferFactory(venue=old_linked_venue)
+        non_linked_venue_offer = offers_factories.OfferFactory(venue=non_linked_venue)
+        free_collective_offer = collective_factories.CollectiveOfferFactory(
+            venue=non_linked_venue_with_free_collective_offer
+        )
+        offers_factories.StockFactory(offer=venue_linked_offer)
+        offers_factories.StockFactory(offer=non_linked_venue_offer)
+        offers_factories.StockFactory(offer=old_linked_venue_offer)
+        collective_factories.CollectiveStockFactory(collectiveOffer=free_collective_offer, price=0)
+        expected_bank_account = finance_factories.BankAccountFactory(offerer=offerer)
+        _up_to_date_link = offerers_factories.VenueBankAccountLinkFactory(
+            venue=venue_linked,
+            bankAccount=expected_bank_account,
+            timespan=(date_utils.get_naive_utc_now(), None),
+        )
+        offerers_factories.VenueBankAccountLinkFactory(
+            venue=expected_venue, bankAccount=expected_bank_account, timespan=(date_utils.get_naive_utc_now(),)
+        )
+        offerers_factories.VenueBankAccountLinkFactory(
+            venue=non_linked_venue,
+            bankAccount=expected_bank_account,
+            timespan=(
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=365),
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=10),
+            ),
+        )
+
+        http_client = client.with_session_auth(pro_user.email)
+        offerer_id = offerer.id
+        with testing.assert_num_queries(self.num_queries):
+            response = http_client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        offerer = response.json
+        assert offerer["hasValidBankAccount"] is True
+        assert offerer["hasPendingBankAccount"] is False
+        assert sorted(offerer["venuesWithNonFreeOffersWithoutBankAccounts"]) == [
+            old_linked_venue.id,
+            non_linked_venue.id,
+        ]
+        assert offerer["hasNonFreeOffer"] is True
+
+    def test_client_can_know_if_offerer_have_any_pending_bank_accounts(self, client):
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        finance_factories.BankAccountFactory(
+            offerer=offerer, status=finance_models.BankAccountApplicationStatus.ON_GOING
+        )
+
+        http_client = client.with_session_auth(pro_user.email)
+        offerer_id = offerer.id
+
+        with testing.assert_num_queries(self.num_queries_without_venue):
+            response = http_client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        offerer = response.json
+        assert offerer["hasValidBankAccount"] is False
+        assert offerer["hasPendingBankAccount"] is True
+        assert offerer["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert offerer["hasNonFreeOffer"] is False
+        assert offerer["hasBankAccountWithPendingCorrections"] is False
+
+    def test_client_can_know_if_offerer_has_any_pending_bank_account(self, client):
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        finance_factories.BankAccountFactory(
+            offerer=offerer, status=finance_models.BankAccountApplicationStatus.WITH_PENDING_CORRECTIONS
+        )
+
+        http_client = client.with_session_auth(pro_user.email)
+        offerer_id = offerer.id
+        with testing.assert_num_queries(self.num_queries_without_venue):
+            response = http_client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        offerer = response.json
+
+        assert offerer["hasValidBankAccount"] is False
+        assert offerer["hasPendingBankAccount"] is False
+        assert offerer["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert offerer["hasNonFreeOffer"] is False
+        assert offerer["hasBankAccountWithPendingCorrections"] is True
+
+    def test_client_can_know_if_have_any_pending_bank_accounts_draft_included(self, client):
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        finance_factories.BankAccountFactory(offerer=offerer, status=finance_models.BankAccountApplicationStatus.DRAFT)
+
+        http_client = client.with_session_auth(pro_user.email)
+        offerer_id = offerer.id
+        with testing.assert_num_queries(self.num_queries_without_venue):
+            response = http_client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        offerer = response.json
+        assert offerer["hasValidBankAccount"] is False
+        assert offerer["hasPendingBankAccount"] is True
+        assert offerer["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert offerer["hasNonFreeOffer"] is False
+        assert offerer["hasBankAccountWithPendingCorrections"] is False
+
+    def test_client_can_know_which_venues_have_non_free_offers_without_bank_accounts_taking_collective_offer_into_account(
+        self, client
+    ):
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        expected_venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        venue_linked = offerers_factories.VenueFactory(managingOfferer=offerer)
+        non_linked_venue_with_collective_offer = offerers_factories.VenueFactory(managingOfferer=offerer)
+        venue_linked_offer = offers_factories.OfferFactory(venue=venue_linked)
+        collective_offer = collective_factories.CollectiveOfferFactory(venue=non_linked_venue_with_collective_offer)
+        offers_factories.StockFactory(offer=venue_linked_offer)
+        collective_factories.CollectiveStockFactory(collectiveOffer=collective_offer)
+        expected_bank_account = finance_factories.BankAccountFactory(offerer=offerer)
+        _up_to_date_link = offerers_factories.VenueBankAccountLinkFactory(
+            venue=venue_linked,
+            bankAccount=expected_bank_account,
+            timespan=(date_utils.get_naive_utc_now(), None),
+        )
+        offerers_factories.VenueBankAccountLinkFactory(
+            venue=expected_venue, bankAccount=expected_bank_account, timespan=(date_utils.get_naive_utc_now(),)
+        )
+
+        http_client = client.with_session_auth(pro_user.email)
+        offerer_id = offerer.id
+        with testing.assert_num_queries(self.num_queries):
+            response = http_client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        offerer = response.json
+        assert offerer["hasValidBankAccount"] is True
+        assert offerer["hasPendingBankAccount"] is False
+        assert sorted(offerer["venuesWithNonFreeOffersWithoutBankAccounts"]) == [
+            non_linked_venue_with_collective_offer.id,
+        ]
+        assert offerer["hasNonFreeOffer"]
+        assert offerer["hasBankAccountWithPendingCorrections"] is False
+
+    def test_user_can_know_if_each_managed_venues_has_venue_provider(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        offerers_factories.VenueFactory(managingOfferer=offerer, name="Without venueProvider")
+        venue_with_providers = offerers_factories.VenueFactory(managingOfferer=offerer, name="With venueProvider")
+        providers_factories.VenueProviderFactory(venue=venue_with_providers)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+        sorted_managed_venues = sorted(response.json["managedVenues"], key=lambda x: x["name"])
+        assert sorted_managed_venues[0]["hasVenueProviders"] is True
+        assert sorted_managed_venues[1]["hasVenueProviders"] is False
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert response.json["hasNonFreeOffer"] is False
+        assert response.json["hasBankAccountWithPendingCorrections"] is False
+
+    def test_offerer_properties_rely_only_on_the_offerer_data(self, client):
+        foreign_pro_user = users_factories.ProFactory()
+        foreign_offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=foreign_pro_user, offerer=foreign_offerer)
+        foreign_venue = offerers_factories.VenueFactory(managingOfferer=foreign_offerer)
+        finance_factories.BankAccountFactory(
+            offerer=foreign_offerer, status=finance_models.BankAccountApplicationStatus.ACCEPTED
+        )
+        finance_factories.BankAccountFactory(
+            offerer=foreign_offerer, status=finance_models.BankAccountApplicationStatus.ON_GOING
+        )
+        offers_factories.StockFactory(offer__venue=foreign_venue)
+
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro_user.email)
+        with testing.assert_num_queries(self.num_queries_without_venue):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        assert response.json["hasValidBankAccount"] is False
+        assert response.json["hasPendingBankAccount"] is False
+        assert response.json["venuesWithNonFreeOffersWithoutBankAccounts"] == []
+        assert response.json["hasNonFreeOffer"] is False
+        assert response.json["hasBankAccountWithPendingCorrections"] is False
+
+    def test_user_can_correctly_see_if_there_is_venues_without_bank_account_left(self, client):
+        pro_user = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerer_id = offerer.id
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+
+        bank_account = finance_factories.BankAccountFactory(
+            offerer=offerer, isActive=True, dateCreated=date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        )
+
+        first_venue = offerers_factories.VenueFactory(pricing_point="self", managingOfferer=offerer)
+        offers_factories.StockFactory(offer__venue=first_venue)
+        second_venue = offerers_factories.VenueFactory(pricing_point="self", managingOfferer=offerer)
+        offers_factories.StockFactory(offer__venue=second_venue)
+        third_venue = offerers_factories.VenueFactory(pricing_point="self", managingOfferer=offerer)
+        offers_factories.StockFactory(offer__venue=third_venue)
+
+        http_client = client.with_session_auth(pro_user.email)
+
+        # Link all offerer venues to this bank_account
+        response = http_client.patch(
+            f"/offerers/{offerer.id}/bank-accounts/{bank_account.id}",
+            json={"venues_ids": [first_venue.id, second_venue.id, third_venue.id]},
+        )
+        assert response.status_code == 204
+
+        # Finally unlink all the venues
+        response = http_client.patch(f"/offerers/{offerer.id}/bank-accounts/{bank_account.id}", json={"venues_ids": []})
+        assert response.status_code == 204
+
+        # User changed his mind
+        response = http_client.patch(
+            f"/offerers/{offerer.id}/bank-accounts/{bank_account.id}",
+            json={"venues_ids": [first_venue.id, second_venue.id, third_venue.id]},
+        )
+        assert response.status_code == 204
+
+        # User changed his mind, again, backward
+        response = http_client.patch(f"/offerers/{offerer.id}/bank-accounts/{bank_account.id}", json={"venues_ids": []})
+        assert response.status_code == 204
+
+        # We now have plenty of VenueBankAccountLink
+        # But the user should still receive distinct `venuesWithNonFreeOffersWithoutBankAccounts`, not a cartesian product between Venues and VenueBankAccountLink
+        with testing.assert_num_queries(self.num_queries):
+            response = http_client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        assert set(response.json["venuesWithNonFreeOffersWithoutBankAccounts"]) == {
+            first_venue.id,
+            second_venue.id,
+            third_venue.id,
+        }
+
+    def test_closed_offerer(self, client):
+        offerer = offerers_factories.ClosedOffererFactory()
+        user_offerer = offerers_factories.UserOffererFactory(offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer, isPermanent=True)
+        offers_factories.OfferFactory(venue=venue)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(user_offerer.user.email)
+        with testing.assert_num_queries(self.num_queries):
+            with testing.assert_no_duplicated_queries():
+                response = client.get(f"/offerers/{offerer_id}")
+                assert response.status_code == 200
+
+        # closed => similar to validated then suspended
+        assert response.json["isActive"] is False
+        assert response.json["isValidated"] is True
+
+    def test_offerer_is_caledonian(self, client):
+        offerer = offerers_factories.CaledonianOffererFactory()
+        user_offerer = offerers_factories.UserOffererFactory(offerer=offerer)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(user_offerer.user.email)
+        with testing.assert_num_queries(self.num_queries_without_venue):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        assert response.json["isCaledonian"] is True
+
+    @pytest.mark.parametrize(
+        "subcategory_id,can_display_highlights",
+        [
+            (subcategories.EVENEMENT_CINE.id, True),
+            (subcategories.VOD.id, False),
+        ],
+    )
+    def test_offerer_can_display_highlights(self, client, subcategory_id, can_display_highlights):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        offers_factories.OfferFactory(venue__managingOfferer=offerer, subcategoryId=subcategory_id)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/offerers/{offerer_id}")
+            assert response.status_code == 200
+
+        assert response.json["canDisplayHighlights"] is can_display_highlights

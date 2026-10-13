@@ -1,0 +1,15 @@
+@use "styles/mixins/_rem.scss" as rem;
+
+.modal-video {
+  display: flex;
+  flex-grow: 1;
+  flex-direction: column;
+}
+
+.modal-video-content {
+  flex-grow: 1;
+}
+
+.video-description {
+  margin-top: var(--size-spacing-l)
+}

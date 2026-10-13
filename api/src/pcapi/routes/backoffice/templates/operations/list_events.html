@@ -1,0 +1,39 @@
+{% extends "layouts/list.html" %}
+{% from "components/forms.html" import build_filters_form_ng with context %}
+{% from "components/generic_modal.html" import build_modal_form with context %}
+{% import "components/links.html" as links with context %}
+{% set rows_count = rows.total %}
+{% set pagination = True %}
+{% block title %}Opérations spéciales{% endblock %}
+{% block search_block %}{{ build_filters_form_ng(form, dst) }}{% endblock %}
+{% block before_table %}
+  {% if has_permission("MANAGE_SPECIAL_EVENTS") %}
+    <div class="mt-4">
+      {{ build_modal_form("create-special-event", url_for("backoffice.operations.create_event") ,
+        create_form, "Importer une opération spéciale", "Importer une opération spéciale", "Importer") }}
+    </div>
+  {% endif %}
+{% endblock %}
+{% block table_header %}
+  <th>ID</th>
+  <th>Id. Typeform</th>
+  <th>Date</th>
+  <th class="col-9">Titre</th>
+{% endblock table_header %}
+{% block table_body %}
+  {% for special_event in rows.items %}
+    <tr>
+      <td>{{ links.build_special_event_id_to_details_link(special_event) }}</td>
+      <td>
+        <a href="https://admin.typeform.com/form/{{ special_event.externalId }}/create"
+           target="_blank"
+           rel="noreferrer noopener"
+           title="Ouvrir dans Typeform"
+           class="link-primary">
+        {{ special_event.externalId }} <i class="bi bi-box-arrow-up-right"></i></a>
+      </td>
+      <td>{{ special_event.eventDate | format_date }}</td>
+      <td>{{ special_event.title }}</td>
+    </tr>
+  {% endfor %}
+{% endblock table_body %}

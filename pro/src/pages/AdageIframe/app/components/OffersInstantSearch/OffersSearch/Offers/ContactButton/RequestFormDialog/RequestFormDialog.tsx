@@ -1,0 +1,405 @@
+import { yupResolver } from '@hookform/resolvers/yup'
+import classNames from 'classnames'
+import { useId } from 'react'
+import { useForm } from 'react-hook-form'
+
+import { AdageFrontRoles } from '@/apiClient/adage'
+import { apiAdage } from '@/apiClient/api'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { isDateValid } from '@/commons/utils/date'
+import { FormLayout } from '@/components/FormLayout/FormLayout'
+import { MandatoryInfo } from '@/components/FormLayout/FormLayoutMandatoryInfo'
+import { Banner } from '@/design-system/Banner/Banner'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonColor, ButtonVariant } from '@/design-system/Button/types'
+import { DetailedModal } from '@/design-system/DetailedModal/DetailedModal'
+import { TextInput } from '@/design-system/TextInput/TextInput'
+import { DatePicker } from '@/ui-kit/form/DatePicker/DatePicker'
+import { PhoneNumberInput } from '@/ui-kit/form/PhoneNumberInput/PhoneNumberInput'
+import { TextArea } from '@/ui-kit/form/TextArea/TextArea'
+
+import { createCollectiveRequestPayload } from './createCollectiveRequestPayload'
+import styles from './RequestFormDialog.module.scss'
+import type { RequestFormValues } from './type'
+import { validationSchema } from './validationSchema'
+
+export interface RequestFormDialogProps {
+  offerId: number
+  userEmail?: string | null
+  userRole?: AdageFrontRoles
+  contactEmail: string
+  contactPhone: string
+  contactForm: string
+  contactUrl: string
+  isDialogOpen: boolean
+  isPreview: boolean
+  onCloseDialog: () => void
+  onConfirmDialog: () => void
+}
+
+export const RequestFormDialog = ({
+  offerId,
+  userEmail,
+  userRole,
+  contactEmail,
+  contactPhone,
+  contactForm,
+  contactUrl,
+  isDialogOpen,
+  isPreview,
+  onCloseDialog,
+  onConfirmDialog,
+}: RequestFormDialogProps): JSX.Element => {
+  const snackBar = useSnackBar()
+  const requestFormId = useId()
+
+  const initialValues = {
+    teacherEmail: userEmail ?? '',
+    description: '',
+    offerDate: '',
+    nbTeachers: 0,
+    nbStudents: 0,
+    teacherPhone: '',
+  }
+
+  const hookForm = useForm<RequestFormValues>({
+    defaultValues: initialValues,
+    resolver: yupResolver<RequestFormValues, unknown, unknown>(
+      validationSchema
+    ),
+  })
+
+  const {
+    watch,
+    reset,
+    formState: { isSubmitting },
+  } = hookForm
+
+  const onSubmit = async () => {
+    const payload = createCollectiveRequestPayload(hookForm.getValues())
+    try {
+      await apiAdage.createCollectiveRequest({
+        path: { offer_id: offerId },
+        body: payload,
+      })
+      snackBar.success('Votre demande a bien été envoyée')
+      reset()
+    } catch {
+      snackBar.error(
+        'Impossible de créer la demande.\nVeuillez contacter le support pass culture'
+      )
+      reset()
+      return
+    }
+    onConfirmDialog()
+  }
+
+  const onCancel = async () => {
+    if (!isPreview) {
+      await apiAdage.logRequestFormPopinDismiss({
+        body: {
+          iframeFrom: location.pathname,
+          collectiveOfferTemplateId: offerId,
+          comment: watch('description'),
+          phoneNumber: watch('teacherPhone') || undefined,
+          requestedDate: isDateValid(watch('offerDate'))
+            ? watch('offerDate')
+            : undefined,
+          totalStudents: watch('nbStudents') || undefined,
+          totalTeachers: watch('nbTeachers') || undefined,
+        },
+      })
+    }
+    reset()
+  }
+
+  const closeDialog = () => {
+    onCancel()
+    onCloseDialog()
+  }
+
+  const logContactUrl = () => {
+    void apiAdage.logContactUrlClick({
+      body: {
+        iframeFrom: location.pathname,
+        offerId,
+      },
+    })
+  }
+
+  const getDescriptionElement = () => {
+    if (contactEmail && !contactPhone && !contactUrl && !contactForm) {
+      return renderContactElement('par mail', contactEmail, 'mail')
+    }
+    if (!contactEmail && contactPhone && !contactUrl && !contactForm) {
+      return renderContactElement('par téléphone', contactPhone)
+    }
+    if (!contactEmail && !contactPhone && contactUrl && !contactForm) {
+      return renderCustomFormElement()
+    }
+    if (!contactEmail && !contactPhone && !contactUrl && contactForm) {
+      return renderDefaultFormElement()
+    }
+    return renderMultiContactElement(
+      {
+        contactEmail,
+        contactPhone,
+      },
+      contactForm === 'form',
+      contactUrl.length > 0
+    )
+  }
+
+  const renderContactElement = (
+    description: string,
+    value: string | null | undefined,
+    type?: string
+  ) => (
+    <div>
+      <span className={styles['form-description']}>
+        Il vous propose de le faire {description} :
+      </span>
+      {type === 'mail' ? (
+        <a
+          href={`mailto:${value}`}
+          className={styles['form-description-contact']}
+          target="_blank"
+          rel="noreferrer"
+        >
+          {value}
+        </a>
+      ) : (
+        <span className={styles['form-description-contact']}>{value}</span>
+      )}
+    </div>
+  )
+
+  const renderMultiContactElement = (
+    {
+      contactEmail,
+      contactPhone,
+    }: { contactEmail: string; contactPhone: string },
+    isDefaultForm: boolean,
+    isCustomForm: boolean
+  ) => (
+    <div className={styles['form-description']}>
+      <span>Il vous propose de le faire :</span>
+      <ul className={styles['form-description-list']}>
+        {contactEmail && (
+          <li className={styles['form-description-list-item']}>
+            par mail :{' '}
+            <a
+              href={`mailto:${contactEmail}`}
+              className={classNames(
+                styles['form-description-value'],
+                styles['form-description-mail']
+              )}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {contactEmail}
+            </a>
+          </li>
+        )}
+        {contactPhone && (
+          <li className={styles['form-description-list-item']}>
+            par téléphone :{' '}
+            <span className={styles['form-description-value']}>
+              {contactPhone}
+            </span>
+          </li>
+        )}
+        {isCustomForm && (
+          <li className={styles['form-description-list-item']}>
+            <div className={styles['form-description-link']}>
+              <i>via</i> son formulaire :
+              <div className={styles['form-description-link-text']}>
+                <Button
+                  as="a"
+                  onClick={logContactUrl}
+                  variant={ButtonVariant.TERTIARY}
+                  color={ButtonColor.BRAND}
+                  to={contactUrl}
+                  opensInNewTab
+                  label="Aller sur le site"
+                />
+              </div>
+            </div>
+          </li>
+        )}
+
+        {isDefaultForm &&
+          (userRole === AdageFrontRoles.REDACTOR || isPreview) && (
+            <li className={styles['form-description-list-item']}>
+              en renseignant{' '}
+              <span className={styles['form-description-value']}>
+                le formulaire ci-dessous
+              </span>
+            </li>
+          )}
+      </ul>
+      {isDefaultForm &&
+        (userRole === AdageFrontRoles.REDACTOR || isPreview) && (
+          <>
+            <hr className={styles['separator']} />
+            <MandatoryInfo className={styles['form-mandatory']} />
+            {isPreview && (
+              <div className={styles['contact-callout']}>
+                <Banner
+                  title="Aperçu de test"
+                  description="Les demandes de contact sont désactivées dans cet aperçu. Les enseignants pourront vous contacter une fois l'offre publiée."
+                />
+              </div>
+            )}
+          </>
+        )}
+    </div>
+  )
+
+  const renderCustomFormElement = () => (
+    <div>
+      <div className={styles['form-description-link-site']}>
+        Il vous propose de le faire <i>via</i> son formulaire :
+      </div>
+      <div className={styles['form-description-link-text']}>
+        {' '}
+        <Button
+          as="a"
+          onClick={logContactUrl}
+          variant={ButtonVariant.TERTIARY}
+          color={ButtonColor.BRAND}
+          to={contactUrl}
+          opensInNewTab
+          label="Aller sur le site"
+        />
+      </div>
+    </div>
+  )
+
+  const renderDefaultFormElement = () => (
+    <div>
+      {userRole === AdageFrontRoles.REDACTOR || isPreview ? (
+        <>
+          <span className={styles['form-description']}>
+            Vous pouvez le contacter en renseignant les informations ci-dessous.
+          </span>
+          <MandatoryInfo className={styles['form-mandatory']} />
+          {isPreview && (
+            <div className={styles['contact-callout']}>
+              <Banner
+                title="Aperçu de test"
+                description="Les demandes de contact sont désactivées dans cet aperçu. Les enseignants pourront vous contacter une fois l'offre publiée."
+              />
+            </div>
+          )}
+        </>
+      ) : (
+        <div className={styles['contact-readonly']}>
+          <Banner
+            title="Droits ADAGE insuffisants"
+            description="Les informations de contact du partenaire nécessitent des droits ADAGE spécifiques."
+          />
+        </div>
+      )}
+    </div>
+  )
+
+  return (
+    <DetailedModal
+      isOpen={isDialogOpen}
+      onClose={closeDialog}
+      title="Vous souhaitez contacter ce partenaire ?"
+      secondaryAction={
+        <Button
+          variant={ButtonVariant.SECONDARY}
+          color={ButtonColor.NEUTRAL}
+          onClick={closeDialog}
+          type="button"
+          label="Annuler"
+        />
+      }
+      primaryAction={
+        <Button
+          type="submit"
+          form={requestFormId}
+          variant={ButtonVariant.PRIMARY}
+          isLoading={isSubmitting}
+          disabled={isPreview}
+          label="Envoyer ma demande"
+        />
+      }
+    >
+      <form
+        id={requestFormId}
+        onSubmit={(e) => {
+          e.stopPropagation()
+          e.preventDefault()
+          return hookForm.handleSubmit(onSubmit)(e)
+        }}
+      >
+        {getDescriptionElement()}
+
+        <FormLayout>
+          <FormLayout.Row mdSpaceAfter>
+            <TextInput
+              label="Email"
+              type="email"
+              {...hookForm.register('teacherEmail')}
+              error={hookForm.formState.errors.teacherEmail?.message}
+              required
+              disabled
+            />
+          </FormLayout.Row>
+          <FormLayout.Row mdSpaceAfter>
+            <PhoneNumberInput
+              {...hookForm.register('teacherPhone')}
+              onChange={(event) =>
+                hookForm.setValue('teacherPhone', event.target.value)
+              }
+              value={hookForm.watch('teacherPhone')}
+              error={hookForm.formState.errors.teacherPhone?.message}
+              name="phoneNumber"
+              label={'Téléphone'}
+            />
+          </FormLayout.Row>
+          <FormLayout.Row mdSpaceAfter>
+            <DatePicker
+              label="Date souhaitée"
+              minDate={new Date()}
+              error={hookForm.formState.errors.offerDate?.message}
+              {...hookForm.register('offerDate')}
+            />
+          </FormLayout.Row>
+          <FormLayout.Row mdSpaceAfter>
+            <TextInput
+              label="Nombre d'élèves"
+              {...hookForm.register('nbStudents')}
+              error={hookForm.formState.errors.nbStudents?.message}
+              type="number"
+            />
+          </FormLayout.Row>
+          <FormLayout.Row mdSpaceAfter>
+            <TextInput
+              label="Nombre d'accompagnateurs"
+              {...hookForm.register('nbTeachers')}
+              error={hookForm.formState.errors.nbTeachers?.message}
+              type="number"
+            />
+          </FormLayout.Row>
+          <FormLayout.Row mdSpaceAfter>
+            <TextArea
+              name="description"
+              value={watch('description')}
+              onChange={(e) => hookForm.setValue('description', e.target.value)}
+              label="Que souhaitez vous organiser ?"
+              maxLength={1000}
+              description="Décrivez le projet que vous souhaiteriez co-construire avec l’acteur culturel (Ex : Je souhaite organiser une visite que vous proposez dans votre théâtre pour un projet pédagogique autour du théâtre et de l’expression corporelle avec ma classe de 30 élèves entre janvier et mars. Je suis joignable par téléphone ou par mail.)"
+              required
+              error={hookForm.formState.errors.description?.message}
+            />
+          </FormLayout.Row>
+        </FormLayout>
+      </form>
+    </DetailedModal>
+  )
+}

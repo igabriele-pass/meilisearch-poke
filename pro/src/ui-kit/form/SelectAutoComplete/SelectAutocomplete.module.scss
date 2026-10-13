@@ -1,0 +1,71 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_a11y.scss" as a11y;
+@use "styles/mixins/_forms.scss" as forms;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.select-autocomplete-container {
+  box-sizing: border-box;
+  position: relative;
+  width: 100%;
+}
+
+.select-autocomplete-input-container {
+  cursor: pointer;
+}
+
+.select-autocomplete-placeholder-input {
+  @include forms.input-theme;
+  @include forms.input-theme-nested;
+
+  padding-right: rem.torem(40px);
+  text-overflow: ellipsis;
+
+  &.has-error {
+    @include forms.input-theme-error;
+  }
+
+  &:not(:disabled)::placeholder {
+    color: var(--color-text-default);
+  }
+
+  /* clears the ‘X’ from Internet Explorer */
+  &::-ms-clear {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
+  &::-ms-reveal {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+
+  /* clears the ‘X’ from Chrome */
+  &::-webkit-search-decoration,
+  &::-webkit-search-cancel-button,
+  &::-webkit-search-results-button,
+  &::-webkit-search-results-decoration {
+    display: none;
+  }
+}
+
+.field-overlay {
+  position: relative;
+  height: 0;
+}
+
+.field-error {
+  @include fonts.body-accent-xs;
+
+  display: flex;
+  align-items: center;
+  margin-top: var(--size-spacing-xs);
+  color: var(--color-text-error);
+
+  &-icon {
+    width: var(--typography-body-font-size);
+    height: var(--typography-body-font-size);
+    margin-right: var(--size-spacing-xs);
+  }
+}

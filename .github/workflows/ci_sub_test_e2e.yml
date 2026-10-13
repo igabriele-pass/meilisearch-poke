@@ -1,0 +1,262 @@
+name: 3 [CI] Test E2E
+
+on:
+  workflow_call:
+    inputs:
+      ENV:
+        type: string
+        required: true
+      image:
+        type: string
+        required: false
+        default: pcapi-tests
+      tag:
+        type: string
+        required: true
+
+defaults:
+  run:
+    working-directory: pro
+
+jobs:
+  install:
+    name: "Install Playwright E2E 🔧"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          package_json_file: pro/package.json
+
+      - name: Use Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          cache: pnpm
+          node-version-file: "pro/package.json"
+          cache-dependency-path: "pro/pnpm-lock.yaml"
+
+      - uses: pass-culture/common-workflows/actions/setup-safe-chain@a67aba1f7a63bcb20f5b722557a4bdcba2511ab5
+
+      - name: "Cache the node_modules"
+        uses: pass-culture-github-actions/cache@88f07af200f0bcf2480f9c194e3dbb9488a1902b # v1.0.0
+        with:
+          compression-method: "gzip"
+          path: |
+            **/node_modules
+          key: v1-pnpm-pro-dependency-cache-${{ runner.os }}-${{ hashFiles('pro/pnpm-lock.yaml') }}
+          restore-keys: |
+            v1-pnpm-pro-dependency-cache-${{ runner.os }}-${{ hashFiles('pro/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        run: pnpm ci
+
+      - name: Build vite application
+        env:
+          ENV: ${{ inputs.ENV }}
+        run: pnpm run "build:$ENV"
+
+      - name: Save build folder
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-playwright
+          if-no-files-found: error
+          path: pro/build
+
+  run-playwright-tests:
+    name: Run Playwright tests
+    runs-on: ubuntu-24.04
+    needs: [install]
+    strategy:
+      fail-fast: false
+      matrix:
+        shardIndex: [1, 2]
+        shardTotal: [2]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          package_json_file: pro/package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          cache: "pnpm"
+          node-version-file: "pro/package.json"
+          cache-dependency-path: "pro/pnpm-lock.yaml"
+
+      - uses: pass-culture/common-workflows/actions/setup-safe-chain@a67aba1f7a63bcb20f5b722557a4bdcba2511ab5
+
+      - uses: KengoTODA/actions-setup-docker-compose@477353946803dd64eaa44008b865b6bfc88cab4e # v1.2.4
+        with:
+          version: "2.40.3"
+
+      - name: "Fix local permissions"
+        run: sudo chown -R "$PCAPI_UID:$PCAPI_GID" .
+        working-directory: api
+        env:
+          PCAPI_UID: 1000
+          PCAPI_GID: 1000
+
+      - name: "Cache the node_modules"
+        uses: pass-culture-github-actions/cache@88f07af200f0bcf2480f9c194e3dbb9488a1902b # v1.0.0
+        with:
+          compression-method: "gzip"
+          path: |
+            **/node_modules
+          key: v1-pnpm-pro-dependency-cache-${{ runner.os }}-${{ hashFiles('pro/pnpm-lock.yaml') }}
+          restore-keys: |
+            v1-pnpm-pro-dependency-cache-${{ runner.os }}-${{ hashFiles('pro/pnpm-lock.yaml') }}
+
+      - name: Install dependencies
+        run: pnpm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('pro/pnpm-lock.yaml') }}
+
+      - name: Install Playwright browsers
+        run: pnpm playwright install chromium --with-deps
+
+      - name: "Set up Cloud SDK"
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: "Compute docker image name:tag"
+        id: compute-image-name
+        env:
+          IMAGE: ${{ inputs.image }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          echo "image_name=$IMAGE:$TAG" | tee -a "${GITHUB_OUTPUT}"
+          echo "::notice:: Running playwright e2e-tests with $IMAGE:$TAG"
+
+      - name: "Run postgres and redis server"
+        run: docker-compose -f ../docker-compose-backend.yml up postgres redis -d
+
+      - name: "Download artifact"
+        if: ${{ inputs.tag != 'latest' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.image }}-${{ inputs.tag }}.tar
+          path: ${{ runner.temp }}
+
+      - name: "Run API server"
+        env:
+          IMAGE: ${{ inputs.image }}
+          TAG: ${{ inputs.tag }}
+          E2E_API_KEY: DummyToken
+        run: |
+          if [ "$TAG" != "latest" ]; then
+            docker load --input "${{ runner.temp }}/$IMAGE-$TAG.tar"
+          fi
+          docker run \
+            --name pc-api \
+            --workdir /usr/src/app \
+            --env-file ./../env_file \
+            --tty \
+            --detach \
+            --network pass-culture-main_db_nw \
+            --publish 5001:5001 \
+            --publish 10002:10002 \
+            --entrypoint bash \
+            --env E2E_API_KEY=DummyToken \
+            --env ENABLE_FLASK_PROMETHEUS_EXPORTER="0" \
+            --env PROMETHEUS_MULTIPROC_DIR="" \
+            "${{ steps.compute-image-name.outputs.image_name }}" \
+            -c "set -e ; flask install_postgres_extensions ; alembic upgrade pre@head ; alembic upgrade post@head ; flask install_data ; FLASK_USE_RELOADER=0 python src/pcapi/app.py"
+
+      - name: "Wait for migrations to be run"
+        uses: iFaxity/wait-on-action@a7d13170ec542bdca4ef8ac4b15e9c6aa00a6866 # v1.2.1
+        with:
+          resource: http://localhost:5001/health/api
+          timeout: 120000
+
+      - name: Download the build folder
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: build-playwright
+          path: pro/build
+
+      - name: "Serve vite preview"
+        run: pnpm serve &
+
+      - name: "Wait for front-end to listen"
+        run: |
+          # shellcheck disable=SC2016
+          timeout 300 bash -c 'while [[ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:3001)" != "200" ]]; do sleep 5; done' || false
+
+      - name: "Playwright run"
+        run: E2E_API_KEY=DummyToken pnpm test:e2e:ci --reporter=blob --shard="${{ matrix.shardIndex }}/${{matrix.shardTotal }}"
+        env:
+          E2E_API_KEY: DummyToken
+
+      - name: "Upload Playwright report"
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: report-chromium-${{ matrix.shardIndex }}
+          path: pro/blob-report/
+          retention-days: 30
+
+      - name: "Show pcapi log when it fails"
+        if: failure()
+        run: docker logs pc-api
+
+  merge-reposrts:
+    if: ${{ !cancelled() }}
+    needs: [run-playwright-tests]
+    name: "Merge playwright reports"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        with:
+          package_json_file: pro/package.json
+
+      - name: Use Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          cache: pnpm
+          node-version-file: "pro/package.json"
+          cache-dependency-path: "pro/pnpm-lock.yaml"
+      - uses: pass-culture/common-workflows/actions/setup-safe-chain@a67aba1f7a63bcb20f5b722557a4bdcba2511ab5
+
+      - name: "Install dependencies (3 attempts)"
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 2
+          max_attempts: 3
+          command: |
+            cd pro
+            pnpm ci
+
+      - name: Download blob reports from GitHub Actions Artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: pro/all-blob-reports
+          pattern: report-chromium-*
+          merge-multiple: true
+
+      - name: Merge reports
+        run: pnpm exec playwright merge-reports --reporter html ./all-blob-reports
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: html-report--attempt-${{ github.run_attempt }}
+          path: pro/playwright-report
+          retention-days: 14

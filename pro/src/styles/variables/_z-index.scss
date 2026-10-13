@@ -1,0 +1,13 @@
+$sticky-bar-z-index: 1;
+$multidownload-dropdown: 1;
+$recurrence-sticky-bar: $sticky-bar-z-index + 1; // This is a sticky bar that should "replace" the form sticky bar by going above it
+$select-options-z-index: 3; // The sticky action bar z-index was set to 1. We have to set it to 2 so the select result would display over the sticky bar.
+$lateral-menu-z-index: 11;
+$top-header-z-index: 12;
+$cookies-popup-z-index: 13;
+$lateral-menu-z-index-mobile: 14;
+$profil-pop-in-z-index: 15;
+$venues-pop-in-z-index: 16;
+$modal-z-index: 17;
+$modal-close-z-index: 18;
+$dropdown-button-z-index: 19;

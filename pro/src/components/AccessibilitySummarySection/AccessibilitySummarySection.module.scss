@@ -1,0 +1,9 @@
+.callout {
+  margin-bottom: var(--size-spacing-l);
+}
+
+.accessibility-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-s);
+}

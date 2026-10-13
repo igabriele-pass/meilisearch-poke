@@ -1,0 +1,27 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.error {
+  min-height: 100vh;
+
+  &-header {
+    box-shadow: var(--shadow-overlay);
+
+    &-brand {
+      width: rem.torem(120px);
+      color: var(--color-text-brand-primary);
+      padding: var(--size-spacing-s) var(--size-spacing-l);
+    }
+  }
+
+  &-content {
+    padding: var(--size-spacing-xxl);
+  }
+}
+
+.title {
+  @include fonts.title1;
+
+  margin-bottom: var(--size-spacing-l);
+  overflow-wrap: anywhere;
+}

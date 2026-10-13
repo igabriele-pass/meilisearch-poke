@@ -1,0 +1,57 @@
+{% extends "layouts/list.html" %}
+{% from "components/forms.html" import build_filters_form_ng with context %}
+{% from "components/dynamic/modal.html" import build_dynamic_modal with context %}
+{% set rows_count = rows|length %}
+{% set table_id = "incident-table" %}
+{% block title %}Liste des incidents{% endblock %}
+{% block search_block %}
+  {{ build_filters_form_ng(form, dst) }}
+{% endblock search_block %}
+{% block table_header %}
+  <th data-pc-column-name="Checkbox">
+    <input type="checkbox"
+           class="form-check-input fs-6 mt-0"
+           name="pc-table-multi-select-check-all" />
+  </th>
+  <th>ID</th>
+  <th>Statut de l'incident</th>
+  <th>Type d'incident</th>
+  <th>Nature</th>
+  <th>Type de résa</th>
+  <th>Nb. Réservation(s)</th>
+  <th>Montant total</th>
+  <th>Entité juridique</th>
+  <th>Partenaire culturel</th>
+  <th>Origine de la demande</th>
+  <th>Ticket Zendesk</th>
+{% endblock table_header %}
+{% block table_body %}
+  {% include "finance/incidents/list_rows.html" %}
+{% endblock table_body %}
+{% block multi_select_menu %}
+  <div class="counter-container text-nowrap">
+    <span class="counter">0</span> incident(s) sélectionné(s)
+  </div>
+  <div data-toggle="pc-batch-confirm-btn-group"
+       data-toggle-id="table-container-offerer-validation-btn-group"
+       data-pc-table-multi-select-id="{{ table_name }}"
+       data-input-ids-name="object_ids"
+       class="d-flex">
+    <button disabled
+            type="button"
+            class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+            data-bs-toggle="modal"
+            data-bs-target="#batch-validate-modal"
+            data-use-dynamic-modal="true">Valider</button>
+    <button disabled
+            type="button"
+            class="btn rounded-0 border-top-0 border-bottom-0 text-nowrap"
+            data-bs-toggle="modal"
+            data-bs-target="#batch-reject-modal"
+            data-use-dynamic-modal="true">Annuler</button>
+  </div>
+{% endblock multi_select_menu %}
+{% block after_table %}
+  {{ build_dynamic_modal(url_for("backoffice.finance_incidents.get_batch_finance_incidents_validation_form") , "batch-validate-modal", form="form-ids-" + table_name, method="post") }}
+  {{ build_dynamic_modal(url_for("backoffice.finance_incidents.get_batch_finance_incidents_cancellation_form") , "batch-reject-modal", form="form-ids-" + table_name, method="post") }}
+{% endblock after_table %}

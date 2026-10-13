@@ -1,0 +1,46 @@
+{% extends "layouts/list.html" %}
+{% set rows_count = rows|length %}
+{% set hide_search_block = True %}
+{% block title %}Liste des sous-catégories{% endblock %}
+{% block table_header %}
+  <th scope="col">pro_label</th>
+  <th scope="col">app_label</th>
+  <th scope="col">Nom tech de la sous-catégorie</th>
+  <th scope="col">Nom tech de la catégorie</th>
+  <th scope="col">homepage_label_name</th>
+  <th scope="col">is_event</th>
+  <th scope="col">conditional_fields</th>
+  <th scope="col">can_expire</th>
+  <th scope="col">is_physical_deposit</th>
+  <th scope="col">is_digital_deposit</th>
+  <th scope="col">online_offline_platform</th>
+  <th scope="col">reimbursement_rule</th>
+  <th scope="col">can_be_duo</th>
+  <th scope="col">is_selectable</th>
+  <th scope="col">Réservable par les 15-17 si gratuite</th>
+  <th scope="col">Réservable par les 15-17 si payante</th>
+  <th scope="col">can_be_withdrawable</th>
+{% endblock table_header %}
+{% block table_body %}
+  {% for subcategory in rows %}
+    <tr>
+      <td>{{ subcategory.pro_label }}</td>
+      <td>{{ subcategory.app_label }}</td>
+      <td>{{ subcategory.id }}</td>
+      <td>{{ subcategory.category.id }}</td>
+      <td>{{ subcategory.homepage_label_name }}</td>
+      <td>{{ subcategory.is_event | format_bool_badge }}</td>
+      <td>{{ subcategory.conditional_fields }}</td>
+      <td>{{ subcategory.can_expire | format_bool_badge }}</td>
+      <td>{{ subcategory.is_physical_deposit | format_bool_badge }}</td>
+      <td>{{ subcategory.is_digital_deposit | format_bool_badge }}</td>
+      <td>{{ subcategory.online_offline_platform }}</td>
+      <td>{{ subcategory.reimbursement_rule }}</td>
+      <td>{{ subcategory.can_be_duo | format_bool_badge }}</td>
+      <td>{{ subcategory.is_selectable | format_bool_badge }}</td>
+      <td>{{ subcategory.is_bookable_by_underage_when_not_free | format_bool_badge }}</td>
+      <td>{{ (not subcategory.is_bookable_by_underage_when_not_free) | format_bool_badge }}</td>
+      <td>{{ subcategory.can_be_withdrawable | format_bool_badge }}</td>
+    </tr>
+  {% endfor %}
+{% endblock table_body %}

@@ -1,0 +1,82 @@
+{% from "components/dynamic/modal.html" import build_lazy_modal with context %}
+<div class="row row-cols-1 g-4 py-3">
+  <div class="col">
+    <div class="card">
+      <div class="card-body">
+        <div class="d-flex flex-row justify-content-start incident-header">
+          <div class="card-title">
+            {% if incident.details.createdAt %}
+              <h5 class="card-title me-2">Créé le : {{ incident.details.createdAt | format_string_to_date_time }}</h5>
+            {% endif %}
+          </div>
+          <div class="h5 me-1 align-middle">{{ incident.status | format_finance_incident_status_badge }}</div>
+          <div class="h5 me-1 align-middle">{{ incident.is_partial | format_finance_incident_nature_badge }}</div>
+          <div class="d-flex justify-content-end flex-grow-1 gap-2">
+            {% if has_permission("MANAGE_INCIDENTS") and incident.status.value == "created" %}
+              <button class="btn btn-outline-primary"
+                      data-bs-toggle="modal"
+                      data-bs-target="#reject-finance-incident-modal-{{ incident.id }}">Annuler le geste commercial</button>
+              {{ build_lazy_modal(url_for('backoffice.finance_incidents.get_finance_incident_cancellation_form', finance_incident_id=incident.id) , "reject-finance-incident-modal-" + incident.id|string) }}
+              {% if has_permission("VALIDATE_COMMERCIAL_GESTURE") %}
+                <button class="btn btn-outline-primary"
+                        data-bs-toggle="modal"
+                        data-bs-target="#finance-incident-validation-modal-{{ incident.id }}">Valider le geste commercial</button>
+                {{ build_lazy_modal(url_for('backoffice.finance_incidents.get_finance_incident_validation_form', finance_incident_id=incident.id) , "finance-incident-validation-modal-" + incident.id|string) }}
+              {% endif %}
+            {% endif %}
+          </div>
+        </div>
+        <h6 class="card-subtitle text-muted">ID : {{ incident.id }}</h6>
+        <div class="d-flex justify-content-start">
+          <div class="d-flex flex-column pe-5">
+            <p class="mb-1">
+              <span class="fw-bold">Partenaire culturel porteur de l'offre :</span> {{ links.build_venue_name_to_details_link(incident.venue) }}
+            </p>
+            {% set bank_account_link = incident.venue.current_bank_account_link %}
+            <p class="mb-1">
+              <span class="fw-bold">Compte bancaire :</span>
+              {% if bank_account_link %}
+                {{ links.build_bank_account_name_to_details_link(bank_account_link.bankAccount) }} ({{ bank_account_link.timespan.lower | format_date }})
+              {% endif %}
+            </p>
+            {% if incident.origin %}
+              <p class="mb-1">
+                <span class="fw-bold">Origine de la demande :</span> {{ incident.origin.value }}
+              </p>
+            {% endif %}
+            {% if incident.zendeskId %}
+              <p class="mb-1">
+                <span class="fw-bold">Ticket Zendesk :</span> {{ links.build_zendesk_ticket_external_link(incident.zendeskId) }}
+              </p>
+            {% endif %}
+            <p class="mb-1">
+              <span class="fw-bold">Montant d'origine {{ incident.booking_finance_incidents | length | pluralize('de la réservation', 'des réservations') }} :</span> {{ bookings_total_amount | format_amount(target=incident.venue) }}
+            </p>
+            <p class="mb-1">
+              <span class="fw-bold">Montant du geste commercial à verser à l'acteur :</span> {{ commercial_gesture_amount | format_cents(target=incident.venue) }}
+            </p>
+            {% if incident.author_full_name %}
+              <p class="mb-1">
+                <span class="fw-bold">Geste commercial créé par :</span> {{ incident.author_full_name }}
+              </p>
+            {% endif %}
+            {% if incident.cashflow_batch_label %}
+              <p class="mb-1">
+                <span class="fw-bold">Batch :</span> {{ incident.cashflow_batch_label }}
+              </p>
+            {% endif %}
+            {% if incident.invoice_url %}
+              <p class="mb-1">
+                <span class="fw-bold">Justificatif de remboursement :</span>
+                <a class="link-primary"
+                   download
+                   href="{{ incident.invoice_url }}">
+                  <i class="bi bi-cloud-download-fill"></i> PDF</a>
+              </p>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

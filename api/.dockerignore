@@ -1,0 +1,31 @@
+# Common python build files
+*.pyc
+*.pyo
+*.pyd
+__pycache__
+.pytest_cache
+.cache
+.local
+
+# Local env
+.venv
+
+# Tests
+local_test_env_file
+pytest.ini
+
+# Dockerfiles
+.dockerignore
+Dockerfile
+
+# Docs
+*.md
+LICENSE
+
+# Misc
+.gitguardian.yaml
+.vscode
+helm
+mypy.ini
+Procfile
+venv

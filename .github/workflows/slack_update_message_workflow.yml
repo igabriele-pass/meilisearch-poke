@@ -1,0 +1,52 @@
+name: 4 [Slack] Update message
+
+on:
+  workflow_call:
+    inputs:
+      channel:
+        type: string
+        required: false
+        default: ${{vars.SLACK_CI_NOTIFICATIONS_CHANNEL_ID}}
+      message:
+        type: string
+        required: true
+      message-ts:
+        type: string
+        required: true
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: { required: true }
+      PASSCULTURE_GITHUB_ACTION_APP_ID: { required: true }
+      SLACK_BOT_TOKEN: { required: true }
+    outputs:
+      message-ts:
+        value: ${{ jobs.update-slack-message.outputs.message-ts }}
+
+jobs:
+  update-slack-message:
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    outputs:
+      message-ts: ${{ steps.update-message.outputs.message-ts }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: false
+          persist-credentials: false
+      - name: Install passdirector
+        uses: pass-culture/common-workflows/actions/setup-passdirector@b470d76b19d7f3ebcda367f5e17484228021d388 # v1.0.0
+        with:
+          version: v0.8.4
+          github_app_id: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID}}
+          github_app_private_key: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+      - name: Update message
+        id: update-message
+        shell: bash
+        env:
+          CHANNEL: ${{inputs.channel}}
+          MESSAGE: ${{inputs.message}}
+          MESSAGE_TIMESTAMP_ID: ${{inputs.message-ts}}
+          GITHUB_ACTOR: ${{github.actor}}
+          PASSDIRECTOR_SLACK_BOT_TOKEN: ${{secrets.SLACK_BOT_TOKEN}}
+        run: |
+          message_ts=$(passdirector slack update -c "${CHANNEL}" -ts "${MESSAGE_TIMESTAMP_ID}" -m "${MESSAGE}" -a "${GITHUB_ACTOR}")
+          echo "message-ts=$message_ts" >> "$GITHUB_OUTPUT"

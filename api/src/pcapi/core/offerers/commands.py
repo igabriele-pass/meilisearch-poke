@@ -1,0 +1,218 @@
+import datetime
+import logging
+
+import click
+import sqlalchemy as sa
+import sqlalchemy.orm as sa_orm
+
+import pcapi.utils.cron as cron_decorators
+from pcapi.connectors import api_sirene
+from pcapi.core.offerers import api as offerers_api
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offerers import synchronize_venues_banners_with_google_places as banner_url_synchronizations
+from pcapi.core.offerers import tasks as offerers_tasks
+from pcapi.core.offerers import update_offerer_stats as offerers_stats
+from pcapi.core.users import models as users_models
+from pcapi.models import db
+from pcapi.models.feature import FeatureToggle
+from pcapi.utils import siren as siren_utils
+from pcapi.utils.blueprint import Blueprint
+from pcapi.utils.transaction_manager import atomic
+from pcapi.utils.transaction_manager import mark_transaction_as_invalid
+
+
+blueprint = Blueprint(__name__, __name__)
+logger = logging.getLogger(__name__)
+
+BATCH_SIZE = 100
+
+
+@blueprint.cli.command("check_active_offerers")
+@click.option("--apply", is_flag=True)
+@click.option("--day", type=int, required=False, default=None)
+def check_active_offerers(apply: bool = False, day: int | None = None) -> None:
+    # This command is called from a cron running every day, so that any active offerer is checked every month.
+    # Split into 28 blocks to avoid spamming Sirene API for all offerers the same day. Nothing done on 29, 30, 31.
+    # Use --day to replay or troubleshooting.
+
+    if day is None:
+        day = datetime.date.today().day
+
+    offerers = (
+        db.session.query(offerers_models.Offerer)
+        .filter(
+            offerers_models.Offerer.id % 28 == day - 1,
+            offerers_models.Offerer.isActive,
+            sa.not_(offerers_models.Offerer.isRejected),
+            sa.not_(offerers_models.Offerer.isClosed),
+            offerers_models.Offerer.siren.is_not(None),
+            sa.not_(offerers_models.Offerer.siren.like(f"{siren_utils.NEW_CALEDONIA_SIREN_PREFIX}%")),
+        )
+        .options(sa_orm.load_only(offerers_models.Offerer.siren))
+        .all()
+    )
+
+    logger.info("check_active_offerers will check %s offerers in celery tasks today", len(offerers))
+
+    for offerer in offerers:
+        payload = offerers_tasks.CheckOffererSirenRequest(
+            siren=offerer.siren,
+            close_or_tag_when_inactive=apply,
+        )
+        offerers_tasks.check_offerer_siren_task.delay(payload.model_dump())
+
+
+@blueprint.cli.command("check_closed_offerers")
+@click.option("--apply", is_flag=True)
+@click.option("--date-closed", type=str, required=False, default=None)
+def check_closed_offerers(apply: bool = False, date_closed: str | None = None) -> None:
+    # This command is called everyday from a cron. its goal is to close offerers which have declared closure in the siren API.
+    close_or_tag_when_inactive = apply
+    if date_closed:
+        query_date = datetime.date.fromisoformat(date_closed)
+    else:
+        # Check closures registered two days before to ensure that the API database has already been updated.
+        query_date = datetime.date.today() - datetime.timedelta(days=2)
+
+    try:
+        siren_list = api_sirene.get_siren_closed_at_date(query_date)
+    except api_sirene.InseeException as exc:
+        logger.error("Could not fetch closed SIREN from Sirene API", extra={"date": query_date.isoformat(), "exc": exc})
+        return
+    known_offerers = (
+        db.session.query(offerers_models.Offerer)
+        .filter(
+            offerers_models.Offerer.siren.in_([elem["siren"] for elem in siren_list]),
+            offerers_models.Offerer.isActive,
+            sa.not_(offerers_models.Offerer.isRejected),
+        )
+        .options(
+            sa_orm.joinedload(offerers_models.Offerer.tags).load_only(
+                offerers_models.OffererTag.id, offerers_models.OffererTag.name
+            )
+        )
+        .all()
+    )
+    logger.info(
+        "check_closed_offerers found %s active SIREN which active/closed status has been updated on %s",
+        len(known_offerers),
+        query_date.isoformat(),
+        extra={"siren": [x.siren for x in known_offerers]},
+    )
+
+    if close_or_tag_when_inactive:
+        for offerer in known_offerers:
+            closure_date = [x["closure_date"] for x in siren_list if x["siren"] == offerer.siren][0]
+            offerers_api.handle_closed_offerer(offerer, closure_date)
+
+
+@blueprint.cli.command("delete_user_offerers_on_closed_offerers")
+@click.option("--apply", is_flag=True)
+def delete_user_offerers_on_closed_offerers(apply: bool = False) -> None:
+    offerers_api.auto_delete_attachments_on_closed_offerers()
+
+    if apply:
+        db.session.commit()
+    else:
+        db.session.rollback()
+
+
+@cron_decorators.log_cron_with_transaction
+@blueprint.cli.command("send_reminder_email_to_individual_offerers")
+def send_reminder_email_to_individual_offerers() -> None:
+    # This command is called from a cron running every day.
+    offerers_api.send_reminder_email_to_individual_offerers()
+
+
+@blueprint.cli.command("update_offerer_stats")
+@cron_decorators.log_cron_with_transaction
+@cron_decorators.cron_require_feature(FeatureToggle.ENABLE_CRON_TO_UPDATE_OFFERER_STATS)
+def update_offerer_stats() -> None:
+    """Updated the offrer stats in the database from big query"""
+    offerers_stats.update_offerer_daily_views_stats()
+    offerers_stats.update_offerer_top_views_stats()
+    offerers_stats.delete_offerer_old_stats()
+
+
+@blueprint.cli.command("synchronize_venues_banners_with_google_places")
+@click.option("--frequency", type=int, required=False, default=1)
+def synchronize_venues_banners_with_google_places(frequency: int = 1) -> None:
+    """Synchronize venues banners with Google Places API.
+
+    This command is meant to be called every day.
+    The `frequency` parameter is used to split the venues into blocks, to update a fraction of the venues every day.
+    1 means all venues are updated once a month, 2 means twice a month, 4 means once a week.
+
+    Args:
+        frequency (int): The frequency of the command per month. Default is 1, to synchronize all venues once a month.
+    """
+
+    if frequency not in (1, 2, 4):
+        raise click.BadParameter("frequency must be 1, 2 or 4")
+
+    day = datetime.date.today().day
+    if day > banner_url_synchronizations.SHORTEST_MONTH_LENGTH:
+        logger.info(
+            "[gmaps_banner_synchro] synchronize_venues_banners_with_google_places command does not execute after 28th"
+        )
+        return
+
+    venues = banner_url_synchronizations.get_venues_without_photo(frequency)
+    banner_url_synchronizations.delete_venues_banners(venues)
+    banner_url_synchronizations.synchronize_venues_banners_with_google_places(venues)
+
+
+@blueprint.cli.command("synchronize_accessibility_with_acceslibre")
+@click.option("--apply", is_flag=True)
+@click.option("--force-sync", is_flag=True)
+@click.option("--batch-size", type=int, default=BATCH_SIZE, help="Size of venues batches to synchronize")
+def synchronize_accessibility_with_acceslibre(
+    apply: bool = False, force_sync: bool = False, batch_size: int = BATCH_SIZE
+) -> None:
+    offerers_api.synchronize_accessibility_with_acceslibre(apply=apply, force_sync=force_sync, batch_size=batch_size)
+
+
+@blueprint.cli.command("acceslibre_matching")
+@click.option("--apply", is_flag=True)
+@click.option("--batch-size", type=int, default=BATCH_SIZE, help="Size of venues batches to synchronize")
+@click.option("--n-days-to-fetch", type=int, default=7, help="Number of days to look for new data at acceslibre")
+def acceslibre_matching(apply: bool = False, batch_size: int = BATCH_SIZE, n_days_to_fetch: int = 7) -> None:
+    offerers_api.acceslibre_matching(batch_size=batch_size, apply=apply, n_days_to_fetch=n_days_to_fetch)
+
+
+@blueprint.cli.command("clean_unused_offerer_address")
+@click.option("--apply", is_flag=True)
+def clean_unused_offerer_address(apply: bool = False) -> None:
+    offerers_api.clean_unused_offerer_address()
+
+    if apply:
+        db.session.commit()
+    else:
+        db.session.rollback()
+
+
+@blueprint.cli.command("clean_offerer_invitations")
+@click.option("--apply", is_flag=True)
+def clean_offerer_invitations(apply: bool = False) -> None:
+    offerers_api.delete_expired_offerer_invitations()
+
+    if apply:
+        db.session.commit()
+    else:
+        db.session.rollback()
+        logger.info("clean_offerer_invitations was a dry-run -- rollback")
+
+
+@blueprint.cli.command("finalize_closing_venue")
+@click.option("--venue-id", type=int, required=True, help="venue id")
+@click.option("--author-id", type=int, required=True, help="author (user) id")
+@click.option("--apply", is_flag=True)
+def finalize_closing_venue_command(venue_id: int, author_id: int, apply: bool = False) -> None:
+    venue = db.session.query(offerers_models.Venue).filter(offerers_models.Venue.id == venue_id).one()
+    author = db.session.query(users_models.User).filter(users_models.User.id == author_id).one()
+    with atomic():
+        payload = offerers_tasks.DeactivateVenueOffersPayload(venue_id=venue.id, author_id=author.id)
+        offerers_tasks.deactivate_venue_offers_task(payload.model_dump())
+
+        if not apply:
+            mark_transaction_as_invalid()

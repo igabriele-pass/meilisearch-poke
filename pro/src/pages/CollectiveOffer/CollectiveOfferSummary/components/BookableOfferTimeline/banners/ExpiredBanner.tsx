@@ -1,0 +1,74 @@
+import { CollectiveOfferDisplayedStatus } from '@/apiClient/v1'
+import { FORMAT_DD_MM_YYYY } from '@/commons/utils/date'
+import {
+  Banner,
+  type BannerLink,
+  BannerVariants,
+} from '@/design-system/Banner/Banner'
+import fullEditIcon from '@/icons/full-edit.svg'
+
+import { formatDateTime } from '../../CollectiveOfferSummary/components/utils/formatDatetime'
+import styles from '../BookableOfferTimeline.module.scss'
+
+export const ExpiredBanner = ({
+  stepBeforeExpiredStatus,
+  offerId,
+  bookingLimitDatetime,
+  canEditDates,
+  departmentCode,
+}: {
+  stepBeforeExpiredStatus: CollectiveOfferDisplayedStatus
+  offerId: number
+  bookingLimitDatetime: string | null
+  departmentCode?: string | null
+  canEditDates: boolean
+}) => {
+  const hasPublished =
+    stepBeforeExpiredStatus === CollectiveOfferDisplayedStatus.PUBLISHED
+
+  const message = hasPublished
+    ? 'L’enseignant n’a pas préréservé l’offre avant la date limite de réservation fixée au '
+    : 'Le chef d’établissement n’a pas réservé l’offre avant la date limite de réservation fixée au '
+
+  const description = (
+    <>
+      {message}
+      <span className={styles['callout-accent']}>
+        {formatDateTime(
+          bookingLimitDatetime ?? '',
+          FORMAT_DD_MM_YYYY,
+          departmentCode
+        )}
+        .
+      </span>
+      <div>
+        Pour qu’il puisse {hasPublished ? 'préréserver' : 'réserver'} à nouveau,
+        vous pouvez modifier la date limite de réservation, ce qui rendra
+        automatiquement la {hasPublished ? 'préréservation' : 'réservation'}{' '}
+        disponible auprès de l’enseignant.
+      </div>
+    </>
+  )
+
+  const actions: BannerLink[] = canEditDates
+    ? [
+        {
+          label: 'Modifier la date limite de réservation',
+          icon: fullEditIcon,
+          href: `/offre/${offerId}/collectif/stocks/edition`,
+          type: 'link',
+        },
+      ]
+    : []
+
+  return (
+    <div className={styles['callout']}>
+      <Banner
+        title="Informations"
+        variant={BannerVariants.ERROR}
+        description={description}
+        actions={actions}
+      />
+    </div>
+  )
+}

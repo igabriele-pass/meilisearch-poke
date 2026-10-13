@@ -1,0 +1,397 @@
+/* istanbul ignore file: Those are test helpers, their coverage is not relevant */
+
+import { add, addDays } from 'date-fns'
+
+import {
+  CollectiveBookingStatus,
+  CollectiveLocationType,
+  CollectiveOfferAllowedAction,
+  CollectiveOfferDisplayedStatus,
+  type CollectiveOfferResponseModel,
+  CollectiveOfferTemplateAllowedAction,
+  type CollectiveOfferTemplateResponseModel,
+  DisplayableActivity,
+  type DMSApplicationForEAC,
+  DMSApplicationstatus,
+  EacFormat,
+  type EducationalInstitutionResponseModel,
+  type EducationalRedactorResponseModel,
+  type GetCollectiveOfferBookingResponseModel,
+  type GetCollectiveOfferCollectiveStockResponseModel,
+  type GetCollectiveOfferManagingOffererResponseModel,
+  type GetCollectiveOfferRequestResponseModel,
+  type GetCollectiveOfferResponseModel,
+  type GetCollectiveOfferTemplateResponseModel,
+  type GetCollectiveOfferVenueResponseModel,
+  type GetVenueResponseModel,
+  StudentLevels,
+} from '@/apiClient/v1'
+
+let offerId = 1
+let stockId = 1
+let venueId = 1
+let offererId = 1
+let offerBookingId = 1
+let institutionId = 1
+let offerTemplateId = 1
+
+export const collectiveOfferFactory = (
+  customCollectiveOffer: Partial<CollectiveOfferResponseModel> = {}
+): CollectiveOfferResponseModel => {
+  const currentId = offerId++
+
+  return {
+    id: currentId,
+    displayedStatus: CollectiveOfferDisplayedStatus.PUBLISHED,
+    name: `offer name ${offerId}`,
+    dates: {
+      start: new Date().toISOString(),
+      end: addDays(new Date(), 1).toISOString(),
+    },
+    educationalInstitution: null,
+    imageUrl: null,
+    imageAlternativeText: null,
+    stock: {
+      bookingLimitDatetime: add(Date.now(), { days: 1 }).toISOString(),
+      numberOfTickets: 10,
+      numberOfTeachers: 5,
+      price: 10,
+    },
+    allowedActions: [CollectiveOfferAllowedAction.CAN_ARCHIVE],
+    location: {
+      locationType: CollectiveLocationType.SCHOOL,
+      location: null,
+      locationComment: null,
+    },
+    ...customCollectiveOffer,
+  }
+}
+
+export const collectiveOfferTemplateFactory = (
+  customCollectiveOfferTemplate: Partial<CollectiveOfferTemplateResponseModel> = {}
+): CollectiveOfferTemplateResponseModel => {
+  const currentId = offerTemplateId++
+
+  return {
+    id: currentId,
+    displayedStatus: CollectiveOfferDisplayedStatus.PUBLISHED,
+    name: `Offre vitrine ${currentId}`,
+    dates: {
+      start: new Date().toISOString(),
+      end: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    },
+    imageUrl: null,
+    imageAlternativeText: null,
+    allowedActions: [CollectiveOfferTemplateAllowedAction.CAN_ARCHIVE],
+    location: {
+      locationType: CollectiveLocationType.SCHOOL,
+      location: null,
+      locationComment: null,
+    },
+    ...customCollectiveOfferTemplate,
+  }
+}
+
+const sharedCollectiveOfferData = {
+  displayedStatus: CollectiveOfferDisplayedStatus.PUBLISHED,
+  name: 'Offre de test',
+  bookingEmails: ['toto@example.com'],
+  contactEmail: 'toto@example.com',
+  contactPhone: '0600000000',
+  dateCreated: new Date().toISOString(),
+  description: 'blablabla,',
+  domains: [{ id: 1, name: 'Danse' }],
+  interventionArea: ['mainland'],
+  isPublicApi: false,
+  id: 123,
+  students: [StudentLevels.COLL_GE_3E],
+  imageUrl: 'https://example.com/image.jpg',
+  imageCredit: 'image credit',
+  imageAlternativeText: 'alternative text',
+  nationalProgram: {
+    id: 1,
+    name: 'Collège au cinéma',
+  },
+  provider: null,
+  formats: [EacFormat.ATELIER_DE_PRATIQUE],
+  location: {
+    locationType: CollectiveLocationType.SCHOOL,
+    location: null,
+    locationComment: null,
+  },
+  audioDisabilityCompliant: false,
+  mentalDisabilityCompliant: false,
+  motorDisabilityCompliant: false,
+  visualDisabilityCompliant: false,
+  dates: null,
+  durationMinutes: null,
+}
+
+export const getCollectiveOfferFactory = (
+  customCollectiveOffer: Partial<GetCollectiveOfferResponseModel> = {}
+): GetCollectiveOfferResponseModel => {
+  const currentOfferId = offerId++
+  return {
+    ...sharedCollectiveOfferData,
+    id: currentOfferId,
+    venue: getCollectiveOfferVenueFactory(),
+    additionalDetails: null,
+    booking: null,
+    institution: null,
+    teacher: null,
+    templateId: null,
+    isTemplate: false,
+    allowedActions: [CollectiveOfferAllowedAction.CAN_ARCHIVE],
+    collectiveStock: getCollectiveOfferCollectiveStockFactory(),
+    history: {
+      future: [
+        CollectiveOfferDisplayedStatus.BOOKED,
+        CollectiveOfferDisplayedStatus.ENDED,
+        CollectiveOfferDisplayedStatus.REIMBURSED,
+      ],
+      past: [
+        {
+          status: CollectiveOfferDisplayedStatus.PUBLISHED,
+          datetime: '2025-07-05T13:38:12.020421Z',
+        },
+        {
+          status: CollectiveOfferDisplayedStatus.PREBOOKED,
+          datetime: '2025-06-23T13:28:11.883708Z',
+        },
+        {
+          status: CollectiveOfferDisplayedStatus.EXPIRED,
+          datetime: '2025-06-24T13:28:11.883708Z',
+        },
+      ],
+    },
+    ...customCollectiveOffer,
+  }
+}
+
+export const getCollectiveOfferCollectiveStockFactory = (
+  customGetCollectiveOfferCollectiveStock: Partial<GetCollectiveOfferCollectiveStockResponseModel> = {}
+): GetCollectiveOfferCollectiveStockResponseModel => {
+  const currentStockId = stockId++
+  return {
+    id: currentStockId,
+    price: 100,
+    servicePrice: 100,
+    collectiveAdditionalFees: [],
+    startDatetime: add(Date.now(), { days: 2 }).toISOString(),
+    endDatetime: add(Date.now(), { days: 3 }).toISOString(),
+    bookingLimitDatetime: add(Date.now(), { days: 1 }).toISOString(),
+    priceDetail: 'detail',
+    numberOfTickets: 10,
+    numberOfTeachers: 1,
+    ...customGetCollectiveOfferCollectiveStock,
+  }
+}
+
+export const getCollectiveOfferBookingFactory = (
+  customGetCollectiveOfferBooking: Partial<GetCollectiveOfferBookingResponseModel> = {}
+): GetCollectiveOfferBookingResponseModel => {
+  const currentBookingId = offerBookingId++
+  return {
+    id: currentBookingId,
+    status: CollectiveBookingStatus.CONFIRMED,
+    dateCreated: new Date().toISOString(),
+    cancellationLimitDate: add(Date.now(), { days: 1 }).toISOString(),
+    confirmationLimitDate: add(Date.now(), { days: 1 }).toISOString(),
+    cancellationReason: null,
+    educationalRedactor: { ...defaultEducationalRedactor },
+    ...customGetCollectiveOfferBooking,
+  }
+}
+
+export const getCollectiveOfferTemplateFactory = (
+  customCollectiveOfferTemplate: Partial<GetCollectiveOfferTemplateResponseModel> = {}
+): GetCollectiveOfferTemplateResponseModel => ({
+  ...sharedCollectiveOfferData,
+  id: offerId++,
+  allowedActions: [CollectiveOfferTemplateAllowedAction.CAN_ARCHIVE],
+  venue: getCollectiveOfferVenueFactory(),
+  isTemplate: true,
+  dates: {
+    start: new Date().toISOString(),
+    end: addDays(new Date(), 1).toISOString(),
+  },
+  contactForm: null,
+  contactUrl: null,
+  priceDetail: null,
+  imageAlternativeText: null,
+  ...customCollectiveOfferTemplate,
+})
+
+export const getCollectiveOfferVenueFactory = (
+  customGetCollectiveOfferVenue: Partial<GetCollectiveOfferVenueResponseModel> = {}
+): GetCollectiveOfferVenueResponseModel => {
+  const currentVenueId = venueId++
+  return {
+    name: `Nom de la structure ${currentVenueId}`,
+    managingOfferer: getCollectiveOfferManagingOffererFactory(),
+    publicName: `Nom public de la structure ${currentVenueId}`,
+    id: currentVenueId,
+    departementCode: '973',
+    imgUrl: null,
+    imgAlternativeText: null,
+    ...customGetCollectiveOfferVenue,
+  }
+}
+
+export const getCollectiveOfferManagingOffererFactory = (
+  customGetCollectiveOfferManagingOfferer: Partial<GetCollectiveOfferManagingOffererResponseModel> = {}
+): GetCollectiveOfferManagingOffererResponseModel => {
+  const currentOffererId = offererId++
+  return {
+    id: currentOffererId,
+    name: `Nom de l'entité ${currentOffererId}`,
+    siren: '123456789',
+    ...customGetCollectiveOfferManagingOfferer,
+  }
+}
+
+export const defaultEducationalInstitution: EducationalInstitutionResponseModel =
+  {
+    city: 'Paris',
+    id: institutionId++,
+    institutionId: 'ABC123',
+    institutionType: 'LYCEE',
+    name: 'Sacré coeur',
+    phoneNumber: '0601020304',
+    postalCode: '75000',
+  }
+
+export const defaultEducationalRedactor: EducationalRedactorResponseModel = {
+  civility: 'Mr',
+  email: 'Jean.Dupont@example.com',
+  firstName: 'Jean',
+  lastName: 'Dupont',
+}
+
+export const defaultDMSApplicationForEAC: DMSApplicationForEAC = {
+  application: 123,
+  buildDate: null,
+  depositDate: new Date().toISOString(),
+  expirationDate: null,
+  instructionDate: null,
+  lastChangeDate: new Date().toISOString(),
+  procedure: 456,
+  processingDate: null,
+  userDeletionDate: null,
+  state: DMSApplicationstatus.EN_CONSTRUCTION,
+  venueId: 1,
+}
+
+export const defaultDMSApplicationForEACV2: DMSApplicationForEAC = {
+  application: 123,
+  buildDate: new Date().toISOString(),
+  depositDate: new Date().toISOString(),
+  expirationDate: new Date().toISOString(),
+  instructionDate: new Date().toISOString(),
+  lastChangeDate: new Date().toISOString(),
+  processingDate: new Date().toISOString(),
+  userDeletionDate: null,
+  procedure: 456,
+  state: DMSApplicationstatus.EN_CONSTRUCTION,
+  venueId: 1,
+}
+
+export const defaultGetVenue: GetVenueResponseModel = {
+  id: 1,
+  adageInscriptionDate: null,
+  audioDisabilityCompliant: false,
+  bankAccountStatus: null,
+  bannerMeta: null,
+  bannerUrl: null,
+  bookingEmail: '',
+  lastCollectiveDmsApplication: null,
+  collectiveDomains: [],
+  collectiveDescription: null,
+  collectiveEmail: null,
+  collectiveInterventionArea: null,
+  collectiveLegalStatus: null,
+  collectivePhone: null,
+  collectiveStudents: null,
+  collectiveWebsite: null,
+  comment: null,
+  contact: {
+    email: 'contact.email@test.com',
+    phoneNumber: null,
+    socialMedias: null,
+    website: 'https://my.website@test.com',
+  },
+  description: 'desc',
+  externalAccessibilityData: null,
+  externalAccessibilityId: null,
+  dateCreated: new Date().toISOString(),
+  hasAdageId: true,
+  hasOffers: true,
+  hasActiveIndividualOffer: true,
+  hasAtLeastOneBookableOffer: true,
+  hasHighlightRequest: false,
+  isOnboarded: false,
+  isOpenToPublic: true,
+  isPricingPoint: false,
+  location: {
+    id: 2,
+    banId: null,
+    city: 'Paris',
+    departmentCode: null,
+    inseeCode: null,
+    isManualEdition: false,
+    isVenueLocation: false,
+    label: 'Mon lieu',
+    latitude: 48.87004,
+    longitude: 2.3785,
+    postalCode: '75001',
+    street: '1 Rue de Paris',
+  },
+  managingOfferer: {
+    id: 1,
+    isValidated: true,
+    isClosed: false,
+    name: 'Ma super structure',
+    siren: '',
+  },
+  mentalDisabilityCompliant: true,
+  motorDisabilityCompliant: false,
+  name: 'Nom de la structure',
+  publicName: 'Nom public de la structure',
+  activity: DisplayableActivity.CULTURAL_CENTRE,
+  pricingPoint: null,
+  visualDisabilityCompliant: true,
+  isCaledonian: false,
+  isValidated: true,
+  isPermanent: true,
+  siret: '',
+  withdrawalDetails: null,
+  allowedOnAdage: true,
+  hasNonFreeOffers: true,
+  canDisplayHighlights: true,
+  hasNonDraftOffers: true,
+  volunteeringUrl: null,
+  openingHours: null,
+  state: null,
+}
+
+export const defaultGetCollectiveOfferRequest: GetCollectiveOfferRequestResponseModel =
+  {
+    dateCreated: new Date().toISOString(),
+    phoneNumber: null,
+    requestedDate: null,
+    totalStudents: null,
+    totalTeachers: null,
+    comment: 'comment',
+    institution: {
+      city: 'Paris',
+      institutionId: 'ABC123',
+      institutionType: 'LYCEE',
+      name: 'Sacré coeur',
+      postalCode: '75000',
+    },
+    redactor: {
+      email: 'Jean.Dupont@example.com',
+      firstName: 'Jean',
+      lastName: 'Dupont',
+    },
+  }

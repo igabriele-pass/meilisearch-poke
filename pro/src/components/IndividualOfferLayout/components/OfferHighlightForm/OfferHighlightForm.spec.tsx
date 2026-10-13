@@ -1,0 +1,401 @@
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import useSWR, { type SWRResponse } from 'swr'
+
+import { api } from '@/apiClient/api'
+import type { CancelablePromise } from '@/apiClient/compat'
+import type {
+  GetIndividualOfferResponseModel,
+  HighlightResponseModel,
+  ShortHighlightResponseModel,
+} from '@/apiClient/v1'
+import * as useAnalytics from '@/app/App/analytics/firebase'
+import { GET_HIGHLIGHTS_QUERY_KEY } from '@/commons/config/swrQueryKeys'
+import { EngagementEvents } from '@/commons/core/FirebaseEvents/constants'
+import { getIndividualOfferFactory } from '@/commons/utils/factories/individualApiFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import {
+  OFFER_HIGHLIGHT_FORM_ID,
+  OfferHighlightForm,
+} from './OfferHighlightForm'
+
+const mockLogEvent = vi.fn()
+
+vi.mock('swr', async (importOriginal) => ({
+  ...(await importOriginal()),
+  default: vi.fn(),
+}))
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getHighlights: vi.fn(),
+    getVenue: vi.fn(),
+    postHighlightRequestOffer: vi.fn(),
+  },
+}))
+
+const snackBarError = vi.fn()
+const snackBarSuccess = vi.fn()
+
+vi.mock('@/commons/hooks/useSnackBar', () => ({
+  useSnackBar: () => ({
+    success: snackBarSuccess,
+    error: snackBarError,
+  }),
+}))
+
+const mockedHighlights: HighlightResponseModel[] = [
+  {
+    id: 1,
+    name: 'Highlight 1',
+    description: 'Description 1',
+    availabilityDatespan: ['2025-01-01', '2025-01-15'],
+    highlightDatespan: ['2025-01-10', '2025-01-31'],
+    communicationDate: '2025-01-10',
+    mediationUrl: '',
+  },
+  {
+    id: 2,
+    name: 'Highlight 2',
+    description: 'Description 2',
+    availabilityDatespan: ['2025-02-01', '2025-02-15'],
+    highlightDatespan: ['2025-02-10', '2025-02-28'],
+    communicationDate: '2025-02-10',
+    mediationUrl: '',
+  },
+]
+
+function renderOfferHighlightForm({
+  offerId,
+  highlightRequests = [],
+  onSuccess = () => {},
+  submitLabel = 'Valider la sélection',
+}: {
+  offerId: number
+  highlightRequests?: Array<ShortHighlightResponseModel>
+  onSuccess?: () => void
+  submitLabel?: string
+}) {
+  return renderWithProviders(
+    <>
+      <OfferHighlightForm
+        offerId={offerId}
+        onSuccess={onSuccess}
+        highlightRequests={highlightRequests}
+      />
+      <button type="submit" form={OFFER_HIGHLIGHT_FORM_ID}>
+        {submitLabel}
+      </button>
+    </>,
+    {
+      storeOverrides: {
+        user: {
+          selectedPartnerVenue: makeGetVenueResponseModel({ id: 2 }),
+        },
+      },
+    }
+  )
+}
+
+describe('OfferHighlightForm', () => {
+  const useSWRMock = vi.mocked(useSWR)
+  const getHighlightsMock = vi.mocked(api.getHighlights)
+  const postHighlightRequestOfferMock = vi.mocked(api.postHighlightRequestOffer)
+
+  beforeEach(() => {
+    getHighlightsMock.mockResolvedValue(mockedHighlights)
+    postHighlightRequestOfferMock.mockResolvedValue(
+      getIndividualOfferFactory({
+        venue: { ...getIndividualOfferFactory().venue, id: 2 },
+      })
+    )
+    vi.mocked(api.getVenue).mockResolvedValue(
+      makeGetVenueResponseModel({ id: 2, hasHighlightRequest: true })
+    )
+
+    useSWRMock.mockReturnValue({
+      data: mockedHighlights,
+      isLoading: false,
+    } as SWRResponse)
+  })
+
+  it('should display the info callout', async () => {
+    renderOfferHighlightForm({ offerId: 1 })
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          'Pré-requis pour être sélectionnée par notre équipe éditoriale :'
+        )
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('should call useSWR', async () => {
+    renderOfferHighlightForm({ offerId: 1 })
+
+    await waitFor(() => {
+      expect(useSWRMock).toHaveBeenCalledWith(
+        [GET_HIGHLIGHTS_QUERY_KEY],
+        expect.any(Function),
+        { fallbackData: [] }
+      )
+    })
+  })
+
+  it('should delegate to api.getHighlights', async () => {
+    renderOfferHighlightForm({ offerId: 1 })
+
+    const fetcher = useSWRMock.mock.calls[0][1]
+    await fetcher!()
+
+    expect(getHighlightsMock).toHaveBeenCalledOnce()
+  })
+
+  it('should display spinner', () => {
+    useSWRMock.mockReturnValue({
+      isLoading: true,
+      data: undefined,
+    } as SWRResponse)
+
+    renderOfferHighlightForm({ offerId: 1 })
+
+    expect(screen.getByText('Chargement en cours')).toBeInTheDocument()
+  })
+
+  it('should display checkboxes', async () => {
+    renderOfferHighlightForm({ offerId: 1 })
+
+    const checkboxes = await screen.findAllByRole('checkbox')
+    expect(checkboxes).toHaveLength(mockedHighlights.length)
+  })
+
+  it('should check highlight when highlight request has already been made', async () => {
+    renderOfferHighlightForm({
+      offerId: 1,
+      highlightRequests: [{ name: 'Highlight 1', id: 1 }],
+    })
+
+    const checkboxes = await screen.findAllByRole('checkbox')
+    expect(checkboxes).toHaveLength(mockedHighlights.length)
+    expect(checkboxes[0]).toBeChecked()
+  })
+
+  it('should display the date', () => {
+    renderOfferHighlightForm({ offerId: 1 })
+
+    expect(screen.getByText('10/01/2025')).toBeInTheDocument()
+    expect(screen.getByText('31/01/2025')).toBeInTheDocument()
+    expect(screen.getByText('10/02/2025')).toBeInTheDocument()
+    expect(screen.getByText('28/02/2025')).toBeInTheDocument()
+  })
+
+  it('should call api.postHighlightRequestOffer and log', async () => {
+    vi.spyOn(useAnalytics, 'useAnalytics').mockImplementation(() => ({
+      logEvent: mockLogEvent,
+    }))
+    renderOfferHighlightForm({ offerId: 1 })
+
+    const checkbox = await screen.findByText(mockedHighlights[0].name)
+    await userEvent.click(checkbox)
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Valider la sélection',
+    })
+    await userEvent.click(submitButton)
+
+    expect(postHighlightRequestOfferMock).toHaveBeenCalledWith({
+      path: { offer_id: 1 },
+      body: { highlight_ids: [1] },
+    })
+    expect(mockLogEvent).toBeCalledWith(
+      EngagementEvents.HAS_REQUESTED_HIGHLIGHTS,
+      {
+        offerId: 1,
+        action: 'validated',
+      }
+    )
+  })
+
+  it('should not send unavailable highlight ids from existing requests', async () => {
+    renderOfferHighlightForm({
+      offerId: 1,
+      highlightRequests: [
+        { id: 999, name: 'Ancien temps fort non disponible' },
+      ],
+    })
+
+    const checkbox = await screen.findByText(mockedHighlights[0].name)
+    await userEvent.click(checkbox)
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Valider la sélection',
+    })
+    await userEvent.click(submitButton)
+
+    expect(postHighlightRequestOfferMock).toHaveBeenCalledWith({
+      path: { offer_id: 1 },
+      body: { highlight_ids: [1] },
+    })
+  })
+
+  it.each([true, false])(
+    'should refresh the venue before closing when highlight requests are selected=%s',
+    async (hasHighlightRequest) => {
+      const onSuccess = vi.fn(() => {
+        expect(api.getVenue).toHaveBeenCalledWith({
+          path: { venue_id: 2 },
+        })
+      })
+      vi.mocked(api.getVenue).mockResolvedValue(
+        makeGetVenueResponseModel({ id: 2, hasHighlightRequest })
+      )
+      renderOfferHighlightForm({
+        offerId: 1,
+        onSuccess,
+        highlightRequests: hasHighlightRequest
+          ? []
+          : [{ id: 1, name: mockedHighlights[0].name }],
+      })
+
+      await userEvent.click(await screen.findByText(mockedHighlights[0].name))
+      await userEvent.click(
+        screen.getByRole('button', { name: 'Valider la sélection' })
+      )
+
+      await waitFor(() => {
+        expect(onSuccess).toHaveBeenCalledOnce()
+      })
+      expect(postHighlightRequestOfferMock).toHaveBeenCalledWith({
+        path: { offer_id: 1 },
+        body: { highlight_ids: hasHighlightRequest ? [1] : [] },
+      })
+    }
+  )
+
+  it('should call notify.success when new highlights list is submitted', async () => {
+    renderOfferHighlightForm({ offerId: 1 })
+
+    const checkbox = await screen.findByText(mockedHighlights[0].name)
+    await userEvent.click(checkbox)
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Valider la sélection',
+    })
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(snackBarSuccess).toHaveBeenCalledWith(
+        'La sélection des temps forts a bien été prise en compte'
+      )
+    })
+  })
+
+  it('should notify a success when several highlights are submitted', async () => {
+    renderOfferHighlightForm({
+      offerId: 1,
+      highlightRequests: mockedHighlights,
+    })
+
+    await userEvent.click(await screen.findByText(mockedHighlights[0].name))
+    await userEvent.click(await screen.findByText(mockedHighlights[1].name))
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Valider la sélection',
+    })
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(snackBarSuccess).toHaveBeenCalledWith(
+        'Les temps forts ont été dissociés'
+      )
+    })
+  })
+
+  it('should not call notify.success when same highlights list is submitted', async () => {
+    renderOfferHighlightForm({ offerId: 1 })
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Valider la sélection',
+    })
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(snackBarSuccess).not.toHaveBeenCalled()
+    })
+  })
+
+  it('should call notify.error', async () => {
+    vi.spyOn(api, 'postHighlightRequestOffer').mockRejectedValueOnce('Error')
+    renderOfferHighlightForm({ offerId: 1 })
+
+    const checkbox = await screen.findByText(mockedHighlights[0].name)
+    await userEvent.click(checkbox)
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Valider la sélection',
+    })
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(snackBarError).toHaveBeenCalledWith(
+        'Une erreur est survenue lors de la sélection des temps forts'
+      )
+    })
+    expect(api.getVenue).not.toHaveBeenCalled()
+  })
+
+  it('should call onSuccess', async () => {
+    const onSuccess = vi.fn()
+    renderOfferHighlightForm({
+      offerId: 1,
+      onSuccess,
+    })
+
+    const checkbox = await screen.findByText(mockedHighlights[0].name)
+    await userEvent.click(checkbox)
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Valider la sélection' })
+    )
+
+    await waitFor(() => {
+      expect(onSuccess).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('should display the submit label when provided', () => {
+    renderOfferHighlightForm({
+      offerId: 1,
+      submitLabel: 'any-label',
+    })
+
+    expect(
+      screen.getByRole('button', { name: 'any-label' })
+    ).toBeInTheDocument()
+  })
+
+  it('should submit the form during submission', async () => {
+    postHighlightRequestOfferMock.mockReturnValue(
+      new Promise(
+        () => {}
+      ) as unknown as CancelablePromise<GetIndividualOfferResponseModel>
+    )
+
+    renderOfferHighlightForm({ offerId: 1 })
+
+    const checkbox = await screen.findByText(mockedHighlights[0].name)
+    await userEvent.click(checkbox)
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Valider la sélection',
+    })
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(postHighlightRequestOfferMock).toHaveBeenCalledTimes(1)
+    })
+  })
+})

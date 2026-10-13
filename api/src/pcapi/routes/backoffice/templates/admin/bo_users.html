@@ -1,0 +1,8 @@
+{% extends "layouts/admin.html" %}
+{% from "components/search/result_form.html" import build_result_page_form %}
+{% block title %}
+  Utilisateurs du BackOffice
+{% endblock title %}
+{% block main_content %}
+  {% include "components/search/result.html" %}
+{% endblock main_content %}

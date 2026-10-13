@@ -1,0 +1,191 @@
+from datetime import datetime
+
+import pytest
+import time_machine
+
+from pcapi.core.educational.factories import CollectiveBookingFactory
+from pcapi.core.educational.factories import CollectiveStockFactory
+from pcapi.core.educational.factories import EducationalRedactorFactory
+from pcapi.core.educational.factories import UsedCollectiveBookingFactory
+from pcapi.core.educational.models import CollectiveBooking
+from pcapi.core.educational.models import CollectiveBookingCancellationReasons
+from pcapi.core.educational.models import CollectiveBookingStatus
+from pcapi.core.educational.models import CollectiveLocationType
+from pcapi.core.mails import testing as mails_testing
+from pcapi.core.mails.transactional.brevo_template_ids import TransactionalEmail
+from pcapi.core.offerers.factories import VenueFactory
+from pcapi.core.testing import assert_num_queries
+from pcapi.models import db
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+class Returns200Test:
+    def test_refuse_collective_booking(self, client):
+        redactor = EducationalRedactorFactory(
+            civility="M.",
+            firstName="Jean",
+            lastName="Doudou",
+            email="jean.doux@example.com",
+        )
+        collective_stock = CollectiveStockFactory(
+            collectiveOffer__bookingEmails=["test_collective@mail.com", "test2_collective@mail.com"],
+            startDatetime=datetime(2020, 1, 1, 12, 53, 00),
+            endDatetime=datetime(2020, 1, 2, 13, 53, 00),
+        )
+        collective_booking = CollectiveBookingFactory(
+            status=CollectiveBookingStatus.PENDING,
+            educationalRedactor=redactor,
+            collectiveStock=collective_stock,
+        )
+
+        client = client.with_eac_token()
+        booking_id = collective_booking.id
+
+        num_queries = 1  # re-fetch collective booking with related data
+        num_queries += 1  # selectinload additional fees
+        num_queries += 1  # update booking
+        with assert_num_queries(num_queries):
+            response = client.post(f"/adage/v1/prebookings/{booking_id}/refuse")
+
+        refused_collective_booking = (
+            db.session.query(CollectiveBooking).filter(CollectiveBooking.id == collective_booking.id).first()
+        )
+
+        assert response.status_code == 200
+        assert refused_collective_booking.status == CollectiveBookingStatus.CANCELLED
+        assert (
+            refused_collective_booking.cancellationReason == CollectiveBookingCancellationReasons.REFUSED_BY_INSTITUTE
+        )
+
+        collective_offer = collective_stock.collectiveOffer
+        educational_institution = refused_collective_booking.educationalInstitution
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["template"] == TransactionalEmail.EDUCATIONAL_BOOKING_CANCELLATION.value.__dict__
+        assert mails_testing.outbox[0]["To"] == "test_collective@mail.com"
+        assert mails_testing.outbox[0]["Bcc"] == "test2_collective@mail.com"
+
+        assert mails_testing.outbox[0]["params"] == {
+            "OFFER_NAME": collective_offer.name,
+            "EDUCATIONAL_INSTITUTION_NAME": educational_institution.name,
+            "VENUE_NAME": collective_offer.venue.name,
+            "EVENT_DATE": "mercredi 1er janvier 2020",
+            "EVENT_HOUR": "13h53",
+            "START_DATE": "mercredi 1er janvier 2020",
+            "START_HOUR": "13h53",
+            "END_DATE": "jeudi 2 janvier 2020",
+            "END_HOUR": "14h53",
+            "REDACTOR_FIRSTNAME": redactor.firstName,
+            "REDACTOR_LASTNAME": redactor.lastName,
+            "REDACTOR_EMAIL": redactor.email,
+            "EDUCATIONAL_INSTITUTION_CITY": educational_institution.city,
+            "EDUCATIONAL_INSTITUTION_POSTAL_CODE": educational_institution.postalCode,
+            "COLLECTIVE_CANCELLATION_REASON": collective_booking.cancellationReason.value,
+            "BOOKING_ID": collective_booking.id,
+            "COLLECTIVE_OFFER_ID": collective_offer.id,
+            "COLLECTIVE_OFFER_ADDRESS": "À déterminer avec l'enseignant",
+        }
+
+    def test_refuse_collective_booking_location(self, client):
+        venue = VenueFactory()
+        collective_booking = CollectiveBookingFactory(
+            status=CollectiveBookingStatus.PENDING,
+            collectiveStock__collectiveOffer__locationType=CollectiveLocationType.ADDRESS,
+            collectiveStock__collectiveOffer__offererAddress=venue.offererAddress,
+            collectiveStock__collectiveOffer__venue=venue,
+        )
+        offer = collective_booking.collectiveStock.collectiveOffer
+
+        response = client.with_eac_token().post(f"/adage/v1/prebookings/{collective_booking.id}/refuse")
+
+        assert response.status_code == 200
+        assert response.json["address"] == offer.offererAddress.address.fullAddress
+
+    def test_refuse_collective_booking_when_pending(self, client):
+        collective_booking = CollectiveBookingFactory(
+            status=CollectiveBookingStatus.PENDING,
+            cancellationLimitDate=datetime(2020, 1, 1),
+            collectiveStock__collectiveOffer__bookingEmails=["johndoe@mail.com", "jacksmith@mail.com"],
+        )
+
+        client.with_eac_token()
+        response = client.post(f"/adage/v1/prebookings/{collective_booking.id}/refuse")
+
+        refused_collective_booking = (
+            db.session.query(CollectiveBooking).filter(CollectiveBooking.id == collective_booking.id).first()
+        )
+
+        assert response.status_code == 200
+        assert refused_collective_booking.status == CollectiveBookingStatus.CANCELLED
+        assert (
+            refused_collective_booking.cancellationReason == CollectiveBookingCancellationReasons.REFUSED_BY_INSTITUTE
+        )
+        assert len(mails_testing.outbox) == 1
+
+    @time_machine.travel("2022-11-17 15:00:00")
+    def test_refuse_collective_booking_when_confirmed(self, client):
+        collective_booking = CollectiveBookingFactory(
+            status=CollectiveBookingStatus.CONFIRMED,
+            cancellationLimitDate=datetime(2022, 11, 18),
+            collectiveStock__collectiveOffer__bookingEmails=["johndoe@mail.com", "jacksmith@mail.com"],
+        )
+
+        client.with_eac_token()
+        response = client.post(f"/adage/v1/prebookings/{collective_booking.id}/refuse")
+
+        refused_collective_booking = (
+            db.session.query(CollectiveBooking).filter(CollectiveBooking.id == collective_booking.id).first()
+        )
+
+        assert response.status_code == 200
+        assert refused_collective_booking.status == CollectiveBookingStatus.CANCELLED
+        assert (
+            refused_collective_booking.cancellationReason == CollectiveBookingCancellationReasons.REFUSED_BY_HEADMASTER
+        )
+        assert len(mails_testing.outbox) == 1
+
+    @time_machine.travel("2022-05-05 10:00:00")
+    def test_returns_no_error_when_already_cancelled(self, client):
+        booking = CollectiveBookingFactory(
+            status=CollectiveBookingStatus.CANCELLED, cancellationLimitDate=datetime(2022, 10, 10)
+        )
+
+        client = client.with_eac_token()
+        response = client.post(f"/adage/v1/prebookings/{booking.id}/refuse")
+
+        assert response.status_code == 200
+        assert len(mails_testing.outbox) == 0
+
+
+class Returns400Test:
+    def test_returns_error_when_not_refusable(self, client):
+        booking = UsedCollectiveBookingFactory()
+
+        client = client.with_eac_token()
+        response = client.post(f"/adage/v1/prebookings/{booking.id}/refuse")
+
+        assert response.status_code == 422
+        assert response.json == {"code": "EDUCATIONAL_BOOKING_NOT_REFUSABLE"}
+        assert len(mails_testing.outbox) == 0
+
+    def test_returns_error_when_no_educational_booking_found(self, client):
+        client = client.with_eac_token()
+        response = client.post("/adage/v1/prebookings/123/refuse")
+
+        assert response.status_code == 404
+        assert response.json == {"code": "EDUCATIONAL_BOOKING_NOT_FOUND"}
+        assert len(mails_testing.outbox) == 0
+
+    def test_returns_error_when_cancellation_limit_date_is_passed(self, client):
+        booking = CollectiveBookingFactory(
+            status=CollectiveBookingStatus.CONFIRMED,
+            cancellationLimitDate=datetime(2020, 1, 1),
+        )
+
+        client.with_eac_token()
+        response = client.post(f"/adage/v1/prebookings/{booking.id}/refuse")
+
+        assert response.status_code == 422
+        assert response.json == {"code": "EDUCATIONAL_BOOKING_NOT_REFUSABLE"}
+        assert len(mails_testing.outbox) == 0

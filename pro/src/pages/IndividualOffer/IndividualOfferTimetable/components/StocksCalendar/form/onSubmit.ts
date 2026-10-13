@@ -1,0 +1,254 @@
+import { format, sub } from 'date-fns'
+import { mutate } from 'swr'
+
+import { api } from '@/apiClient/api'
+import { getHumanReadableApiError } from '@/apiClient/helpers'
+import type { useSnackBar } from '@/commons/hooks/useSnackBar'
+import {
+  FORMAT_ISO_DATE_ONLY,
+  isDateValid,
+  toISOStringWithoutMilliseconds,
+} from '@/commons/utils/date'
+import { serializeDateTimeToUTCFromLocalDepartment } from '@/commons/utils/timezone'
+
+import type { stockQueryKeysType } from '../StocksCalendar'
+import {
+  getDatesInInterval,
+  getDatesWithMonthlyOption,
+  isTimeInTheFuture,
+} from './recurrenceUtils'
+import {
+  type RecurrenceFormValues,
+  RecurrenceType,
+  type StocksEvent,
+} from './types'
+
+type StocksEventWithOptionalId = Omit<StocksEvent, 'id'> & { id?: number }
+
+export const onSubmit = async (
+  values: RecurrenceFormValues,
+  departmentCode: string,
+  offerId: number,
+  snackBar: ReturnType<typeof useSnackBar>,
+  stockQueryKeys: stockQueryKeysType,
+  addStocksBtnId?: string
+) => {
+  const dates = getRecurrenceDates(values)
+  const generatedStocks = generateStocksForDates(values, dates, departmentCode)
+
+  const serializedStocksToAdd = generatedStocks
+    // keep only the fields that are needed for the API
+    .map(
+      ({
+        id,
+        beginningDatetime,
+        bookingLimitDatetime,
+        priceCategoryId,
+        quantity,
+      }) => ({
+        id,
+        beginningDatetime,
+        bookingLimitDatetime,
+        priceCategoryId,
+        quantity,
+      })
+    )
+
+  // Upsert stocks if there are stocks to upsert
+  if (serializedStocksToAdd.length > 0) {
+    const MAX_STOCKS = 2500
+
+    if (serializedStocksToAdd.length > MAX_STOCKS) {
+      snackBar.error(
+        `Impossible d'ajouter plus de ${MAX_STOCKS} lignes de dates à un évènement.`
+      )
+      return
+    }
+
+    try {
+      const data = await mutate(
+        stockQueryKeys,
+        api.bulkCreateEventStocks({
+          body: {
+            offerId,
+            stocks: serializedStocksToAdd,
+          },
+        }),
+        {
+          revalidate: false,
+        }
+      )
+
+      const stockCount = data?.editedStockCount ?? 0
+      snackBar.success(
+        stockCount > 1
+          ? `${new Intl.NumberFormat('fr-FR').format(
+              stockCount
+            )} nouvelles dates ont été ajoutées`
+          : `${stockCount} nouvelle date a été ajoutée`,
+        addStocksBtnId
+      )
+    } catch (error) {
+      snackBar.error(
+        getHumanReadableApiError(
+          error,
+          'Une erreur est survenue lors de l’enregistrement de vos stocks.'
+        )
+      )
+    }
+  }
+}
+
+const getYearMonthDay = (date: string) => {
+  const [year, month, day] = date.split('-')
+  return {
+    year: Number.parseInt(year, 10),
+    month: Number.parseInt(month, 10) - 1,
+    day: Number.parseInt(day, 10),
+  }
+}
+
+const getRecurrenceDates = (values: RecurrenceFormValues): Date[] => {
+  switch (values.recurrenceType) {
+    case RecurrenceType.UNIQUE: {
+      /* istanbul ignore next: should be already validated by yup */
+      if (!isDateValid(values.startingDate)) {
+        throw new Error('Starting date is empty')
+      }
+      const { year, month, day } = getYearMonthDay(values.startingDate)
+      return [new Date(year, month, day)]
+    }
+
+    case RecurrenceType.DAILY: {
+      /* istanbul ignore next: should be already validated by yup */
+      if (
+        !isDateValid(values.startingDate) ||
+        !isDateValid(values.endingDate)
+      ) {
+        throw new Error('Starting or ending date is empty')
+      }
+      const {
+        year: startYear,
+        month: startMonth,
+        day: startDay,
+      } = getYearMonthDay(values.startingDate)
+      const {
+        year: endYear,
+        month: endMonth,
+        day: endDay,
+      } = getYearMonthDay(values.endingDate)
+
+      return getDatesInInterval(
+        new Date(startYear, startMonth, startDay),
+        new Date(endYear, endMonth, endDay)
+      )
+    }
+
+    case RecurrenceType.WEEKLY: {
+      /* istanbul ignore next: should be already validated by yup */
+      if (
+        !isDateValid(values.startingDate) ||
+        !isDateValid(values.endingDate) ||
+        values.days.length === 0
+      ) {
+        throw new Error('Starting, ending date or days is empty')
+      }
+      const {
+        year: startYear,
+        month: startMonth,
+        day: startDay,
+      } = getYearMonthDay(values.startingDate)
+      const {
+        year: endYear,
+        month: endMonth,
+        day: endDay,
+      } = getYearMonthDay(values.endingDate)
+
+      return getDatesInInterval(
+        new Date(startYear, startMonth, startDay),
+        new Date(endYear, endMonth, endDay),
+        values.days
+      )
+    }
+    case RecurrenceType.MONTHLY: {
+      /* istanbul ignore next: should be already validated by yup */
+      if (
+        !isDateValid(values.startingDate) ||
+        !isDateValid(values.endingDate)
+      ) {
+        throw new Error('Starting or ending date is empty')
+      }
+      if (values.monthlyOption === null || values.monthlyOption === undefined) {
+        throw new Error('Monthly option is empty')
+      }
+      const {
+        year: startYear,
+        month: startMonth,
+        day: startDay,
+      } = getYearMonthDay(values.startingDate)
+      const {
+        year: endYear,
+        month: endMonth,
+        day: endDay,
+      } = getYearMonthDay(values.endingDate)
+
+      return getDatesWithMonthlyOption(
+        new Date(startYear, startMonth, startDay),
+        new Date(endYear, endMonth, endDay),
+        values.monthlyOption
+      )
+    }
+
+    default:
+      /* istanbul ignore next: should be already validated by yup */
+      throw new Error(`Unhandled recurrence type: ${values.recurrenceType}`)
+  }
+}
+
+const generateStocksForDates = (
+  values: RecurrenceFormValues,
+  dates: Date[],
+  departmentCode?: string | null
+): StocksEventWithOptionalId[] =>
+  dates.flatMap((beginningDate) =>
+    values.beginningTimes
+      .map((time) => time.beginningTime)
+      // We filter out the times that are in the past for today
+      .filter((beginningTime) =>
+        isTimeInTheFuture(beginningDate, beginningTime)
+      )
+      .flatMap((beginningTime) =>
+        values.quantityPerPriceCategories.flatMap(
+          (quantityPerPriceCategory) => {
+            /* istanbul ignore next: should be already validated by yup */
+            if (beginningTime === '') {
+              throw new Error('Some values are empty')
+            }
+
+            const beginningDatetime = serializeDateTimeToUTCFromLocalDepartment(
+              format(beginningDate, FORMAT_ISO_DATE_ONLY),
+              beginningTime,
+              departmentCode
+            )
+            const bookingLimitDateInterval = !values.bookingLimitDateInterval
+              ? 0
+              : values.bookingLimitDateInterval
+
+            return {
+              priceCategoryId: quantityPerPriceCategory.priceCategory
+                ? Number.parseInt(quantityPerPriceCategory.priceCategory, 10)
+                : 0,
+              quantity: quantityPerPriceCategory.quantity || null,
+              beginningDatetime,
+              bookingLimitDatetime: toISOStringWithoutMilliseconds(
+                sub(new Date(beginningDatetime), {
+                  days: bookingLimitDateInterval,
+                })
+              ),
+              bookingsQuantity: 0,
+              isEventDeletable: true,
+            }
+          }
+        )
+      )
+  )

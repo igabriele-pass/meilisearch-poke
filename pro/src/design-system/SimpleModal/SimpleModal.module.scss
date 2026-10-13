@@ -1,0 +1,88 @@
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+
+.dialog-wrapper {
+  background-color: var(--color-background-default);
+  display: flex;
+  padding: var(--size-spacing-xxl);
+  border-radius: var(--size-border-radius-m);
+  flex-direction: column;
+  will-change: transform, opacity;
+  width: 100vw;
+  max-height: 100dvh;
+  overflow-y: auto;
+  position: fixed;
+  bottom: 0;
+  left: 0;
+
+  @media screen and (prefers-reduced-motion: no-preference) and (max-width: size.$tablet) {
+    animation: slide-in-up 500ms;
+  }
+
+  @media (min-width: size.$tablet) {
+    max-width: rem.torem(512px);
+    margin: 0;
+    bottom: unset;
+    position: unset;
+  }
+
+  @keyframes slide-in-up {
+    from {
+      transform: translateY(100%);
+      opacity: 0;
+    }
+
+    to {
+      transform: translateY(0);
+      opacity: 1;
+    }
+  }
+}
+
+.dialog-container {
+  display: flex;
+  gap: var(--size-spacing-xl);
+  flex-direction: column;
+  align-items: center;
+}
+
+.dialog-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-l);
+  align-items: center;
+  text-align: center;
+}
+
+.dialog-content-title {
+  @include fonts.title4;
+
+  text-align: center;
+}
+
+.action-buttons {
+  display: flex;
+  gap: var(--size-spacing-l);
+  margin-top: auto;
+  flex-direction: column;
+  align-items: center;
+
+  @media (min-width: size.$tablet) {
+    flex-flow: row wrap;
+    justify-content: center;
+  }
+}
+
+@keyframes simple-appear {
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(-25px);
+  }
+}
+
+.close-button {
+  display: flex;
+  align-self: flex-end;
+  margin-bottom: rem.torem(10px);
+}

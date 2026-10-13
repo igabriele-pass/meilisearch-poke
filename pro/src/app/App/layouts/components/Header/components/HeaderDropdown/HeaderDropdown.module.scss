@@ -1,0 +1,93 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/variables/_z-index.scss" as zIndex;
+@use "styles/mixins/_outline.scss" as outline;
+
+.profile-menu-wrapper {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.profile-menu-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-m);
+
+  &-email {
+    max-width: 100%;
+    overflow-wrap: break-word;
+    margin-bottom: var(--size-spacing-s);
+  }
+
+  &-title {
+    margin-top: var(--size-spacing-s);
+
+    @include fonts.body-accent-xs;
+
+    color: var(--color-text-subtle);
+  }
+
+  &-separator {
+    border: none;
+    border-top: rem.torem(1px) solid var(--separator-color-subtle);
+    margin-top: var(--size-spacing-s);
+    margin-bottom: var(--size-spacing-s);
+  }
+}
+
+.profile-menu-panel-wrapper {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 150ms ease,
+    visibility 0s linear 150ms;
+  z-index: zIndex.$dropdown-button-z-index;
+  width: min(rem.torem(320px), calc(100vw - (2 * var(--size-spacing-l))));
+  margin-top: var(--size-spacing-s);
+  border-radius: var(--size-spacing-s);
+  border: rem.torem(1px) solid var(--color-border-subtle);
+  background-color: var(--color-background-default);
+  box-shadow: var(--shadow-overlay);
+  padding: var(--size-spacing-s) var(--size-spacing-l) var(--size-spacing-l)
+    var(--size-spacing-l);
+
+  &-open {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+    transition:
+      opacity 150ms ease,
+      visibility 0s;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    transition: none;
+
+    &-open {
+      transition: none;
+    }
+  }
+
+  @media screen and (max-width: size.$tablet) {
+    position: fixed;
+    inset: size.$top-menu-height 0 0;
+    width: auto;
+    max-width: none;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    overflow-y: auto;
+  }
+
+  &-close {
+    display: flex;
+    justify-content: end;
+  }
+}

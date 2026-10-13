@@ -1,0 +1,206 @@
+import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { FormProvider, useForm } from 'react-hook-form'
+import { axe } from 'vitest-axe'
+
+import {
+  SubcategoryIdEnum,
+  VenueState,
+  WithdrawalTypeEnum,
+} from '@/apiClient/v1'
+import { IndividualOfferContext } from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import {
+  getIndividualOfferFactory,
+  individualOfferContextValuesFactory,
+  subcategoryFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { MOCKED_SUBCATEGORY } from '@/pages/IndividualOffer/commons/__mocks__/constants'
+
+import type { IndividualOfferPracticalInfosFormValues } from '../../commons/types'
+import {
+  IndividualOfferPracticalInfosForm,
+  type IndividualOfferPracticalInfosFormProps,
+} from './IndividualOfferPracticalInfosForm'
+
+function renderIndividualOfferPracticalInfosForm(
+  props?: Partial<IndividualOfferPracticalInfosFormProps>,
+  isVenueClosed = false
+) {
+  function IndividualOfferPracticalInfosFormWrapper() {
+    const form = useForm<IndividualOfferPracticalInfosFormValues>({
+      defaultValues: {
+        withdrawalType: WithdrawalTypeEnum.BY_EMAIL,
+      },
+    })
+    return (
+      <IndividualOfferContext.Provider
+        value={individualOfferContextValuesFactory({
+          categories: [],
+          subCategories: [],
+        })}
+      >
+        <FormProvider {...form}>
+          <IndividualOfferPracticalInfosForm
+            offer={getIndividualOfferFactory()}
+            stocks={[]}
+            subCategory={MOCKED_SUBCATEGORY.WIDTHDRAWABLE_OFFLINE}
+            {...props}
+          />
+        </FormProvider>
+      </IndividualOfferContext.Provider>
+    )
+  }
+  return renderWithProviders(<IndividualOfferPracticalInfosFormWrapper />, {
+    user: sharedCurrentUserFactory(),
+    storeOverrides: {
+      user: {
+        currentUser: sharedCurrentUserFactory(),
+        selectedPartnerVenue: isVenueClosed
+          ? makeGetVenueResponseModel({ id: 1, state: VenueState.CLOSED })
+          : makeGetVenueResponseModel({ id: 1 }),
+      },
+    },
+  })
+}
+
+describe('IndividualOfferPracticalInfosForm', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderIndividualOfferPracticalInfosForm({
+      offer: getIndividualOfferFactory({ isEvent: false }),
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show the warning booking callout if the offer is not an event', () => {
+    renderIndividualOfferPracticalInfosForm({
+      offer: getIndividualOfferFactory({ isEvent: false }),
+    })
+
+    expect(screen.getByText(/Validation obligatoire/)).toBeInTheDocument()
+  })
+
+  it('should show the withdrawal block if the sub category is withdrawable', () => {
+    renderIndividualOfferPracticalInfosForm({
+      offer: getIndividualOfferFactory({
+        subcategoryId: SubcategoryIdEnum.FESTIVAL_CINE,
+      }),
+    })
+
+    expect(
+      screen.getByRole('group', {
+        name: /Précisez la façon dont vous distribuerez les billets/,
+      })
+    ).toBeInTheDocument()
+  })
+
+  it('should show a warning callout if the offer is physical and offline', () => {
+    renderIndividualOfferPracticalInfosForm({
+      offer: getIndividualOfferFactory({
+        subcategoryId: SubcategoryIdEnum.FESTIVAL_CINE,
+        isEvent: false,
+      }),
+    })
+
+    expect(screen.getByText(/Livraison interdite/)).toBeInTheDocument()
+  })
+
+  it('should show the notification email field if the notification checkbox is checked', async () => {
+    renderIndividualOfferPracticalInfosForm()
+
+    const notificationCheckbox = screen.getByRole('checkbox', {
+      name: 'Être notifié par email des réservations',
+    })
+
+    expect(notificationCheckbox).not.toBeChecked()
+
+    expect(
+      screen.queryByLabelText('Email auquel envoyer les notifications')
+    ).not.toBeInTheDocument()
+    expect(screen.queryByText('Obligatoire')).not.toBeInTheDocument()
+
+    await userEvent.click(notificationCheckbox)
+
+    expect(
+      screen.getByLabelText(/Email auquel envoyer les notifications/)
+    ).toBeInTheDocument()
+    expect(screen.getByText('Obligatoire')).toBeInTheDocument()
+  })
+
+  it('should show a warning callout with a 10 days expiration if the offer is a physical book', () => {
+    renderIndividualOfferPracticalInfosForm({
+      offer: getIndividualOfferFactory({
+        subcategoryId: SubcategoryIdEnum.LIVRE_PAPIER,
+        isEvent: false,
+      }),
+      subCategory: subcategoryFactory({ id: SubcategoryIdEnum.LIVRE_PAPIER }),
+    })
+
+    expect(
+      screen.getByText(
+        /la réservation sera annulée et remise en vente après 10 jours/
+      )
+    ).toBeInTheDocument()
+  })
+  it('should allow the user to edit the external url even if the offer is synchronized', () => {
+    renderIndividualOfferPracticalInfosForm({
+      offer: getIndividualOfferFactory({
+        subcategoryId: SubcategoryIdEnum.LIVRE_PAPIER,
+        isEvent: false,
+        lastProvider: { name: 'provider' },
+      }),
+      subCategory: subcategoryFactory({
+        id: SubcategoryIdEnum.LIVRE_PAPIER,
+      }),
+    })
+
+    expect(
+      screen.getByLabelText(/URL de votre site ou billetterie/)
+    ).toBeEnabled()
+    expect(
+      screen.getByText('Cette offre est synchronisée avec provider')
+    ).toBeInTheDocument()
+  })
+
+  it('should be disabled if the venue is closed', () => {
+    renderIndividualOfferPracticalInfosForm(undefined, true)
+
+    expect(screen.getByLabelText(/Informations complémentaires/)).toBeDisabled()
+    expect(
+      screen.getByLabelText(/URL de votre site ou billetterie/)
+    ).toBeDisabled()
+  })
+
+  it('should not allow the user to edit the complementary infos if the venue is synchronized but not with allocine', () => {
+    renderIndividualOfferPracticalInfosForm({
+      offer: getIndividualOfferFactory({
+        subcategoryId: SubcategoryIdEnum.LIVRE_PAPIER,
+        isEvent: false,
+        lastProvider: { name: 'provider' },
+      }),
+      subCategory: subcategoryFactory({
+        id: SubcategoryIdEnum.LIVRE_PAPIER,
+      }),
+    })
+
+    expect(screen.getByLabelText(/Informations complémentaires/)).toBeDisabled()
+  })
+
+  it('should allow the user to edit the complementary infos if the venue is synchronized with allocine', () => {
+    renderIndividualOfferPracticalInfosForm({
+      offer: getIndividualOfferFactory({
+        subcategoryId: SubcategoryIdEnum.LIVRE_PAPIER,
+        isEvent: false,
+        lastProvider: { name: 'allociné' },
+      }),
+      subCategory: subcategoryFactory({
+        id: SubcategoryIdEnum.LIVRE_PAPIER,
+      }),
+    })
+
+    expect(screen.getByLabelText(/Informations complémentaires/)).toBeEnabled()
+  })
+})

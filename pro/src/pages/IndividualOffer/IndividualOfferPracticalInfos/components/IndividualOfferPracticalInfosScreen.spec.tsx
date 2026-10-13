@@ -1,0 +1,240 @@
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { SubcategoryIdEnum, WithdrawalTypeEnum } from '@/apiClient/v1'
+import { IndividualOfferContext } from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import { OFFER_WIZARD_MODE } from '@/commons/core/Offers/constants'
+import * as useOfferWizardMode from '@/commons/hooks/useOfferWizardMode'
+import {
+  getIndividualOfferFactory,
+  individualOfferContextValuesFactory,
+  subcategoryFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { SnackBarContainer } from '@/components/SnackBarContainer/SnackBarContainer'
+
+import {
+  IndividualOfferPracticalInfosScreen,
+  type IndividualOfferPracticalInfosScreenProps,
+} from './IndividualOfferPracticalInfosScreen'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getOffer: vi.fn(),
+    patchOffer: vi.fn(),
+  },
+}))
+
+vi.mock('@/commons/hooks/useOfferWizardMode', () => ({
+  useOfferWizardMode: vi.fn(() => OFFER_WIZARD_MODE.CREATION),
+}))
+
+const mockNavigate = vi.fn()
+
+vi.mock('react-router', async () => {
+  return {
+    ...(await vi.importActual('react-router')),
+    useNavigate: () => mockNavigate,
+    default: vi.fn(),
+  }
+})
+
+Element.prototype.scrollIntoView = vi.fn()
+
+const LABELS = {
+  heading: 'Informations pratiques',
+  saveButton: 'Enregistrer et continuer',
+}
+
+function renderIndividualOfferPracticalInfosScreen(
+  props?: Partial<IndividualOfferPracticalInfosScreenProps>
+) {
+  return renderWithProviders(
+    <IndividualOfferContext.Provider
+      value={individualOfferContextValuesFactory({
+        categories: [],
+        subCategories: [
+          subcategoryFactory({
+            id: SubcategoryIdEnum.CONCERT,
+            canBeWithdrawable: true,
+          }),
+        ],
+      })}
+    >
+      <IndividualOfferPracticalInfosScreen
+        offer={getIndividualOfferFactory()}
+        stocks={[]}
+        {...props}
+      />
+      <SnackBarContainer />
+    </IndividualOfferContext.Provider>,
+    {
+      user: sharedCurrentUserFactory(),
+      storeOverrides: {
+        user: {
+          currentUser: sharedCurrentUserFactory(),
+          selectedPartnerVenue: makeGetVenueResponseModel({ id: 1 }),
+        },
+      },
+    }
+  )
+}
+
+describe('IndividualOfferPracticalInfosScreen', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderIndividualOfferPracticalInfosScreen()
+
+    await screen.findByRole('heading', { name: LABELS.heading })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show the form action bar in creation mode', async () => {
+    renderIndividualOfferPracticalInfosScreen()
+
+    await waitFor(() => {
+      screen.getByRole('heading', { name: LABELS.heading })
+    })
+
+    expect(
+      screen.getByRole('button', { name: LABELS.saveButton })
+    ).toBeInTheDocument()
+  })
+
+  it('should open the warning dialog when submitting the form on an offer with active booking if the withdrawal info were modified', async () => {
+    renderIndividualOfferPracticalInfosScreen({
+      offer: getIndividualOfferFactory({
+        withdrawalType: WithdrawalTypeEnum.BY_EMAIL,
+        withdrawalDelay: 10,
+        withdrawalDetails: 'test',
+        hasPendingBookings: true,
+        subcategoryId: SubcategoryIdEnum.CONCERT,
+        bookingContact: 'test@test.co',
+      }),
+    })
+
+    await waitFor(() => {
+      screen.getByRole('heading', { name: LABELS.heading })
+    })
+
+    await userEvent.click(
+      screen.getByRole('radio', {
+        name: 'Retrait sur place (guichet, comptoir...)',
+      })
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', { name: LABELS.saveButton })
+    )
+
+    expect(
+      screen.getByRole('heading', {
+        name: /Les changements vont impacter l’ensemble des réservations en cours associées/i,
+      })
+    ).toBeInTheDocument()
+  })
+
+  it('should save and navigate to the next step after confirming the warning dialog', async () => {
+    vi.spyOn(api, 'patchOffer').mockResolvedValue(getIndividualOfferFactory())
+
+    renderIndividualOfferPracticalInfosScreen({
+      offer: getIndividualOfferFactory({
+        withdrawalType: WithdrawalTypeEnum.BY_EMAIL,
+        withdrawalDelay: 10,
+        withdrawalDetails: 'test',
+        hasPendingBookings: true,
+        subcategoryId: SubcategoryIdEnum.CONCERT,
+        bookingContact: 'test@test.co',
+      }),
+    })
+
+    await waitFor(() => {
+      screen.getByRole('heading', { name: LABELS.heading })
+    })
+
+    await userEvent.click(
+      screen.getByRole('radio', {
+        name: 'Retrait sur place (guichet, comptoir...)',
+      })
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: LABELS.saveButton })
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Prévenir les jeunes' })
+    )
+
+    await waitFor(() => {
+      expect(api.patchOffer).toHaveBeenCalled()
+    })
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.stringContaining('/creation/recapitulatif')
+    )
+  })
+
+  it('should update the offer when submitting the form', async () => {
+    renderIndividualOfferPracticalInfosScreen()
+
+    const updateSpy = vi
+      .spyOn(api, 'patchOffer')
+      .mockResolvedValue(getIndividualOfferFactory())
+
+    await waitFor(() => {
+      screen.getByRole('heading', { name: LABELS.heading })
+    })
+
+    await userEvent.click(
+      screen.getByRole('button', { name: LABELS.saveButton })
+    )
+
+    expect(updateSpy).toHaveBeenCalled()
+  })
+
+  it('should navigate to the stocks page whern clicking previous while on creation mode', async () => {
+    renderIndividualOfferPracticalInfosScreen({})
+
+    await waitFor(() => {
+      screen.getByRole('heading', { name: LABELS.heading })
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retour' }))
+
+    expect(mockNavigate).toHaveBeenCalledWith(
+      expect.stringContaining('/creation/horaires')
+    )
+  })
+
+  it('should show a success snackbar and not navigate in edition mode', async () => {
+    vi.spyOn(useOfferWizardMode, 'useOfferWizardMode').mockImplementation(
+      () => OFFER_WIZARD_MODE.EDITION
+    )
+    vi.spyOn(api, 'patchOffer').mockResolvedValue(getIndividualOfferFactory())
+
+    renderIndividualOfferPracticalInfosScreen({})
+
+    await waitFor(() => {
+      screen.getByRole('heading', { name: LABELS.heading })
+    })
+
+    await userEvent.type(
+      screen.getByRole('textbox', { name: /Informations complémentaires/ }),
+      'nouvelles infos'
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Enregistrer les modifications' })
+    )
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByText('Votre offre a bien été modifiée.').length
+      ).toBeGreaterThan(0)
+    })
+    expect(mockNavigate).not.toHaveBeenCalled()
+  })
+})

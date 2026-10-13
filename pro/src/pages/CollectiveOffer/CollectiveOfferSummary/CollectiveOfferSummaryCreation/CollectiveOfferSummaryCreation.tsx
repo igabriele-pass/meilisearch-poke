@@ -1,0 +1,72 @@
+import { useParams } from 'react-router'
+
+import { Mode } from '@/commons/core/OfferEducational/types'
+import { ActionsBarSticky } from '@/components/ActionsBarSticky/ActionsBarSticky'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonVariant } from '@/design-system/Button/types'
+import {
+  type MandatoryCollectiveOfferFromParamsProps,
+  withCollectiveOfferFromParams,
+} from '@/pages/CollectiveOffer/CollectiveOffer/components/OfferEducational/useCollectiveOfferFromParams'
+import { CollectiveOfferLayout } from '@/pages/CollectiveOffer/CollectiveOfferLayout/CollectiveOfferLayout'
+
+import { CollectiveOfferSummary } from '../components/CollectiveOfferSummary/CollectiveOfferSummary'
+
+export const CollectiveOfferSummaryCreation = ({
+  offer,
+  isTemplate,
+}: MandatoryCollectiveOfferFromParamsProps) => {
+  const { requete: requestId } = useParams()
+
+  const nextRedirectionUrl = offer.isTemplate
+    ? `/offre/${offer.id}/collectif/vitrine/creation/apercu`
+    : `/offre/${offer.id}/collectif/creation/apercu`
+
+  const withRequestId = requestId ? `?requete=${requestId}` : ''
+  const backRedirectionUrl = offer.isTemplate
+    ? `/offre/collectif/vitrine/${offer.id}/creation`
+    : `/offre/${offer.id}/collectif/etablissement${withRequestId}`
+
+  return (
+    <CollectiveOfferLayout
+      subTitle={offer.name}
+      isTemplate={isTemplate}
+      isCreation={true}
+      offer={offer}
+    >
+      <div>
+        <CollectiveOfferSummary
+          offer={offer}
+          offerEditLink={`/offre/collectif${
+            offer.isTemplate ? '/vitrine' : ''
+          }/${offer.id}/creation`}
+          stockEditLink={`/offre/${offer.id}/collectif/stocks`}
+          institutionEditLink={`/offre/${offer.id}/collectif/etablissement`}
+        />
+        <ActionsBarSticky>
+          <ActionsBarSticky.Left>
+            <Button
+              as="router-link"
+              variant={ButtonVariant.SECONDARY}
+              to={backRedirectionUrl}
+              label="Retour"
+            />
+          </ActionsBarSticky.Left>
+          <ActionsBarSticky.Right dirtyForm={false} mode={Mode.CREATION}>
+            <Button
+              as="router-link"
+              to={nextRedirectionUrl}
+              label="Enregistrer et continuer"
+            />
+          </ActionsBarSticky.Right>
+        </ActionsBarSticky>
+      </div>
+    </CollectiveOfferLayout>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = withCollectiveOfferFromParams(
+  CollectiveOfferSummaryCreation
+)

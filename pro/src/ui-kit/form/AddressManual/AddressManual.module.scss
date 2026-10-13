@@ -1,0 +1,22 @@
+.address-manual-wrapper {
+  margin-top: var(--size-spacing-s);
+}
+
+.inline-fields {
+  display: flex;
+  gap: var(--size-spacing-s);
+  align-items: flex-start;
+
+  .field-cp {
+    flex: 1;
+  }
+
+  .field-city {
+    flex: 2;
+  }
+}
+
+.callout {
+  margin-top: var(--size-spacing-s);
+  margin-bottom: var(--size-spacing-s);
+}

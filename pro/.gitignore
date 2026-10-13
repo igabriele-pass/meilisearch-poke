@@ -1,0 +1,59 @@
+# See https://help.github.com/ignore-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+
+# testing
+/coverage
+/testcafe_screenshots
+/playwright-report/
+/test-results/
+/blob-report/
+.vitest_cache
+coverage
+bundleStats.html
+
+# production
+/built
+/build
+/docs-build
+target.zip
+
+# misc
+.DS_Store
+.env.local
+.env.local.secret
+.env.development.local
+.env.staging.local
+.env.integration.local
+.env.test.local
+.env.testing.local
+.env.production.local
+.tern-port
+.tern-project
+.*.swp
+\#*\#
+*~
+
+npm-debug.log*
+pnpm-debug.log*
+
+*.apk
+
+docker-compose.yml
+env_file
+
+# IDEA
+.idea/
+*.iml
+
+# licenses
+licenses
+licenses.json
+
+# reports
+/.vitest-reports
+tyrion_report.html
+result.html
+
+public/icons/*.svg

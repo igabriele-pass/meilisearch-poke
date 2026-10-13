@@ -1,0 +1,205 @@
+import {
+  BankAccountApplicationStatus,
+  type BankAccountResponseModel,
+  type ManagedVenue,
+  VenueState,
+} from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { BankAccountEvents } from '@/commons/core/FirebaseEvents/constants'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { pluralizeFr } from '@/commons/utils/pluralize'
+import { Banner, BannerVariants } from '@/design-system/Banner/Banner'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonVariant } from '@/design-system/Button/types'
+import { Tag, TagVariant } from '@/design-system/Tag/Tag'
+import fullErrorIcon from '@/icons/full-error.svg'
+import fullLinkIcon from '@/icons/full-link.svg'
+import fullWaitIcon from '@/icons/full-wait.svg'
+import { Panel } from '@/ui-kit/Panel/Panel'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import styles from './ReimbursementBankAccount.module.scss'
+
+interface ReimbursementBankAccountProps {
+  bankAccount: BankAccountResponseModel
+  managedVenues: ManagedVenue[]
+  onUpdateButtonClick?: (id: number) => void
+  hasWarning?: boolean
+  editLinkId?: string
+  addLinkId?: string
+}
+
+export const ReimbursementBankAccount = ({
+  bankAccount,
+  onUpdateButtonClick,
+  managedVenues,
+  hasWarning = false,
+  editLinkId,
+  addLinkId,
+}: ReimbursementBankAccountProps): JSX.Element => {
+  const { logEvent } = useAnalytics()
+  const venuesNotLinkedToBankAccount = managedVenues.filter(
+    (venue) => !venue.bankAccountId
+  ).length
+
+  const linkedCount = bankAccount.linkedVenues.length
+  const hasManagedVenues = managedVenues.length > 0
+  const hasLinkedVenues = linkedCount > 0
+  const showWarningIcon = hasWarning && hasManagedVenues
+  const selectedAdminOfferer = useAppSelector(
+    (state) => state.user.selectedAdminOfferer
+  )
+  const showNoLinkedMessage = !hasLinkedVenues
+  const showPartialWarning = hasLinkedVenues && venuesNotLinkedToBankAccount > 0
+
+  const handleUpdateClick = () => {
+    onUpdateButtonClick?.(bankAccount.id)
+    logEvent(BankAccountEvents.CLICKED_CHANGE_VENUE_TO_BANK_ACCOUNT)
+  }
+
+  const handleAttachClick = () => {
+    logEvent(BankAccountEvents.CLICKED_ADD_VENUE_TO_BANK_ACCOUNT)
+    onUpdateButtonClick?.(bankAccount.id)
+  }
+
+  return (
+    <Panel>
+      <div className={styles['bank-account']}>
+        <div>
+          <p className={styles['informations-section-title']}>
+            {bankAccount.label}
+          </p>
+          <p className={styles['informations-section-content']}>
+            IBAN : **** {bankAccount.obfuscatedIban.slice(-4)}
+          </p>
+        </div>
+
+        <div className={styles['bank-account-divider']}></div>
+
+        {bankAccount.status === BankAccountApplicationStatus.EN_CONSTRUCTION ||
+        bankAccount.status === BankAccountApplicationStatus.EN_INSTRUCTION ||
+        bankAccount.status === BankAccountApplicationStatus.A_CORRIGER ? (
+          <Banner
+            title={
+              'Statut du dossier : ' +
+              `${
+                bankAccount.status === BankAccountApplicationStatus.A_CORRIGER
+                  ? 'informations manquantes'
+                  : 'en cours de validation'
+              }`
+            }
+            icon={
+              bankAccount.status === BankAccountApplicationStatus.A_CORRIGER
+                ? fullErrorIcon
+                : fullWaitIcon
+            }
+            variant={
+              bankAccount.status === BankAccountApplicationStatus.A_CORRIGER
+                ? BannerVariants.ERROR
+                : BannerVariants.DEFAULT
+            }
+            actions={[
+              {
+                href:
+                  bankAccount.status === BankAccountApplicationStatus.A_CORRIGER
+                    ? `https://demarche.numerique.gouv.fr/dossiers/${bankAccount.dsApplicationId}`
+                    : `https://demarche.numerique.gouv.fr/dossiers/${bankAccount.dsApplicationId}/messagerie`,
+                label:
+                  bankAccount.status === BankAccountApplicationStatus.A_CORRIGER
+                    ? 'Compléter le dossier'
+                    : 'Voir le dossier',
+                isExternal: true,
+                type: 'link',
+                icon: fullLinkIcon,
+                iconAlt: 'Nouvelle fenêtre',
+                onClick: () => {
+                  logEvent(
+                    BankAccountEvents.CLICKED_BANK_DETAILS_RECORD_FOLLOW_UP
+                  )
+                },
+              },
+            ]}
+          />
+        ) : (
+          <div
+            className={styles['linked-venues-section']}
+            data-testid="reimbursement-bank-account-linked-venues"
+          >
+            <p className={styles['linked-venues-section-title']}>
+              {pluralizeFr(
+                linkedCount,
+                'Structure rattachée',
+                'Structures rattachées'
+              )}{' '}
+              à ce compte bancaire
+              {showWarningIcon && (
+                <SvgIcon
+                  src={fullErrorIcon}
+                  alt="Une action est requise"
+                  width="20"
+                  className={styles['error-icon']}
+                />
+              )}
+            </p>
+
+            {!hasManagedVenues && null}
+
+            {hasManagedVenues && (
+              <div>
+                {showNoLinkedMessage && (
+                  <p className={styles['issue-text']}>
+                    Aucune structure n’est rattachée à ce compte bancaire.
+                    {venuesNotLinkedToBankAccount === 0 &&
+                      ' Désélectionnez une structure déjà rattachée et rattachez-la à ce compte bancaire.'}
+                  </p>
+                )}
+
+                {showPartialWarning && (
+                  <p className={styles['issue-text']}>
+                    Certaines de vos structures ne sont pas rattachées.
+                  </p>
+                )}
+
+                {hasLinkedVenues && (
+                  <>
+                    <div className={styles['linked-venues']}>
+                      {bankAccount.linkedVenues.map(
+                        ({ id, commonName, state }) => (
+                          <div className={styles['linked-venue']} key={id}>
+                            {commonName}
+                            {(selectedAdminOfferer?.isClosed ||
+                              state === VenueState.CLOSED) && (
+                              <Tag
+                                variant={TagVariant.ERROR}
+                                label="Structure fermée"
+                              />
+                            )}
+                          </div>
+                        )
+                      )}
+                    </div>
+
+                    <Button
+                      variant={ButtonVariant.SECONDARY}
+                      onClick={handleUpdateClick}
+                      label="Modifier"
+                      id={editLinkId}
+                    />
+                  </>
+                )}
+
+                {!hasLinkedVenues && venuesNotLinkedToBankAccount > 0 && (
+                  <Button
+                    onClick={handleAttachClick}
+                    id={addLinkId}
+                    label="Rattacher une structure"
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </Panel>
+  )
+}

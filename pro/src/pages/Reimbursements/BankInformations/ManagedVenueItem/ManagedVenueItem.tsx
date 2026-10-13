@@ -1,0 +1,106 @@
+import { useState } from 'react'
+import { createPortal } from 'react-dom'
+
+import {
+  type BankAccountResponseModel,
+  type ManagedVenue,
+  VenueState,
+} from '@/apiClient/v1'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonColor, ButtonVariant } from '@/design-system/Button/types'
+import { Checkbox } from '@/design-system/Checkbox/Checkbox'
+import { Tag, TagVariant } from '@/design-system/Tag/Tag'
+import fullEditIcon from '@/icons/full-edit.svg'
+
+import { PricingPointDialog } from '../PricingPointDialog/PricingPointDialog'
+import styles from './ManagedVenueItem.module.scss'
+
+type ManagedVenueItemProps = {
+  venue: ManagedVenue
+  updateBankAccountVenuePricingPoint: (venueId: number) => Promise<void>
+  selectedBankAccount: BankAccountResponseModel
+  selectedVenuesIds: number[]
+  setSelectedVenuesIds: (ids: number[]) => void
+  venuesForPricingPoint: ManagedVenue[]
+  hasError?: boolean
+}
+
+export function ManagedVenueItem({
+  venue,
+  updateBankAccountVenuePricingPoint,
+  selectedBankAccount,
+  selectedVenuesIds,
+  setSelectedVenuesIds,
+  venuesForPricingPoint,
+  hasError,
+}: Readonly<ManagedVenueItemProps>) {
+  const [selectedVenue, setSelectedVenue] = useState<ManagedVenue | null>(null)
+  const [isPricingPointDialogOpen, setIsPricingPointDialogOpen] =
+    useState<boolean>(false)
+  const selectedAdminOfferer = useAppSelector(
+    (state) => state.user.selectedAdminOfferer
+  )
+  function handleVenueChange(
+    event: React.ChangeEvent<HTMLInputElement>,
+    id: number
+  ) {
+    if (event.target.checked) {
+      setSelectedVenuesIds([...selectedVenuesIds, id])
+    } else {
+      setSelectedVenuesIds(
+        selectedVenuesIds.filter((venueId) => venueId !== id)
+      )
+    }
+  }
+
+  return (
+    <div className={styles['dialog-checkbox-container']}>
+      <div className={styles['dialog-checkbox-label']}>
+        <Checkbox
+          disabled={
+            (Boolean(venue.bankAccountId) &&
+              venue.bankAccountId !== selectedBankAccount.id) ||
+            !venue.hasPricingPoint
+          }
+          label={venue.commonName}
+          name={venue.id.toString()}
+          checked={selectedVenuesIds.includes(venue.id)}
+          onChange={(e) => handleVenueChange(e, venue.id)}
+          hasError={hasError}
+        />
+        {(selectedAdminOfferer?.isClosed ||
+          venue.state === VenueState.CLOSED) && (
+          <Tag variant={TagVariant.ERROR} label="Structure fermée" />
+        )}
+      </div>
+      {!venue.hasPricingPoint && (
+        <>
+          <Button
+            variant={ButtonVariant.TERTIARY}
+            color={ButtonColor.NEUTRAL}
+            icon={fullEditIcon}
+            onClick={() => {
+              setSelectedVenue(venue)
+              setIsPricingPointDialogOpen(true)
+            }}
+            label="Sélectionner un SIRET"
+          />
+          {createPortal(
+            <PricingPointDialog
+              isOpen={isPricingPointDialogOpen}
+              selectedVenue={selectedVenue}
+              venues={venuesForPricingPoint}
+              closeDialog={() => {
+                setSelectedVenue(null)
+                setIsPricingPointDialogOpen(false)
+              }}
+              updateVenuePricingPoint={updateBankAccountVenuePricingPoint}
+            />,
+            document.body
+          )}
+        </>
+      )}
+    </div>
+  )
+}

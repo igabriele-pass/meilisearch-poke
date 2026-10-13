@@ -1,0 +1,183 @@
+import sqlalchemy as sa
+import sqlalchemy.orm as sa_orm
+from flask import flash
+from flask import redirect
+from flask import render_template
+from flask import request
+from flask import url_for
+from flask_login import current_user
+from markupsafe import Markup
+from werkzeug.exceptions import NotFound
+
+from pcapi import settings
+from pcapi.core.categories import subcategories
+from pcapi.core.history import models as history_models
+from pcapi.core.internal_notifications.transactional import change_feature_flip as change_feature_flip_internal_message
+from pcapi.core.permissions import api as perm_api
+from pcapi.core.permissions import models as perm_models
+from pcapi.core.users import models as users_models
+from pcapi.models import db
+from pcapi.models import feature as feature_models
+from pcapi.routes.backoffice import blueprint
+from pcapi.routes.backoffice.forms import empty as empty_forms
+from pcapi.routes.backoffice.utils import access_control
+from pcapi.routes.backoffice.utils import response as response_utils
+
+from . import forms
+
+
+@blueprint.backoffice.route("/admin/roles", methods=["GET"])
+@access_control.permission_required(perm_models.Permissions.READ_PERMISSIONS)
+def get_roles() -> response_utils.BackofficeResponse:
+    roles = (
+        db.session.query(perm_models.Role)
+        .options(sa_orm.joinedload(perm_models.Role.permissions))
+        .order_by(perm_models.Role.name)
+        .all()
+    )
+
+    roles_for_permissions = (
+        db.session.query(perm_models.Permission.name, sa.func.array_agg(perm_models.Role.name))
+        .select_from(perm_models.Permission)
+        .outerjoin(perm_models.RolePermission)
+        .outerjoin(perm_models.Role)
+        .group_by(perm_models.Permission.name)
+        .order_by(perm_models.Permission.name)
+        .all()
+    )
+
+    return render_template(
+        "admin/roles.html",
+        active_tab=request.args.get("active_tab", "matrix"),
+        roles=roles,
+        permissions=dict(roles_for_permissions),  # type: ignore [arg-type]
+    )
+
+
+@blueprint.backoffice.route("/admin/roles-matrix", methods=["GET"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_PERMISSIONS)
+def get_roles_management() -> response_utils.BackofficeResponse:
+    roles = (
+        db.session.query(perm_models.Role)
+        .options(sa_orm.joinedload(perm_models.Role.permissions))
+        .order_by(perm_models.Role.name)
+        .all()
+    )
+
+    permissions = db.session.query(perm_models.Permission).order_by(perm_models.Permission.name).all()
+    perm_forms = {}
+
+    forms.EditPermissionForm.setup_form_fields(permissions)
+
+    # fill the form with existing data
+    for role in roles:
+        perm_form = forms.EditPermissionForm()
+        perm_form.fill_form(permissions, role)
+        perm_forms[role] = perm_form
+
+    return render_template("admin/roles_management.html", forms=perm_forms)
+
+
+@blueprint.backoffice.route("/admin/roles-history", methods=["GET"])
+@access_control.permission_required(perm_models.Permissions.READ_PERMISSIONS)
+def get_roles_history() -> response_utils.BackofficeResponse:
+    actions_history = (
+        db.session.query(history_models.ActionHistory)
+        .filter_by(actionType=history_models.ActionType.ROLE_PERMISSIONS_CHANGED)
+        .order_by(history_models.ActionHistory.actionDate.desc())
+        .options(
+            sa_orm.joinedload(history_models.ActionHistory.authorUser).load_only(
+                users_models.User.id, users_models.User.firstName, users_models.User.lastName
+            ),
+        )
+        .all()
+    )
+
+    return render_template("admin/roles_history.html", actions=actions_history)
+
+
+@blueprint.backoffice.route("/admin/roles/<int:role_id>", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.MANAGE_PERMISSIONS)
+def update_role(role_id: int) -> response_utils.BackofficeResponse:
+    role = (
+        db.session.query(perm_models.Role)
+        .options(sa_orm.joinedload(perm_models.Role.permissions))
+        .filter(perm_models.Role.id == role_id)
+        .one_or_none()
+    )
+    if not role:
+        raise NotFound()
+
+    permissions = db.session.query(perm_models.Permission).all()
+
+    forms.EditPermissionForm.setup_form_fields(permissions)
+
+    perm_form = forms.EditPermissionForm()
+    if not perm_form.validate():
+        flash(response_utils.build_form_error_msg(perm_form), "warning")
+        return redirect(url_for(".get_roles", active_tab="management"), code=303)
+
+    new_permissions_ids = []
+    for perm in permissions:
+        if perm_form._fields[perm.name].data:
+            new_permissions_ids.append(perm.id)
+
+    perm_api.update_role(
+        role_id, role.name, tuple(new_permissions_ids), author=current_user, comment=perm_form.comment.data
+    )
+    flash(Markup("Le rôle <b>{name}</b> a été mis à jour").format(name=role.name), "success")
+
+    return redirect(url_for(".get_roles", active_tab="management"), code=303)
+
+
+@blueprint.backoffice.route("/admin/feature-flipping", methods=["GET"])
+@access_control.custom_login_required(redirect_to=".home")
+def list_feature_flags() -> response_utils.BackofficeResponse:
+    feature_flags = db.session.query(feature_models.Feature).order_by(feature_models.Feature.name).all()
+    form = empty_forms.EmptyForm()
+    return render_template(
+        "admin/feature_flipping.html", rows=feature_flags, toggle_feature_flag_form=form, env=settings.ENV
+    )
+
+
+@blueprint.backoffice.route("/admin/feature-flipping/<int:feature_flag_id>/enable", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.FEATURE_FLIPPING)
+def enable_feature_flag(feature_flag_id: int) -> response_utils.BackofficeResponse:
+    return toggle_feature_flag(feature_flag_id, True)
+
+
+@blueprint.backoffice.route("/admin/feature-flipping/<int:feature_flag_id>/disable", methods=["POST"])
+@access_control.permission_required(perm_models.Permissions.FEATURE_FLIPPING)
+def disable_feature_flag(feature_flag_id: int) -> response_utils.BackofficeResponse:
+    return toggle_feature_flag(feature_flag_id, False)
+
+
+def toggle_feature_flag(feature_flag_id: int, set_to_active: bool) -> response_utils.BackofficeResponse:
+    feature_flag = db.session.query(feature_models.Feature).filter_by(id=feature_flag_id).one_or_none()
+    if not feature_flag:
+        raise NotFound()
+
+    if feature_flag.isActive == set_to_active:
+        flash(
+            f"Le feature flag {feature_flag.name} est déjà " + ("activé" if feature_flag.isActive else "désactivé"),
+            "warning",
+        )
+        return redirect(url_for(".list_feature_flags"), code=303)
+
+    feature_flag.isActive = set_to_active
+    db.session.add(feature_flag)
+    db.session.flush()
+    change_feature_flip_internal_message.send(feature=feature_flag, current_user=current_user)
+
+    flash(
+        f"Le feature flag {feature_flag.name} a été " + ("activé" if feature_flag.isActive else "désactivé"), "success"
+    )
+    return redirect(url_for(".list_feature_flags"), code=303)
+
+
+@blueprint.backoffice.route("/admin/subcategories", methods=["GET"])
+@access_control.custom_login_required(redirect_to=".home")
+def get_subcategories() -> response_utils.BackofficeResponse:
+    all_subcategories = subcategories.ALL_SUBCATEGORIES_DICT.values()
+
+    return render_template("admin/subcategories.html", rows=all_subcategories)

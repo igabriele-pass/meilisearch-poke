@@ -1,0 +1,41 @@
+{% from "components/dynamic/modal.html" import build_dynamic_modal with context %}
+{% from "components/bookings/modal.html" import booking_modal with context %}
+{% if bookings %}
+  {# encapsulate this part of the page in a block to avoid leaking variables #}
+  {% with %}
+    {% set hide_search_block = True %}
+    {% set rows_count = bookings|length %}
+    {% set pagination = False %}
+    {% set table_name = "booking-table" %}
+    {% set table_id = table_name %}
+    {% set hide_count = True %}
+    {% set hide_menu = True %}
+    {% set table_header %}
+      <th scope="col">Actions</th>
+      <th scopre="col">ID résa</th>
+      <th scope="col">Offreur</th>
+      <th scope="col">Nom de l'offre</th>
+      <th scope="col">Vue app</th>
+      <th scope="col">Prix</th>
+      <th scope="col">Date de résa</th>
+      <th scope="col">État</th>
+      {% if has_permission("READ_FRAUDULENT_BOOKING_INFO") %}<th scope="col">Fraude</th>{% endif %}
+      <th scope="col">Contremarque</th>
+      <th scope="col">Modalités de retrait</th>
+    {% endset %}
+    {% set table_body %}
+      {% include "accounts/get/details/bookings_rows.html" %}
+    {% endset %}
+    {% set after_table %}
+      {% for booking in bookings %}
+        {% if has_permission("MANAGE_FRAUDULENT_BOOKING_INFO") %}
+          {{ booking_modal(booking, "Marquer la réservation " + booking.token + " comme frauduleuse", "pc-fraudulent-booking-modal-" + booking.id |string, booking_fraudulent_form, url_for('backoffice.public_accounts.mark_booking_as_fraudulent', booking_id=booking.id) , table_id) }}
+          {{ booking_modal(booking, "Supprimer le tag frauduleux sur la réservation " + booking.token, "pc-remove-fraudulent-booking-modal-" + booking.id |string, booking_remove_fraudulent_form, url_for('backoffice.public_accounts.mark_booking_as_not_fraudulent', booking_id=booking.id) , table_id) }}
+        {% endif %}
+      {% endfor %}
+    {% endset %}
+    {% include "components/presentation/list.html" %}
+  {% endwith %}
+{% else %}
+  <p class="m-5">Aucune réservation à ce jour</p>
+{% endif %}

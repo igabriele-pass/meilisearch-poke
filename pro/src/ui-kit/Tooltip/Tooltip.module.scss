@@ -1,0 +1,61 @@
+@use "styles/mixins/_a11y.scss" as a11y;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+$arrow-triangle-height: rem.torem(4px);
+
+.tooltip-container {
+  display: inline-block;
+}
+
+.tooltip {
+  position: relative;
+  display: flex;
+  justify-content: center;
+
+  &-trigger {
+    display: inline-flex;
+
+    &:not(.is-tooltip-hidden) {
+      &::after {
+        content: "";
+        position: absolute;
+        width: 0;
+        height: 0;
+        border-width: $arrow-triangle-height;
+        border-style: solid;
+        border-color: var(--color-icon-brand-primary) transparent transparent
+          transparent;
+        top: calc(-1.1 * ($arrow-triangle-height + rem.torem(2px)));
+        left: 50%;
+        transform: translate(-50%);
+      }
+    }
+  }
+
+  &-content {
+    @include fonts.body-accent-xs;
+
+    position: absolute;
+    padding-bottom: calc($arrow-triangle-height + rem.torem(2px));
+    top: 0;
+
+    &-panel {
+      border-radius: var(--size-border-radius-s);
+      background-color: var(--color-background-brand-primary);
+      color: var(--color-text-inverted);
+      padding: var(--size-spacing-xs) var(--size-spacing-s);
+      max-width: rem.torem(200px);
+      width: max-content;
+      text-align: center;
+    }
+  }
+}
+
+.visually-hidden {
+  /* Do not use the whole visually-hidden mixin here, otherwise the offset width cannot be computed */
+  position: absolute;
+  overflow: hidden;
+  clip-path: inset(50%);
+  border: 0;
+}

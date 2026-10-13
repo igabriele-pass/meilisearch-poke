@@ -1,0 +1,96 @@
+{% macro build_booking_toggle_extra_row_button(booking) %}
+  <button class="btn btn-sm btn-outline-primary-subtle-bg pc-btn-chevron-toggle"
+          data-bs-toggle="collapse"
+          data-bs-target=".pc-booking-{{ booking.id }}">
+    <i class="bi bi-chevron-down"></i>
+  </button>
+{% endmacro %}
+{% macro build_collective_booking_extra_row(booking, stock, offer) %}
+  {% call build_booking_extra_row(booking, stock, offer) %}
+    <li>Formats : {{ offer.formats | format_collective_offer_formats }}</li>
+  {% endcall %}
+{% endmacro %}
+{% macro build_individual_booking_extra_row(booking, stock, offer) %}
+  {% call build_booking_extra_row(booking, stock, offer, booking.user) %}
+    <li>Catégorie : {{ offer.subcategoryId | format_offer_category }}</li>
+    <li>Sous-catégorie : {{ offer.subcategoryId | format_offer_subcategory }}</li>
+  {% endcall %}
+{% endmacro %}
+{% macro build_booking_extra_row(booking, stock, offer, target = none) %}
+  <tr class="collapse accordion-collapse pc-booking-{{ booking.id }}"
+      id="booking-colapse-row-{{ booking.id }}">
+    <td colspan="100%">
+      <div class="row">
+        <div class="col-6">
+          <div class="card shadow-sm p-4 mx-2">
+            <ul>
+              {{ caller() }}
+              {% if booking.dateUsed %}
+                <li>
+                  Date de validation :
+                  {{ booking.dateUsed | format_date_time(offer.address) }}
+                </li>
+              {% endif %}
+              {% if booking.confirmationDate %}
+                <li>
+                  Date de confirmation de réservation :
+                  {{ booking.confirmationDate | format_date_time(offer.address) }}
+                </li>
+              {% endif %}
+              {% if stock.bookingLimitDatetime %}
+                <li>
+                  Date limite de réservation :
+                  {{ stock.bookingLimitDatetime | format_date_time(offer.address) }}
+                </li>
+              {% endif %}
+              {% if booking.isCancelled %}
+                <li>
+                  Date d'annulation :
+                  {{ booking.cancellationDate | format_date_time(offer.address) }}
+                </li>
+                <li>
+                  Raison de l'annulation :
+                  {{ booking.cancellationReason | format_booking_cancellation(booking.cancellationUser) }}
+                </li>
+              {% endif %}
+              {% if offer.withdrawalType %}
+                <li>
+                  Modalités de retrait :
+                  {{ offer.withdrawalType | format_withdrawal_type }}
+                </li>
+              {% endif %}
+              {% if booking.fraudulentBookingTag and has_permission("READ_FRAUDULENT_BOOKING_INFO") %}
+                <li>
+                  Date et auteur du marquage frauduleux :
+                  {{ booking.fraudulentBookingTag.dateCreated | format_date_time }} par {{ booking.fraudulentBookingTag.author.full_name }}
+                </li>
+              {% endif %}
+            </ul>
+          </div>
+        </div>
+        <div class="col-6">
+          {% if booking.is_pending_reimbursement_or_reimbursed %}
+            <div class="card shadow-sm p-3">
+              <ul>
+                <li>Total payé par l'utilisateur : {{ booking.total_amount | format_amount(target=target) }}</li>
+                <li>
+                  Date de remboursement :
+                  {{ booking.reimbursementDate | format_date_time }}
+                </li>
+                <li>
+                  Montant remboursé :
+                  {% if booking.reimbursement_pricing %}{{ -booking.reimbursement_pricing.amount | format_cents(target=target) }}{% endif %}
+                </li>
+                <li>
+                  N° de virement :
+                  {% if booking.cashflow_batch %}{{ booking.cashflow_batch.label }}{% endif %}
+                </li>
+                <li>Taux de remboursement : {{ booking.reimbursement_rate | format_rate }}</li>
+              </ul>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    </td>
+  </tr>
+{% endmacro %}

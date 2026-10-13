@@ -1,0 +1,88 @@
+import {
+  screen,
+  waitFor,
+  waitForElementToBeRemoved,
+} from '@testing-library/react'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { IndividualOfferContextProvider } from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import {
+  getIndividualOfferFactory,
+  getStocksResponseFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { Component as IndividualOfferPracticalInfos } from './IndividualOfferPracticalInfos'
+
+const offer = getIndividualOfferFactory()
+
+vi.mock('react-router', async () => ({
+  ...(await vi.importActual('react-router')),
+  useParams: () => ({
+    offerId: offer.id,
+  }),
+}))
+
+const renderIndividualOfferMedia = () => {
+  return renderWithProviders(
+    <IndividualOfferContextProvider>
+      <IndividualOfferPracticalInfos />
+    </IndividualOfferContextProvider>,
+    {
+      storeOverrides: {
+        user: {
+          currentUser: sharedCurrentUserFactory(),
+          selectedPartnerVenue: makeGetVenueResponseModel({ id: 2 }),
+        },
+      },
+    }
+  )
+}
+
+describe('IndividialOfferPracticalInfos', () => {
+  it('should render without accessibility violations', async () => {
+    vi.spyOn(api, 'getCategories').mockResolvedValue({
+      categories: [],
+      subcategories: [],
+    })
+    vi.spyOn(api, 'getOffer').mockResolvedValue(offer)
+    vi.spyOn(api, 'getStocks').mockResolvedValue(getStocksResponseFactory({}))
+    const { container } = renderIndividualOfferMedia()
+
+    await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should render a spinner until offer is fetched', async () => {
+    vi.spyOn(api, 'getCategories').mockResolvedValue({
+      categories: [],
+      subcategories: [],
+    })
+    vi.spyOn(api, 'getOffer').mockResolvedValue(offer)
+    vi.spyOn(api, 'getStocks').mockResolvedValue(getStocksResponseFactory({}))
+    renderIndividualOfferMedia()
+
+    await waitFor(() => {
+      expect(screen.getByTestId('spinner')).toBeInTheDocument()
+    })
+  })
+
+  it('should display the page once the offer is fetched', async () => {
+    vi.spyOn(api, 'getOffer').mockResolvedValue(offer)
+    vi.spyOn(api, 'getCategories').mockResolvedValue({
+      categories: [],
+      subcategories: [],
+    })
+    vi.spyOn(api, 'getStocks').mockResolvedValue(getStocksResponseFactory({}))
+
+    renderIndividualOfferMedia()
+
+    const heading = await screen.findByRole('heading', {
+      name: 'Informations pratiques',
+    })
+    expect(heading).toBeInTheDocument()
+  })
+})

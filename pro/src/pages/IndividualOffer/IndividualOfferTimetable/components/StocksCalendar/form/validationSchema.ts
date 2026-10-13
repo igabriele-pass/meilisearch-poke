@@ -1,0 +1,164 @@
+import { getToday, isDateValid, removeTime } from '@/commons/utils/date'
+import { yup } from '@/commons/utils/yup'
+
+import { MAX_STOCKS_QUANTITY } from '../StocksCalendarTable/StocksCalendarTableEditStock/validationSchema'
+import {
+  type MonthlyOption,
+  type RecurrenceDays,
+  RecurrenceType,
+} from './types'
+
+const quantityPerPriceCategoriesSchema = yup
+  .array()
+  .required()
+  .of(
+    yup.object().shape({
+      quantity: yup
+        .number()
+        .nullable()
+        .min(1, 'Veuillez indiquer un nombre supérieur à 0')
+        .max(
+          MAX_STOCKS_QUANTITY,
+          'Veuillez modifier la quantité. Celle-ci ne peut pas être supérieure à 1 million'
+        ),
+      priceCategory: yup.string().required('Veuillez renseigner un tarif'),
+    })
+  )
+  .uniqueBy('priceCategory', 'Veuillez renseigner des tarifs différents')
+
+export const getValidationSchema = () =>
+  yup.object().shape({
+    recurrenceType: yup
+      .string()
+      .required()
+      .oneOf(Object.values(RecurrenceType)),
+    startingDate: yup
+      .string()
+      .required()
+      .transform((curr, orig) => (orig === '' ? null : curr))
+      .nullable()
+      .test(
+        'is-future',
+        'L’évènement doit être à venir',
+        (value) =>
+          isDateValid(value) && new Date(value) > removeTime(getToday())
+      )
+      .when('recurrenceType', {
+        is: RecurrenceType.UNIQUE,
+        then: (schema) => schema.required('Veuillez renseigner une date'),
+        otherwise: (schema) =>
+          schema.required('Veuillez renseigner une date de début'),
+      }),
+    endingDate: yup
+      .string()
+      .transform((curr, orig) => (orig === '' ? null : curr))
+      .nullable()
+      .when('recurrenceType', {
+        is: (recurrenceType: RecurrenceType) =>
+          recurrenceType !== RecurrenceType.UNIQUE,
+        then: (schema) =>
+          schema
+            .required('Veuillez renseigner une date de fin')
+            .test(
+              'is-after-starting-date',
+              'Veuillez indiquer une date postérieure à la date de début',
+              function (value) {
+                const startingDate = this.parent.startingDate
+
+                return (
+                  isDateValid(startingDate) &&
+                  isDateValid(value) &&
+                  new Date(value) > new Date(startingDate)
+                )
+              }
+            ),
+      }),
+    days: yup
+      .array()
+      .required()
+      .of(yup.string<RecurrenceDays>().defined())
+      .when('recurrenceType', {
+        is: RecurrenceType.WEEKLY,
+        then: (schema) => schema.min(1, 'Veuillez renseigner au moins un jour'),
+      }),
+    beginningTimes: yup
+      .array()
+      .required()
+      .of(
+        yup.object({
+          beginningTime: yup
+            .string()
+            .required('Veuillez renseigner un horaire'),
+        })
+      )
+      // TODO(cnormant, 2025-07-23): create and use a custom test, its certainly not the only place where we need to check for duplicate values
+      .test('arebeginningTimesUnique', (list) => {
+        const duplicateIndex = list
+          .map((time) => time.beginningTime)
+          .reduce<yup.ValidationError[]>(
+            (accumulator, currentValue, index, self) => {
+              if (
+                self.indexOf(currentValue) !== self.lastIndexOf(currentValue)
+              ) {
+                accumulator.push(
+                  new yup.ValidationError(
+                    'Veuillez renseigner des horaires différents',
+                    null,
+                    `beginningTimes[${index}].beginningTime`
+                  )
+                )
+              }
+              return accumulator
+            },
+            []
+          )
+
+        if (duplicateIndex.length > 0) {
+          return new yup.ValidationError(duplicateIndex)
+        }
+        return true
+      }),
+    quantityPerPriceCategories: quantityPerPriceCategoriesSchema,
+    bookingLimitDateInterval: yup
+      .number()
+      .required()
+      .nullable()
+      .transform((currentValue) =>
+        Number.isNaN(currentValue) ? null : currentValue
+      )
+      .test(
+        'isBookingLimitValid',
+        'La date limite de réservation est dans le passé',
+        function (value) {
+          const { startingDate, beginningTimes } = this.parent
+          if (
+            value === null ||
+            value === undefined ||
+            !isDateValid(startingDate)
+          ) {
+            return true
+          }
+
+          const sortedTimes = beginningTimes
+            .map((item: { beginningTime: string }) => item.beginningTime)
+            .sort((a: string, b: string) => a.localeCompare(b))
+
+          const earliestTime = sortedTimes[0]
+          const startDateTime = new Date(`${startingDate}T${earliestTime}`)
+
+          const limitTimestamp =
+            startDateTime.getTime() - value * 24 * 60 * 60 * 1000
+          const limitDate = new Date(limitTimestamp)
+
+          const now = new Date()
+          return limitDate > now
+        }
+      ),
+    monthlyOption: yup
+      .string<MonthlyOption>()
+      .nullable()
+      .when('recurrenceType', {
+        is: RecurrenceType.MONTHLY,
+        then: (schema) => schema.required('Veuillez choisir une option'),
+      }),
+  })

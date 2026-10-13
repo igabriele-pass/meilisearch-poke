@@ -1,0 +1,150 @@
+import cx from 'classnames'
+
+import { Button } from '@/design-system/Button/Button'
+import {
+  ButtonColor,
+  type ButtonProps,
+  ButtonSize,
+  ButtonVariant,
+} from '@/design-system/Button/types'
+import closeIcon from '@/icons/full-close.svg'
+import infosIcon from '@/icons/full-info.svg'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import styles from './Banner.module.scss'
+
+export enum BannerVariants {
+  DEFAULT = 'default',
+  SUCCESS = 'success',
+  WARNING = 'warning',
+  ERROR = 'error',
+}
+
+export type BannerLink = {
+  label: string
+  href: string
+  isExternal?: boolean
+  icon?: string
+  iconAlt?: string
+  /** Action type (e.g. "link", "button") */
+  type: 'link' | 'button'
+  onClick?: () => void
+}
+
+export type BannerProps = {
+  title: string
+  description?: string | JSX.Element
+  actions?: BannerLink[]
+  icon?: string
+  imageSrc?: string
+  /** Visual style (defines colors) */
+  variant?: BannerVariants
+  size?: 'default' | 'large'
+  /** Show close button? */
+  closable?: boolean
+  /** Callback called on close button click */
+  onClose?: () => void
+}
+
+const variantToRole: Record<BannerVariants, React.AriaRole> = {
+  [BannerVariants.ERROR]: 'alert',
+  [BannerVariants.WARNING]: 'alert',
+  [BannerVariants.SUCCESS]: 'status',
+  [BannerVariants.DEFAULT]: 'status',
+}
+
+export const Banner = ({
+  title,
+  description,
+  actions = [],
+  icon = infosIcon,
+  imageSrc,
+  variant = BannerVariants.DEFAULT,
+  size = 'default',
+  closable = false,
+  onClose,
+}: BannerProps): JSX.Element => {
+  const actionButtonProps: ButtonProps[] = actions.map((a) => {
+    const { type, href, isExternal, ...btnProps } = a
+    const baseProps = {
+      ...btnProps,
+      onClick: () => btnProps.onClick?.(),
+      size: size === 'default' ? ButtonSize.SMALL : ButtonSize.DEFAULT,
+      variant: ButtonVariant.TERTIARY,
+      color: ButtonColor.NEUTRAL,
+    }
+
+    if (type !== 'link') {
+      return { ...baseProps }
+    }
+
+    if (isExternal || href.startsWith('#')) {
+      return { ...baseProps, as: 'a', to: href, opensInNewTab: isExternal }
+    }
+
+    return { ...baseProps, as: 'router-link', to: href }
+  })
+  return (
+    <div
+      className={cx(styles.banner, styles[variant])}
+      role={variantToRole[variant]}
+      data-testid="banner"
+    >
+      <div className={styles.inner}>
+        <div className={styles.content}>
+          <SvgIcon className={styles.info} src={icon} aria-hidden="true" />
+
+          <div
+            className={cx(styles['content-body'], {
+              [styles['content-body-large']]: size === 'large',
+            })}
+          >
+            <p
+              className={cx(styles['title'], {
+                [styles['title-large']]: size === 'large',
+              })}
+            >
+              {title}
+            </p>
+            {description && (
+              <div className={styles.description}>
+                {typeof description === 'string' ? (
+                  <p className={styles['description-paragraph']}>
+                    {description}
+                  </p>
+                ) : (
+                  description
+                )}
+              </div>
+            )}
+            {actions.length > 0 && (
+              <ul className={styles['actions-list']}>
+                {actionButtonProps.map((btnProps) => (
+                  <li key={btnProps.label} className={styles.link}>
+                    <Button {...btnProps} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+          {imageSrc && (
+            <img src={imageSrc} className={styles.image} alt="" aria-hidden />
+          )}
+          {closable && (
+            <button
+              type="button"
+              className={styles['close-button']}
+              onClick={onClose}
+              aria-label="Fermer la bannière d’information"
+            >
+              <SvgIcon
+                src={closeIcon}
+                className={styles['close-button-icon']}
+              />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,144 @@
+{% extends "layouts/list.html" %}
+{% import "components/forms.html" as forms with context %}
+{% import "components/clipboard.html" as clipboard %}
+{% from "components/dynamic/modal.html" import build_dynamic_modal with context %}
+{% from "components/bookings/modal.html" import booking_modal with context %}
+{% from "components/table.html" import sortable_column %}
+{% set rows_count = rows|length %}
+{% set table_id = "booking-table" %}
+{% block title %}Réservations individuelles{% endblock %}
+{% block search_block %}{{ forms.build_filters_form_ng(form, dst) }}{% endblock %}
+{% block before_table %}
+  {% if form.is_single_venue_with_optional_dates %}
+    <span class="mx-2 fs-3">
+      {% set from_to_date_formatted = (form.from_to_date.data[0].strftime("%d/%m/%Y") + ' - ' + form.from_to_date.data[1].strftime("%d/%m/%Y")) if form.from_to_date.data else None %}
+      <a href="{{ url_for('backoffice.individual_bookings.get_individual_booking_csv_download', venue=form.venue.data[0], from_to_date=from_to_date_formatted) }}"
+         class="mx-2"><i class="bi bi-filetype-csv"
+   data-bs-toggle="tooltip"
+   data-bs-placement="top"
+   data-bs-title="Télécharger en CSV."></i></a>
+      <a href="{{ url_for('backoffice.individual_bookings.get_individual_booking_xlsx_download', venue=form.venue.data[0], from_to_date=from_to_date_formatted) }}"
+         class="mx-2"><i class="bi bi-filetype-xlsx"
+   data-bs-toggle="tooltip"
+   data-bs-placement="top"
+   data-bs-title="Télécharger en Excel."></i></a>
+      <span class="mx-2">{{ clipboard.copy_to_clipboard(pro_visualisation_link, "Copier l'url pour PC pro") }}</span>
+    </span>
+  {% endif %}
+{% endblock before_table %}
+{% block table_header %}
+  <th data-pc-column-name="Checkbox">
+    <input type="checkbox"
+           class="form-check-input fs-6 mt-0"
+           name="pc-table-multi-select-check-all" />
+  </th>
+  <th>Actions</th>
+  <th>ID résa</th>
+  <th>Contremarque</th>
+  <th>Bénéficiaire</th>
+  <th>Nom de l'offre</th>
+  <th>ID offre</th>
+  <th>Résa duo</th>
+  <th>ID stock</th>
+  <th>Stock</th>
+  <th>Montant</th>
+  <th>Statut</th>
+  {% if has_permission("READ_FRAUDULENT_BOOKING_INFO") %}<th>Fraude</th>{% endif %}
+  <th>Crédit actif</th>
+  <th>Auteur de la validation</th>
+  <th>Incident comptable</th>
+  {% call sortable_column(True, comparator="float") %}
+    Date de réservation
+  {% endcall %}
+  {% call sortable_column(True, comparator="float") %}
+    Date de l'évènement
+  {% endcall %}
+  <th>Entité juridique</th>
+  <th>Partenaire culturel</th>
+{% endblock table_header %}
+{% block table_body %}
+  {% include "individual_bookings/list_rows.html" %}
+{% endblock table_body %}
+{% block multi_select_menu %}
+  <div class="counter-container text-nowrap">
+    <span class="counter">0</span> réservation(s) individuelle(s) sélectionnée(s)&nbsp:&nbsp<span class="value">0</span> €
+  </div>
+  {% if has_permission("MANAGE_BOOKINGS") %}
+    <div data-toggle="pc-batch-confirm-btn-group"
+         data-toggle-id="table-container-individual-booking-btn-group"
+         data-pc-table-multi-select-id="{{ table_name }}"
+         data-input-ids-name="object_ids"
+         class="d-flex">
+      <button disabled
+              type="button"
+              class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-validate-booking-modal">Valider</button>
+      <button disabled
+              type="button"
+              class="btn rounded-0 border-top-0 border-bottom-0 text-nowrap {% if has_permission("CREATE_INCIDENTS") or has_permission("PRO_FRAUD_ACTIONS") %}border-end{% endif %}"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-cancel-booking-modal">Annuler</button>
+    </div>
+  {% endif %}
+  {% if has_permission("PRO_FRAUD_ACTIONS") %}
+    <div data-toggle="pc-batch-confirm-btn-group"
+         data-toggle-id="table-container-individual-booking-btn-group"
+         data-pc-table-multi-select-id="{{ table_name }}"
+         data-input-ids-name="object_ids"
+         class="d-flex">
+      <button disabled
+              type="button"
+              class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-tag-fraudulent-booking-modal">Frauduleuse</button>
+      <button disabled
+              type="button"
+              class="btn rounded-0 border-top-0 border-bottom-0 text-nowrap {% if has_permission("CREATE_INCIDENTS") %}border-end{% endif %}"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#batch-remove-fraudulent-booking-tag-modal">Non frauduleuse</button>
+    </div>
+  {% endif %}
+  {% if has_permission("CREATE_INCIDENTS") %}
+    <div data-toggle="pc-batch-confirm-btn-group"
+         data-toggle-id="table-container-individual-booking-btn-group"
+         data-pc-table-multi-select-id="{{ table_name }}"
+         data-input-ids-name="object_ids"
+         class="d-flex">
+      <button disabled
+              type="button"
+              class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#overpayment-creation-modal">Incident</button>
+      <button disabled
+              type="button"
+              class="btn rounded-0 border-top-0 border-bottom-0 text-nowrap"
+              data-use-dynamic-modal="true"
+              data-bs-toggle="modal"
+              data-bs-target="#commercial-gesture-creation-modal">Geste commercial</button>
+    </div>
+  {% endif %}
+{% endblock multi_select_menu %}
+{% block after_table %}
+  {{ build_dynamic_modal(url_for("backoffice.individual_bookings.get_batch_validate_individual_bookings_form") , "batch-validate-booking-modal", form="form-ids-" + table_name) }}
+  {{ build_dynamic_modal(url_for("backoffice.individual_bookings.get_batch_cancel_individual_bookings_form") , "batch-cancel-booking-modal", form="form-ids-" + table_name) }}
+  {% if has_permission("PRO_FRAUD_ACTIONS") %}
+    {{ build_dynamic_modal(url_for("backoffice.individual_bookings.get_batch_tag_fraudulent_bookings_form") , "batch-tag-fraudulent-booking-modal", form="form-ids-" + table_name, method="post") }}
+    {{ build_dynamic_modal(url_for("backoffice.individual_bookings.get_batch_remove_fraudulent_booking_tag_form") , "batch-remove-fraudulent-booking-tag-modal", form="form-ids-" + table_name, method="post") }}
+  {% endif %}
+  {% if has_permission("CREATE_INCIDENTS") %}
+    {{ build_dynamic_modal(url_for("backoffice.finance_incidents.get_individual_bookings_overpayment_creation_form") , "overpayment-creation-modal", form="form-ids-" + table_name, method="post") }}
+    {{ build_dynamic_modal(url_for("backoffice.finance_incidents.get_individual_bookings_commercial_gesture_creation_form") , "commercial-gesture-creation-modal", form="form-ids-" + table_name, method="post") }}
+  {% endif %}
+  {% if has_permission("MANAGE_BOOKINGS") %}
+    {% for booking in rows %}
+      {{ booking_modal(booking, "Valider la réservation " + booking.token, "pc-validate-booking-modal-" + booking.id |string, mark_as_used_booking_form, url_for('backoffice.individual_bookings.mark_booking_as_used', booking_id=booking.id) , table_id) }}
+      {{ booking_modal(booking, "Annuler la réservation " + booking.token, "pc-cancel-booking-modal-" + booking.id |string, cancel_booking_form, url_for('backoffice.individual_bookings.mark_booking_as_cancelled', booking_id=booking.id) , table_id) }}
+    {% endfor %}
+  {% endif %}
+{% endblock after_table %}

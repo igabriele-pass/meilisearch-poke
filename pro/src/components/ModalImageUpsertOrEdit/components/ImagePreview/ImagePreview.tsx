@@ -1,0 +1,28 @@
+import type React from 'react'
+import type { FunctionComponent } from 'react'
+
+import mobileShell from './assets/mobile-shell.svg'
+import styles from './ImagePreview.module.scss'
+
+export interface ImagePreviewScreenProps {
+  title: string
+  children?: React.ReactNode
+}
+
+export const ImagePreview: FunctionComponent<ImagePreviewScreenProps> = ({
+  title,
+  children,
+}) => (
+  <figure className={styles['image-preview-previews-wrapper']}>
+    <img
+      src={mobileShell}
+      alt=""
+      aria-hidden
+      className={styles['image-preview-previews-shell']}
+    />
+    <div className={styles['image-preview-screen']}>{children}</div>
+    <figcaption className={styles['image-preview-previews-wrapper-figcaption']}>
+      {title}
+    </figcaption>
+  </figure>
+)

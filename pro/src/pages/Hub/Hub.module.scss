@@ -1,0 +1,95 @@
+@use "styles/mixins/_a11y.scss" as a11y;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+
+.sr-only {
+  @include a11y.visually-hidden;
+}
+
+.spinner-container {
+  align-items: center;
+  background-color: var(--color-background-subtle);
+  display: flex;
+  height: 100vh;
+  justify-content: center;
+}
+
+.content-flex {
+  background-color: var(--color-background-default);
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--size-spacing-xxl);
+  max-height: calc(
+    100vh -
+      (
+        size.$top-menu-height + size.$footer-height +
+          (size.$full-layout-content-padding * 2)
+      )
+  );
+  max-width: size.$main-content-width;
+  margin: 0 auto;
+  overflow-y: auto;
+}
+
+.venue-list {
+  align-content: start;
+  display: grid;
+  flex-grow: 1;
+  gap: 8px;
+  grid-template-columns: repeat(1, 1fr);
+  margin-top: var(--size-spacing-l);
+
+  @media screen and (min-width: size.$tablet) {
+    grid-template-columns: repeat(2, 1fr);
+    overflow-y: auto;
+  }
+
+  @media screen and (min-width: size.$laptop) {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+.venue-item-button {
+  @include fonts.button;
+
+  aspect-ratio: 3 / 2;
+  background-color: var(--color-background-default);
+  border: solid 1px var(--color-border-subtle);
+  border-radius: var(--size-border-radius-m);
+  cursor: pointer;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  padding: var(--size-spacing-l) var(--size-spacing-xl);
+  width: 100%;
+}
+
+.venue-item-name {
+  @include fonts.body;
+
+  display: block;
+}
+
+.venue-item-state {
+  margin-bottom: var(--size-spacing-l);
+}
+
+.venue-location {
+  @include fonts.body-xs;
+
+  color: var(--color-text-subtle);
+  display: block;
+  margin-top: var(--size-spacing-xxs);
+}
+
+.venue-actions {
+  display: flex;
+  justify-content: center;
+  padding: var(--size-spacing-xl);
+}
+
+.title {
+  @include fonts.title1;
+
+  margin-bottom: var(--size-spacing-xxl);
+  overflow-wrap: anywhere;
+}

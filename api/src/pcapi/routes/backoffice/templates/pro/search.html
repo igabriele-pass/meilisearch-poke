@@ -1,0 +1,12 @@
+{% extends "layouts/pro.html" %}
+{% from "components/search/base.html" import build_base_search with context %}
+{% block pro_main_content %}
+  {% call build_base_search() %}
+    Retrouve une entité juridique ou un partenaire culturel
+    par raison sociale, SIREN, SIRET, RID7, RIDET, N° de justificatif de remboursement
+    ID de son dossier DN CB ou par l'identité du pro (nom, prénom,
+    email rattaché au SIRET, numéro de téléphone).
+    <br>
+    Retrouve un compte bancaire par IBAN, ID, Humanized ID, ou N° du justificatif de remboursement.
+  {% endcall %}
+{% endblock pro_main_content %}

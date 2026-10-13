@@ -1,0 +1,15 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_outline.scss" as outline;
+
+$icon-size: rem.torem(20px);
+
+.details-ean-search {
+  margin-bottom: var(--size-spacing-xxl);
+  position: relative;
+}
+
+.details-ean-search-callout {
+  margin-top: var(--size-spacing-l);
+}

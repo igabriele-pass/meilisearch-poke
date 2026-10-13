@@ -1,0 +1,39 @@
+import { renderHook } from '@testing-library/react'
+import type { ReactNode } from 'react'
+import { MemoryRouter } from 'react-router'
+
+import { OFFER_WIZARD_MODE } from '@/commons/core/Offers/constants'
+
+import { useOfferWizardMode } from '../useOfferWizardMode'
+
+const renderUseOfferWizardMode = (url: string) => {
+  const wrapper = ({ children }: { children: ReactNode }) => (
+    <MemoryRouter initialEntries={[url]}>{children}</MemoryRouter>
+  )
+
+  return renderHook(() => useOfferWizardMode(), {
+    wrapper,
+  })
+}
+
+describe('useOfferWizardMode', () => {
+  it('should return mode "creation" for creation url', () => {
+    const { result } = renderUseOfferWizardMode('/test/creation/test')
+    expect(result.current).toEqual(OFFER_WIZARD_MODE.CREATION)
+  })
+
+  it('should return mode "creation" for confirmation url', () => {
+    const { result } = renderUseOfferWizardMode('/test/confirmation')
+    expect(result.current).toEqual(OFFER_WIZARD_MODE.CREATION)
+  })
+
+  it('should return mode "edition" for any other offer url', () => {
+    const { result } = renderUseOfferWizardMode('/test/test')
+    expect(result.current).toEqual(OFFER_WIZARD_MODE.EDITION)
+  })
+
+  it('should return mode "edition"', () => {
+    const { result } = renderUseOfferWizardMode('/test/edition/test')
+    expect(result.current).toEqual(OFFER_WIZARD_MODE.EDITION)
+  })
+})

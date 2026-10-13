@@ -1,0 +1,167 @@
+import typing
+
+from pcapi.core.educational import models
+from pcapi.core.educational.schemas import AdageCollectiveOffer
+from pcapi.core.educational.schemas import AdageCollectiveRequest
+from pcapi.core.educational.schemas import EducationalBookingResponse
+
+
+if typing.TYPE_CHECKING:
+    from pcapi.core.offerers.models import OffererAddress
+
+
+AdageRequestItem = (
+    str | AdageCollectiveOffer | AdageCollectiveRequest | EducationalBookingResponse | dict[str, int | str | None]
+)
+
+adage_requests: list[dict[str, AdageRequestItem | None]] = []
+
+
+def reset_requests() -> None:
+    global adage_requests  # noqa: PLW0603 (global-statement)
+    adage_requests = []
+
+
+PATCH_CAN_CREATE_OFFER_PATH = "pcapi.core.offerers.api.can_offerer_create_educational_offer"
+
+STATUSES_ALLOWING_EDIT_DETAILS = (
+    models.CollectiveOfferDisplayedStatus.DRAFT,
+    models.CollectiveOfferDisplayedStatus.PUBLISHED,
+    models.CollectiveOfferDisplayedStatus.PREBOOKED,
+)
+
+STATUSES_NOT_ALLOWING_EDIT_DETAILS = tuple(
+    set(models.CollectiveOfferDisplayedStatus)
+    - {*STATUSES_ALLOWING_EDIT_DETAILS, models.CollectiveOfferDisplayedStatus.HIDDEN}
+)
+
+STATUSES_ALLOWING_EDIT_DETAILS_TEMPLATE = (
+    models.CollectiveOfferDisplayedStatus.DRAFT,
+    models.CollectiveOfferDisplayedStatus.PUBLISHED,
+    models.CollectiveOfferDisplayedStatus.HIDDEN,
+    models.CollectiveOfferDisplayedStatus.ENDED,
+)
+
+STATUSES_NOT_ALLOWING_EDIT_DETAILS_TEMPLATE = (
+    models.CollectiveOfferDisplayedStatus.UNDER_REVIEW,
+    models.CollectiveOfferDisplayedStatus.REJECTED,
+    models.CollectiveOfferDisplayedStatus.ARCHIVED,
+)
+
+STATUSES_ALLOWING_EDIT_DATES = (
+    models.CollectiveOfferDisplayedStatus.DRAFT,
+    models.CollectiveOfferDisplayedStatus.PUBLISHED,
+    models.CollectiveOfferDisplayedStatus.PREBOOKED,
+    models.CollectiveOfferDisplayedStatus.EXPIRED,
+)
+
+STATUSES_NOT_ALLOWING_EDIT_DATES = tuple(
+    set(models.CollectiveOfferDisplayedStatus)
+    - {*STATUSES_ALLOWING_EDIT_DATES, models.CollectiveOfferDisplayedStatus.HIDDEN}
+)
+
+STATUSES_ALLOWING_EDIT_INSTITUTION = (models.CollectiveOfferDisplayedStatus.DRAFT,)
+
+STATUSES_NOT_ALLOWING_EDIT_INSTITUTION = tuple(
+    set(models.CollectiveOfferDisplayedStatus)
+    - {*STATUSES_ALLOWING_EDIT_INSTITUTION, models.CollectiveOfferDisplayedStatus.HIDDEN}
+)
+
+STATUSES_ALLOWING_EDIT_DISCOUNT = (
+    models.CollectiveOfferDisplayedStatus.DRAFT,
+    models.CollectiveOfferDisplayedStatus.PUBLISHED,
+    models.CollectiveOfferDisplayedStatus.PREBOOKED,
+    models.CollectiveOfferDisplayedStatus.BOOKED,
+)
+
+STATUSES_NOT_ALLOWING_EDIT_DISCOUNT = tuple(
+    set(models.CollectiveOfferDisplayedStatus)
+    - {*STATUSES_ALLOWING_EDIT_DISCOUNT, models.CollectiveOfferDisplayedStatus.HIDDEN}
+)
+
+STATUSES_ALLOWING_CREATE_BOOKABLE_OFFER = (
+    models.CollectiveOfferDisplayedStatus.PUBLISHED,
+    models.CollectiveOfferDisplayedStatus.HIDDEN,
+    models.CollectiveOfferDisplayedStatus.ENDED,
+)
+
+STATUSES_NOT_ALLOWING_CREATE_BOOKABLE_OFFER = (
+    models.CollectiveOfferDisplayedStatus.DRAFT,
+    models.CollectiveOfferDisplayedStatus.UNDER_REVIEW,
+    models.CollectiveOfferDisplayedStatus.REJECTED,
+    models.CollectiveOfferDisplayedStatus.ARCHIVED,
+)
+
+STATUSES_ALLOWING_ARCHIVE_OFFER = (
+    models.CollectiveOfferDisplayedStatus.DRAFT,
+    models.CollectiveOfferDisplayedStatus.PUBLISHED,
+    models.CollectiveOfferDisplayedStatus.REJECTED,
+    models.CollectiveOfferDisplayedStatus.EXPIRED,
+    models.CollectiveOfferDisplayedStatus.REIMBURSED,
+    models.CollectiveOfferDisplayedStatus.CANCELLED,
+)
+
+STATUSES_NOT_ALLOWING_ARCHIVE_OFFER = (
+    models.CollectiveOfferDisplayedStatus.UNDER_REVIEW,
+    models.CollectiveOfferDisplayedStatus.PREBOOKED,
+    models.CollectiveOfferDisplayedStatus.BOOKED,
+    models.CollectiveOfferDisplayedStatus.ENDED,
+    models.CollectiveOfferDisplayedStatus.ARCHIVED,
+)
+
+STATUSES_ALLOWING_ARCHIVE_OFFER_TEMPLATE = (
+    models.CollectiveOfferDisplayedStatus.DRAFT,
+    models.CollectiveOfferDisplayedStatus.PUBLISHED,
+    models.CollectiveOfferDisplayedStatus.REJECTED,
+    models.CollectiveOfferDisplayedStatus.HIDDEN,
+    models.CollectiveOfferDisplayedStatus.ENDED,
+)
+
+STATUSES_NOT_ALLOWING_ARCHIVE_OFFER_TEMPLATE = (
+    models.CollectiveOfferDisplayedStatus.UNDER_REVIEW,
+    models.CollectiveOfferDisplayedStatus.ARCHIVED,
+)
+
+STATUSES_ALLOWING_CANCEL = (
+    models.CollectiveOfferDisplayedStatus.PREBOOKED,
+    models.CollectiveOfferDisplayedStatus.BOOKED,
+)
+
+STATUSES_NOT_ALLOWING_CANCEL = tuple(
+    set(models.CollectiveOfferDisplayedStatus)
+    - {*STATUSES_ALLOWING_CANCEL, models.CollectiveOfferDisplayedStatus.HIDDEN}
+)
+
+ADDRESS_DICT = {
+    "isVenueLocation": False,
+    "isManualEdition": False,
+    "city": "Paris",
+    "label": "My address",
+    "latitude": "48.87171",
+    "longitude": "2.308289",
+    "postalCode": "75001",
+    "street": "3 Rue de Valois",
+}
+
+
+def get_serialized_address(offerer_address: "OffererAddress", label: str, is_venue_location: bool) -> dict:
+    address = offerer_address.address
+
+    return {
+        "location": {
+            "id": address.id,
+            "inseeCode": address.inseeCode,
+            "isManualEdition": False,
+            "isVenueLocation": is_venue_location,
+            "city": address.city,
+            "label": label,
+            "latitude": float(address.latitude),
+            "longitude": float(address.longitude),
+            "postalCode": address.postalCode,
+            "departmentCode": address.departmentCode,
+            "street": address.street,
+            "banId": address.banId,
+        },
+        "locationComment": None,
+        "locationType": "ADDRESS",
+    }

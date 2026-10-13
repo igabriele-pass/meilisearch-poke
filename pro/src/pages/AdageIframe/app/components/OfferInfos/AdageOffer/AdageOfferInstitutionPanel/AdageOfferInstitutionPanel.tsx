@@ -1,0 +1,75 @@
+import {
+  AdageFrontRoles,
+  type AuthenticatedResponse,
+  type CollectiveOfferResponseModel,
+} from '@/apiClient/adage'
+import {
+  getDateTimeToFrenchText,
+  toDateStrippedOfTimezone,
+} from '@/commons/utils/date'
+import strokeTeacherIcon from '@/icons/stroke-teacher.svg'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import { PrebookingButton } from '../../../OffersInstantSearch/OffersSearch/Offers/PrebookingButton/PrebookingButton'
+import { getBookableOfferInstitutionAndTeacherName } from '../utils/adageOfferInstitution'
+import styles from './AdageOfferInstitutionPanel.module.scss'
+
+export type AdageOfferInstitutionPanelProps = {
+  offer: CollectiveOfferResponseModel
+  adageUser?: AuthenticatedResponse
+  isPreview?: boolean
+  setInstitutionOfferCount?: (value: number) => void
+  institutionOfferCount?: number
+}
+
+export function AdageOfferInstitutionPanel({
+  offer,
+  adageUser,
+  isPreview = false,
+  setInstitutionOfferCount,
+  institutionOfferCount,
+}: Readonly<AdageOfferInstitutionPanelProps>) {
+  return (
+    <div className={styles['institution-panel']}>
+      <div className={styles['institution-panel-header']}>
+        <SvgIcon src={strokeTeacherIcon} alt="" width="20" />
+        <h2 className={styles['institution-panel-header-title']}>
+          Offre adressée à :
+        </h2>
+      </div>
+      <p className={styles['institution-panel-info']}>
+        {getBookableOfferInstitutionAndTeacherName(offer)}
+      </p>
+      <div className={styles['institution-panel-prebooking']}>
+        {offer.stock.bookingLimitDatetime && adageUser?.canPrebook && (
+          <p className={styles['institution-panel-prebooking-date']}>
+            À préréserver{' '}
+            <span
+              className={styles['institution-panel-prebooking-date-emphasis']}
+            >
+              avant le{' '}
+              {getDateTimeToFrenchText(
+                toDateStrippedOfTimezone(offer.stock.bookingLimitDatetime),
+                {
+                  dateStyle: 'short',
+                }
+              )}
+            </span>
+          </p>
+        )}
+        <PrebookingButton
+          canPrebookOffers={
+            adageUser?.role === AdageFrontRoles.REDACTOR || isPreview
+          }
+          queryId={''}
+          stock={offer.stock}
+          hideLimitDate={true}
+          isPreview={isPreview}
+          setInstitutionOfferCount={setInstitutionOfferCount}
+          institutionOfferCount={institutionOfferCount}
+          shouldDisablePrebookButton={!adageUser?.canPrebook && !isPreview}
+        />
+      </div>
+    </div>
+  )
+}

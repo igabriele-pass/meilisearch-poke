@@ -1,0 +1,11 @@
+mutation sendUserMessage($input: DossierEnvoyerMessageInput!) {
+  dossierEnvoyerMessage(input: $input) {
+    message {
+      id
+      createdAt
+    }
+    errors {
+      message
+    }
+  }
+}

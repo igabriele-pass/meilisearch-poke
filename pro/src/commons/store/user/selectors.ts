@@ -1,0 +1,48 @@
+/* istanbul ignore file */
+
+import { assertOrFrontendError } from '@/commons/errors/assertOrFrontendError'
+import type { RootState } from '@/commons/store/store'
+
+export const selectCurrentUser = (state: RootState) => state.user.currentUser
+
+export const ensureCurrentUser = (state: RootState) => {
+  assertOrFrontendError(
+    state.user.currentUser,
+    '`state.user.currentUser` is null.'
+  )
+
+  return state.user.currentUser
+}
+
+export const ensureSelectedAdminOfferer = (state: RootState) => {
+  assertOrFrontendError(
+    state.user.selectedAdminOfferer,
+    '`state.user.selectedAdminOfferer` is null.'
+  )
+
+  return state.user.selectedAdminOfferer
+}
+
+export const ensureSelectedPartnerVenue = (state: RootState) => {
+  assertOrFrontendError(
+    state.user.selectedPartnerVenue,
+    '`state.user.selectedPartnerVenue` is null.'
+  )
+
+  return state.user.selectedPartnerVenue
+}
+
+export const ensureVenues = (state: RootState) => {
+  assertOrFrontendError(state.user.venues, '`state.user.venues` is null.')
+
+  return state.user.venues
+}
+
+export const ensureOffererNames = (state: RootState) => {
+  assertOrFrontendError(
+    state.user.offererNames,
+    '`state.user.offererNames` is null.'
+  )
+
+  return state.user.offererNames
+}

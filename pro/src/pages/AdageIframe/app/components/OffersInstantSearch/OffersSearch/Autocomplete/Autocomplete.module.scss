@@ -1,0 +1,124 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_forms.scss" as forms;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.form {
+  display: flex;
+  justify-content: center;
+
+  &-container {
+    width: 100%;
+    max-width: 53.5rem;
+    position: relative;
+
+    &-wrapper {
+      min-height: rem.torem(48px);
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 4;
+      padding: 0 var(--size-spacing-l);
+      gap: var(--size-spacing-l);
+    }
+
+    &-input {
+      position: relative;
+      width: 100%;
+    }
+  }
+
+  &-input {
+    @include forms.input-theme;
+
+    position: relative;
+    padding-left: rem.torem(42px);
+
+    @include forms.input-theme-nested;
+
+    &-span {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: rem.torem(48px);
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+  }
+}
+
+.dialog {
+  border: none;
+  width: 100%;
+  background-color: var(--color-background-default);
+  position: absolute;
+  top: rem.torem(-16px);
+  right: 0;
+  border-radius: var(--size-border-radius-m);
+  z-index: 3;
+  bottom: rem.torem(64px);
+  padding-top: var(--size-spacing-xxxl);
+
+  &-panel {
+    margin-top: var(--size-spacing-xl);
+    padding: var(--size-spacing-s) rem.torem(40px) rem.torem(24px);
+
+    &-autocomplete {
+      &-text {
+        @include fonts.body-accent-xs;
+
+        color: var(--color-text-subtle);
+        display: flex;
+        align-items: center;
+        margin-top: var(--size-spacing-l);
+        margin-bottom: var(--size-spacing-m);
+
+        &-clean {
+          @include fonts.body-accent-xs;
+
+          margin-left: var(--size-spacing-s);
+          text-decoration: none;
+          display: flex;
+          align-items: center;
+        }
+      }
+
+      &-item {
+        @include fonts.body;
+
+        display: flex;
+        gap: var(--size-spacing-s);
+        align-items: center;
+        cursor: pointer;
+        overflow-wrap: anywhere;
+        width: 100%;
+        padding: var(--size-spacing-s);
+
+        &:hover,
+        &:focus-within,
+        &[aria-selected="true"] {
+          background-color: var(--color-background-subtle);
+        }
+
+        &-icon {
+          color: var(--color-icon-subtle);
+        }
+      }
+
+      &-category {
+        @include fonts.body-accent;
+
+        color: var(--color-text-brand-primary);
+      }
+    }
+  }
+}
+
+.backdrop {
+  z-index: 2;
+  position: fixed;
+  inset: 0;
+  background-color: var(--color-background-overlay);
+}

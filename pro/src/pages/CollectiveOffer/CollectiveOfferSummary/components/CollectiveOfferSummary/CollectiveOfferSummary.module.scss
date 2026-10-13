@@ -1,0 +1,9 @@
+.banner-container {
+  margin: var(--size-spacing-l) 0;
+}
+
+.location-information {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-l);
+}

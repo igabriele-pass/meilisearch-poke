@@ -1,0 +1,88 @@
+import classnames from 'classnames'
+import { NavLink, type To } from 'react-router'
+
+import { noop } from '@/commons/utils/noop'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import type { NavItem } from '../SideNavLinks'
+import styles from './SideNavLink.module.scss'
+import { SideNavToggleButton } from './SideNavToggleButton'
+
+const NAV_ITEM_ICON_SIZE = '20'
+
+interface SideNavLinkProps {
+  to: To
+  children: React.ReactNode
+  icon?: string
+  end?: boolean
+}
+
+const SideNavLink = ({ to, children, icon, end = false }: SideNavLinkProps) => {
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      className={({ isActive }) =>
+        classnames(styles['nav-links-item'], {
+          [styles['nav-links-item-active']]: isActive,
+        })
+      }
+    >
+      {icon && <SvgIcon src={icon} width={NAV_ITEM_ICON_SIZE} />}
+      <span
+        className={classnames({
+          [styles['nav-links-item-without-icon']]: !icon,
+        })}
+      >
+        {children}
+      </span>
+    </NavLink>
+  )
+}
+
+export const RenderNavItem = ({
+  item,
+  isOpen = false,
+  onToggleButtonClick = noop,
+}: {
+  item: NavItem
+  isOpen?: boolean
+  onToggleButtonClick?: () => void
+}) => {
+  switch (item.type) {
+    case 'link':
+      return (
+        <li>
+          {item.to && (
+            <SideNavLink to={item.to} icon={item.icon} end={item.end}>
+              {item.title}
+            </SideNavLink>
+          )}
+        </li>
+      )
+
+    case 'section':
+      return (
+        <li>
+          <SideNavToggleButton
+            icon={item.icon || ''}
+            title={item.title || ''}
+            isExpanded={isOpen}
+            onClick={onToggleButtonClick}
+            ariaControls={`${item.key}-sublist`}
+            id={`${item.key}-sublist-button`}
+          />
+
+          {isOpen && (
+            <ul id={`${item.key}-sublist`}>
+              {item.children?.map((child: NavItem) => (
+                <RenderNavItem key={child.key} isOpen item={child} />
+              ))}
+            </ul>
+          )}
+        </li>
+      )
+    default:
+      return null
+  }
+}

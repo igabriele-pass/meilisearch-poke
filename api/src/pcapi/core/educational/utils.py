@@ -1,0 +1,226 @@
+import hashlib
+import logging
+import typing
+from datetime import datetime
+from datetime import timedelta
+
+import jwt
+import pytz
+from psycopg2.extras import DateTimeRange
+
+from pcapi.core.educational import exceptions
+from pcapi.core.educational import models
+from pcapi.core.offerers.utils import is_venue_address
+from pcapi.models import db
+from pcapi.utils import date as date_utils
+from pcapi.utils import db as db_utils
+from pcapi.utils import requests
+from pcapi.utils.jwt import ALGORITHM_RS_256
+
+
+logger = logging.getLogger(__name__)
+
+COLLECTIVE_OFFER_DISPLAYED_STATUS_LABELS: typing.Final = {
+    models.CollectiveOfferDisplayedStatus.PUBLISHED: "Publiée",
+    models.CollectiveOfferDisplayedStatus.UNDER_REVIEW: "En instruction",
+    models.CollectiveOfferDisplayedStatus.REJECTED: "Non conforme",
+    models.CollectiveOfferDisplayedStatus.PREBOOKED: "Préréservée",
+    models.CollectiveOfferDisplayedStatus.BOOKED: "Réservée",
+    models.CollectiveOfferDisplayedStatus.HIDDEN: "En pause",
+    models.CollectiveOfferDisplayedStatus.EXPIRED: "Expirée",
+    models.CollectiveOfferDisplayedStatus.ENDED: "Terminée",
+    models.CollectiveOfferDisplayedStatus.CANCELLED: "Annulée",
+    models.CollectiveOfferDisplayedStatus.REIMBURSED: "Remboursée",
+    models.CollectiveOfferDisplayedStatus.ARCHIVED: "Archivée",
+    models.CollectiveOfferDisplayedStatus.DRAFT: "Brouillon",
+}
+
+COLLECTIVE_ADDITIONAL_FEE_TYPE_LABELS: typing.Final = {
+    models.CollectiveAdditionalFeeType.ACCOMMODATION: "Hébergement de l'intervenant•e",
+    models.CollectiveAdditionalFeeType.TRAVEL: "Déplacement de l'intervenant•e",
+    models.CollectiveAdditionalFeeType.MEAL: "Repas de l'intervenant•e",
+    models.CollectiveAdditionalFeeType.CONSUMABLE_ITEMS: "Matériel consommable",
+    models.CollectiveAdditionalFeeType.COPYRIGHT: "Droits d'auteur",
+    models.CollectiveAdditionalFeeType.BROADCASTING: "Droits de diffusion",
+    models.CollectiveAdditionalFeeType.APPLICATION_FEE: "Frais de dossier",
+    models.CollectiveAdditionalFeeType.MANAGEMENT_FEE: "Frais de gestion",
+    models.CollectiveAdditionalFeeType.OTHER: "Autre",
+}
+
+
+def compute_educational_booking_cancellation_limit_date(
+    event_start: datetime, booking_creation_date: datetime
+) -> datetime:
+    return max(event_start - timedelta(days=30), booking_creation_date)
+
+
+def get_hashed_user_id(email: str) -> str:
+    return hashlib.sha256(email.encode("utf-8")).hexdigest()
+
+
+def log_information_for_data_purpose(
+    event_name: str,
+    user_role: models.AdageFrontRoles | None,
+    user_email: str | None = None,
+    extra_data: dict | None = None,
+    uai: str | None = None,
+) -> None:
+    if extra_data is None:
+        extra_data = {}
+
+    if user_email is not None:
+        user_id = get_hashed_user_id(user_email)
+        extra_data["userId"] = user_id
+
+    if uai is not None:
+        extra_data["uai"] = uai
+
+    if user_role is not None:
+        extra_data["user_role"] = user_role
+
+    logger.info(
+        event_name,
+        extra={"analyticsSource": "adage", **extra_data},
+        technical_message_id="collective_analytics_event",
+    )
+
+
+UAI_FOR_FAKE_TOKEN = "0910620E"
+
+
+def create_adage_jwt_fake_valid_token(readonly: bool, can_prebook: bool = True, uai: str | None = None) -> str:
+    with open("tests/routes/adage_iframe/private_keys_for_tests/valid_rsa_private_key", "rb") as reader:
+        authenticated_informations = {
+            "civilite": "M.",
+            "nom": "TEST",
+            "prenom": "COMPTE",
+            "mail": "compte.test@education.gouv.fr",
+            "exp": date_utils.get_naive_utc_now() + timedelta(days=1),
+            "canPrebook": can_prebook,
+        }
+        if not readonly:
+            uai = uai if uai is not None else UAI_FOR_FAKE_TOKEN
+            institution = (
+                db.session.query(models.EducationalInstitution)
+                .filter(models.EducationalInstitution.institutionId == uai)
+                .one_or_none()
+            )
+
+            if institution and institution.latitude is not None and institution.longitude is not None:
+                lat = float(institution.latitude)
+                long = float(institution.longitude)
+            else:
+                # Paris
+                lat = 48.8566
+                long = 2.3522
+
+            authenticated_informations["uai"] = uai
+            authenticated_informations["lat"] = lat
+            authenticated_informations["lon"] = long
+
+        return jwt.encode(
+            authenticated_informations,
+            key=reader.read().decode(),
+            algorithm=ALGORITHM_RS_256,
+        )
+
+
+def get_image_from_url(url: str) -> bytes:
+    response = requests.get(url)
+    if response.status_code != 200:
+        raise exceptions.CantGetImageFromUrl
+    return response.content
+
+
+def get_non_empty_date_time_range(start: datetime, end: datetime) -> DateTimeRange:
+    """
+    As the bounds of DateTimeRange are '[)' by default, we need to add 1 second to end to get a non-empty range
+    when start and end dates are equal
+    """
+
+    if start == end:
+        new_end = end + timedelta(seconds=1)
+    else:
+        new_end = end
+
+    return DateTimeRange(start, new_end)
+
+
+def get_collective_offer_full_address(offer: models.CollectiveOffer | models.CollectiveOfferTemplate) -> str:
+    match offer.locationType:
+        case models.CollectiveLocationType.SCHOOL:
+            return "En établissement scolaire"
+
+        case models.CollectiveLocationType.ADDRESS:
+            assert offer.offererAddress is not None
+
+            address = offer.offererAddress.address.fullAddress
+            label: str | None
+            if is_venue_address(offer.offererAddress, offer.venue):
+                label = offer.venue.publicName
+            else:
+                label = offer.offererAddress.label
+
+            if label:
+                address = f"{label} - {address}"
+
+            return address
+
+        case models.CollectiveLocationType.TO_BE_DEFINED:
+            return "À déterminer avec l'enseignant"
+
+
+def format_collective_offer_displayed_status(
+    displayed_status: models.CollectiveOfferDisplayedStatus,
+) -> str:
+    return COLLECTIVE_OFFER_DISPLAYED_STATUS_LABELS.get(displayed_status) or displayed_status.value
+
+
+def format_collective_additional_fee_type(fee_type: models.CollectiveAdditionalFeeType) -> str:
+    return COLLECTIVE_ADDITIONAL_FEE_TYPE_LABELS.get(fee_type) or fee_type.value
+
+
+def get_educational_year_full_bounds(educational_year: models.EducationalYear) -> tuple[datetime, datetime]:
+    return educational_year.beginningDate, educational_year.expirationDate
+
+
+def get_educational_year_first_period_bounds(educational_year: models.EducationalYear) -> tuple[datetime, datetime]:
+    period_start = educational_year.beginningDate
+
+    # Set the time to 23:59:59 Paris time to be consistent with educational year expirationDate
+    naive_end = datetime(year=period_start.year, month=12, day=31, hour=23, minute=59, second=59)
+    aware_end = pytz.timezone(date_utils.METROPOLE_TIMEZONE).localize(naive_end)
+    # Return a naive datetime representing UTC to be consistent with period_start
+    period_end = date_utils.to_naive_utc_datetime(aware_end)
+
+    return period_start, period_end
+
+
+def get_educational_year_second_period_bounds(educational_year: models.EducationalYear) -> tuple[datetime, datetime]:
+    # Set the time to 00:00:00 Paris time to be consistent with educational year beginningDate
+    naive_start = datetime(year=educational_year.beginningDate.year + 1, month=1, day=1)
+    aware_start = pytz.timezone(date_utils.METROPOLE_TIMEZONE).localize(naive_start)
+    # Return a naive datetime representing UTC to be consistent with period_start
+    period_start = date_utils.to_naive_utc_datetime(aware_start)
+
+    period_end = educational_year.expirationDate
+
+    return period_start, period_end
+
+
+def get_educational_year_full_period(educational_year: models.EducationalYear) -> DateTimeRange:
+    """Get the period 01/09 -> 31/08 (period = educational year)"""
+    period_start, period_end = get_educational_year_full_bounds(educational_year)
+    return db_utils.make_timerange(period_start, period_end)
+
+
+def get_educational_year_first_period(educational_year: models.EducationalYear) -> DateTimeRange:
+    """Get the period 01/09 -> 31/12 of the given educational year"""
+    period_start, period_end = get_educational_year_first_period_bounds(educational_year)
+    return db_utils.make_timerange(period_start, period_end)
+
+
+def get_educational_year_second_period(educational_year: models.EducationalYear) -> DateTimeRange:
+    """Get the period 01/01 -> 31/08 of the given educational year"""
+    period_start, period_end = get_educational_year_second_period_bounds(educational_year)
+    return db_utils.make_timerange(period_start, period_end)

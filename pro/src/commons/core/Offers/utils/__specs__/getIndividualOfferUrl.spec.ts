@@ -1,0 +1,151 @@
+import {
+  INDIVIDUAL_OFFER_WIZARD_STEP_IDS,
+  OFFER_WIZARD_MODE,
+} from '@/commons/core/Offers/constants'
+
+import { getIndividualOfferUrl } from '../getIndividualOfferUrl'
+
+describe('getIndividualOfferUrl', () => {
+  const offerId = 42
+  const testCases = [
+    {
+      props: {
+        offerId: undefined,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION,
+      },
+      expectedUrl: '/offre/individuelle/creation/description',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION,
+      },
+      expectedUrl: '/offre/individuelle/42/creation/description',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.SUMMARY,
+      },
+      expectedUrl: '/offre/individuelle/42/creation/recapitulatif',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.CONFIRMATION,
+      },
+      expectedUrl: '/offre/individuelle/42/creation/confirmation',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TARIFS,
+      },
+      expectedUrl: '/offre/individuelle/42/creation/tarifs',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.EDITION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION,
+      },
+      expectedUrl: '/offre/individuelle/42/edition/description',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.EDITION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TARIFS,
+      },
+      expectedUrl: '/offre/individuelle/42/edition/tarifs',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.EDITION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.SUMMARY,
+      },
+      expectedUrl: '',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.EDITION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.CONFIRMATION,
+      },
+      expectedUrl: '',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.EDITION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.BOOKINGS,
+      },
+      expectedUrl: '/offre/individuelle/42/reservations',
+    },
+    {
+      props: {
+        offerId: offerId,
+        mode: OFFER_WIZARD_MODE.EDITION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.EXPOSURE,
+      },
+      expectedUrl: '/offre/individuelle/42/visibilite',
+    },
+  ]
+  it.each(testCases)('should return right url', ({ props, expectedUrl }) => {
+    expect(getIndividualOfferUrl(props)).toBe(expectedUrl)
+  })
+
+  describe('onboarding', () => {
+    const onBoardingTestCases = [
+      {
+        props: {
+          offerId: undefined,
+          mode: OFFER_WIZARD_MODE.CREATION,
+          step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION,
+          isOnboarding: true,
+        },
+        expectedUrl: '/onboarding/offre/individuelle/creation/description',
+      },
+      {
+        props: {
+          offerId: offerId,
+          mode: OFFER_WIZARD_MODE.CREATION,
+          step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION,
+          isOnboarding: true,
+        },
+        expectedUrl: '/onboarding/offre/individuelle/42/creation/description',
+      },
+      {
+        props: {
+          offerId: offerId,
+          mode: OFFER_WIZARD_MODE.CREATION,
+          step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.SUMMARY,
+          isOnboarding: true,
+        },
+        expectedUrl: '/onboarding/offre/individuelle/42/creation/recapitulatif',
+      },
+      {
+        props: {
+          offerId: offerId,
+          mode: OFFER_WIZARD_MODE.CREATION,
+          step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TARIFS,
+          isOnboarding: true,
+        },
+        expectedUrl: '/onboarding/offre/individuelle/42/creation/tarifs',
+      },
+    ]
+
+    it.each(onBoardingTestCases)(
+      'should return right url',
+      ({ props, expectedUrl }) => {
+        expect(getIndividualOfferUrl(props)).toBe(expectedUrl)
+      }
+    )
+  })
+})

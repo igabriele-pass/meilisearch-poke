@@ -1,0 +1,41 @@
+import logging
+import math
+
+from flask_login import login_required
+
+from pcapi.core.educational import repository
+from pcapi.routes.pro import blueprint
+from pcapi.routes.pro.blueprint import pro_blueprint
+from pcapi.routes.serialization import educational_institutions
+from pcapi.serialization.decorator import spectree_serialize
+from pcapi.utils.transaction_manager import atomic
+
+
+logger = logging.getLogger(__name__)
+
+
+@pro_blueprint.route("/educational_institutions", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(
+    response_model=educational_institutions.EducationalInstitutionsResponseModel,
+    on_success_status=200,
+    on_error_statuses=[401],
+    api=blueprint.pro_schema,
+)
+def get_educational_institutions(
+    query: educational_institutions.EducationalInstitutionsQueryModel,
+) -> educational_institutions.EducationalInstitutionsResponseModel:
+    offset = (query.per_page_limit * (query.page - 1)) if query.page > 0 else 0
+
+    institutions, total = repository.get_all_educational_institutions(offset=offset, limit=query.per_page_limit)
+
+    return educational_institutions.EducationalInstitutionsResponseModel(
+        educational_institutions=[
+            educational_institutions.EducationalInstitutionResponseModel.model_validate(institution)
+            for institution in institutions
+        ],
+        page=query.page,
+        pages=max(math.ceil(total / query.per_page_limit), 1),
+        total=total,
+    )

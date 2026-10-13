@@ -1,0 +1,486 @@
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import * as router from 'react-router'
+import { Route, Routes } from 'react-router'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { HTTP_STATUS } from '@/apiClient/helpers'
+import type { SharedLoginUserResponseModel } from '@/apiClient/v1'
+import * as useAnalytics from '@/app/App/analytics/firebase'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import {
+  RECAPTCHA_ERROR,
+  RECAPTCHA_ERROR_MESSAGE,
+} from '@/commons/core/shared/constants'
+import * as initializeUserModule from '@/commons/store/user/dispatchers/initializeUser'
+import { makeApiError } from '@/commons/utils/factories/errorFactories'
+import {
+  defaultGetOffererResponseModel,
+  getOffererNameFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import * as utils from '@/commons/utils/recaptcha'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+import { SnackBarContainer } from '@/components/SnackBarContainer/SnackBarContainer'
+
+import { SignIn } from './SignIn'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    signout: vi.fn(),
+    listOfferersNames: vi.fn(),
+    getProfile: vi.fn(),
+    getOfferer: vi.fn(),
+    signin: vi.fn(),
+  },
+}))
+
+vi.mock('@/commons/utils/windowMatchMedia', () => ({
+  doesUserPreferReducedMotion: vi.fn(),
+}))
+
+vi.mock('@/app/AppRouter/utils/getUserDefaultPath', () => ({
+  getUserDefaultPath: vi.fn(() => '/accueil'),
+}))
+
+vi.mock('react-router', async () => {
+  const actual = await vi.importActual('react-router')
+  return {
+    ...actual,
+    useNavigate: vi.fn(),
+  }
+})
+
+const mockLogEvent = vi.fn()
+
+const renderSignIn = (options?: RenderWithProvidersOptions) => {
+  return renderWithProviders(
+    <>
+      <SignIn />
+      <Routes>
+        <Route
+          path="/accueil"
+          element={<span>I’m logged standard user redirect route</span>}
+        />
+        <Route
+          path="/inscription/compte/creation"
+          element={<span>I’m the inscription page</span>}
+        />
+        <Route
+          path="/inscription/structure"
+          element={<span>I’m the onboarding page</span>}
+        />
+        <Route path="/offres" element={<span>I’m the offer page</span>} />
+      </Routes>
+      <SnackBarContainer />
+    </>,
+    {
+      initialRouterEntries: ['/connexion'],
+      features: ['API_SIRENE_AVAILABLE'],
+      ...options,
+    }
+  )
+}
+const scrollIntoViewMock = vi.fn()
+describe('SignIn', () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = scrollIntoViewMock
+    vi.spyOn(api, 'getProfile').mockResolvedValue(sharedCurrentUserFactory())
+    vi.spyOn(api, 'signin').mockResolvedValue(
+      {} as SharedLoginUserResponseModel
+    )
+    vi.spyOn(utils, 'initReCaptchaScript').mockReturnValue({
+      remove: vi.fn(),
+    } as unknown as HTMLScriptElement)
+    vi.spyOn(utils, 'getReCaptchaToken').mockResolvedValue('token')
+
+    vi.spyOn(api, 'listOfferersNames').mockResolvedValue({
+      offerersNames: [
+        getOffererNameFactory({
+          id: 1,
+          name: 'Mon super cinéma',
+          validated: true,
+        }),
+        getOffererNameFactory({
+          id: 1,
+          name: 'Ma super librairie',
+          validated: true,
+        }),
+      ],
+    })
+
+    vi.spyOn(api, 'getOfferer').mockResolvedValue(
+      defaultGetOffererResponseModel
+    )
+  })
+
+  describe('FF WIP_PRE_SIGNUP_SIMULATION', () => {
+    it('should use FullLayout when FF is enabled', () => {
+      renderSignIn({ features: ['WIP_PRE_SIGNUP_SIMULATION'] })
+
+      expect(screen.getByTestId('signin-full-layout')).toBeInTheDocument()
+      expect(screen.queryByTestId('sign-up-header')).not.toBeInTheDocument()
+      expect(screen.getAllByText('Obligatoire')).toHaveLength(2)
+      expect(
+        screen.queryByText('Tous les champs sont obligatoires.')
+      ).not.toBeInTheDocument()
+    })
+
+    it('should use default layout when FF is disabled', () => {
+      renderSignIn()
+
+      expect(screen.queryByTestId('signin-full-layout')).not.toBeInTheDocument()
+      expect(screen.getByTestId('sign-up-header')).toBeInTheDocument()
+      expect(
+        screen.getByText('Tous les champs sont obligatoires.')
+      ).toBeVisible()
+      expect(screen.queryAllByText('Obligatoire')).toHaveLength(0)
+    })
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderSignIn()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display 2 inputs and one link to account creation and one button to login', () => {
+    // When
+    renderSignIn()
+
+    // Then
+    expect(screen.getByLabelText('Adresse email')).toBeInTheDocument()
+    expect(screen.getByLabelText('Mot de passe')).toBeInTheDocument()
+    expect(screen.getByText('Se connecter')).toBeInTheDocument()
+    expect(screen.getByText('S’inscrire')).toBeInTheDocument()
+    expect(
+      screen.getByText('Réinitialisez votre mot de passe')
+    ).toBeInTheDocument()
+  })
+
+  describe('when user clicks on the eye on password input', () => {
+    it('should reveal password', async () => {
+      // When
+      renderSignIn()
+      const eyePasswordButton = screen.getByRole('button', {
+        name: 'Afficher le mot de passe',
+      })
+
+      // Then
+      await userEvent.click(eyePasswordButton)
+
+      expect(screen.getByLabelText('Mot de passe')).toHaveAttribute(
+        'type',
+        'text'
+      )
+    })
+
+    it('should hide password when user re-click on eye', async () => {
+      // Given
+      renderSignIn()
+      const eyePasswordButton = screen.getByRole('button', {
+        name: 'Afficher le mot de passe',
+      })
+
+      // When
+      await userEvent.click(eyePasswordButton)
+      await userEvent.click(eyePasswordButton)
+
+      //then
+      expect(screen.getByLabelText('Mot de passe')).toHaveAttribute(
+        'type',
+        'password'
+      )
+    })
+  })
+
+  describe("when user clicks on 'Créer un compte'", () => {
+    it('should redirect to the creation page when the API sirene is available', () => {
+      renderSignIn()
+
+      expect(screen.getByRole('link', { name: 'S’inscrire' })).toHaveAttribute(
+        'href',
+        '/inscription'
+      )
+    })
+
+    it('should redirect to the unavailable error page when the API sirene feature is disabled', () => {
+      renderSignIn({ features: [] })
+
+      // then
+      expect(screen.getByRole('link', { name: 'S’inscrire' })).toHaveAttribute(
+        'href',
+        '/erreur/indisponible'
+      )
+    })
+
+    it('should trigger a tracking event', async () => {
+      vi.spyOn(useAnalytics, 'useAnalytics').mockImplementation(() => ({
+        logEvent: mockLogEvent,
+      }))
+      renderSignIn()
+      await userEvent.click(
+        screen.getByRole('link', {
+          name: 'S’inscrire',
+        })
+      )
+      await waitFor(() => {
+        expect(mockLogEvent).toHaveBeenCalledTimes(1)
+        expect(mockLogEvent).toHaveBeenNthCalledWith(
+          1,
+          Events.CLICKED_CREATE_ACCOUNT
+        )
+      })
+    })
+  })
+
+  it('should call submit prop when user clicks on "Se connecter"', async () => {
+    const initializeUserSpy = vi
+      .spyOn(initializeUserModule, 'initializeUser')
+      .mockReturnValueOnce({ unwrap: () => Promise.resolve() } as any)
+
+    renderSignIn()
+
+    const email = screen.getByLabelText('Adresse email')
+    await userEvent.type(email, 'MonPetitEmail@example.com')
+    const password = screen.getByLabelText('Mot de passe')
+    await userEvent.type(password, 'fakePassword')
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Se connecter',
+      })
+    )
+
+    expect(api.signin).toHaveBeenCalledExactlyOnceWith({
+      body: {
+        identifier: 'MonPetitEmail@example.com',
+        password: 'fakePassword',
+        captchaToken: 'token',
+      },
+    })
+    expect(initializeUserSpy).toHaveBeenCalledExactlyOnceWith({ user: {} })
+  })
+
+  it('should navigate to user default path on successful login with API_SIRENE_AVAILABLE', async () => {
+    const mockNavigate = vi.fn()
+    vi.mocked(router.useNavigate).mockReturnValue(mockNavigate)
+    const mockThunk: any = () => {
+      const promise = Promise.resolve() as any
+      promise.unwrap = () => Promise.resolve()
+      return promise
+    }
+    vi.spyOn(initializeUserModule, 'initializeUser').mockReturnValueOnce(
+      mockThunk
+    )
+
+    renderSignIn({ features: ['API_SIRENE_AVAILABLE'] })
+
+    await userEvent.type(
+      screen.getByRole('textbox', { name: 'Adresse email' }),
+      'email@example.com'
+    )
+    await userEvent.type(screen.getByLabelText('Mot de passe'), 'fakePassword')
+    await userEvent.click(screen.getByRole('button', { name: 'Se connecter' }))
+
+    await waitFor(() => {
+      expect(mockNavigate).toHaveBeenCalledWith('/accueil')
+    })
+  })
+
+  it('should display errors message and focus email input when login failed', async () => {
+    renderSignIn()
+
+    const email = screen.getByLabelText('Adresse email')
+    await userEvent.type(email, 'MonPetitEmail@example.com')
+    const password = screen.getByLabelText('Mot de passe')
+    await userEvent.type(password, 'fakePassword')
+
+    vi.spyOn(api, 'signin').mockRejectedValueOnce(
+      makeApiError({
+        body: { identifier: ['password is invalid'] },
+        status: 401,
+      })
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Se connecter',
+      })
+    )
+
+    expect(
+      screen.getAllByText('Identifiant ou mot de passe incorrect.')
+    ).toHaveLength(2)
+
+    await waitFor(() => {
+      expect(screen.getByLabelText('Adresse email')).toHaveFocus()
+    })
+  })
+
+  it('should handle API error with non-empty errors object', async () => {
+    renderSignIn()
+
+    const email = screen.getByLabelText('Adresse email')
+    await userEvent.type(email, 'test@example.com')
+    const password = screen.getByLabelText('Mot de passe')
+    await userEvent.type(password, 'password123')
+
+    vi.spyOn(api, 'signin').mockRejectedValueOnce(
+      makeApiError({
+        body: {
+          email: ['Email invalide'],
+          password: ['Mot de passe invalide'],
+        },
+        status: 400,
+      })
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Se connecter',
+      })
+    )
+
+    // Vérifie que Object.values(errors).length > 0 est bien couvert
+    expect(
+      screen.getAllByText('Identifiant ou mot de passe incorrect.')
+    ).toHaveLength(2)
+  })
+
+  it('should display an error message when login rate limit exceeded', async () => {
+    renderSignIn()
+
+    const email = screen.getByLabelText('Adresse email')
+    await userEvent.type(email, 'MonPetitEmail@example.com')
+    const password = screen.getByLabelText('Mot de passe')
+    await userEvent.type(password, 'fakePassword')
+
+    vi.spyOn(api, 'signin').mockRejectedValueOnce(
+      makeApiError({
+        body: {
+          identifier: [
+            'Nombre de tentatives de connexion dépassé, veuillez réessayer dans une minute',
+          ],
+        },
+        status: HTTP_STATUS.TOO_MANY_REQUESTS,
+      })
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Se connecter',
+      })
+    )
+
+    expect(
+      (
+        await screen.findAllByText(
+          'Nombre de tentatives de connexion dépassé. Veuillez réessayer dans 1 minute.'
+        )
+      ).length
+    ).toBeGreaterThan(0)
+  })
+
+  it('should display an error message when reCAPTCHA fails', async () => {
+    renderSignIn()
+
+    vi.spyOn(utils, 'getReCaptchaToken').mockRejectedValueOnce(RECAPTCHA_ERROR)
+
+    const email = screen.getByLabelText('Adresse email')
+    await userEvent.type(email, 'MonPetitEmail@example.com')
+    const password = screen.getByLabelText('Mot de passe')
+    await userEvent.type(password, 'fakePassword')
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Se connecter',
+      })
+    )
+
+    expect(
+      (await screen.findAllByText(RECAPTCHA_ERROR_MESSAGE)).length
+    ).toBeGreaterThan(0)
+  })
+
+  it('should clear errors when clicking after an API error', async () => {
+    renderSignIn()
+
+    const email = screen.getByLabelText('Adresse email')
+    await userEvent.type(email, 'MonPetitEmail@example.com')
+    const password = screen.getByLabelText('Mot de passe')
+    await userEvent.type(password, 'fakePassword')
+
+    vi.spyOn(api, 'signin').mockRejectedValueOnce(
+      makeApiError({
+        body: { identifier: ['password is invalid'] },
+        status: 401,
+      })
+    )
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Se connecter',
+      })
+    )
+
+    // Vérifier que les erreurs sont affichées
+    await waitFor(() => {
+      expect(
+        screen.getAllByText('Identifiant ou mot de passe incorrect.')
+      ).toHaveLength(2)
+    })
+
+    // Simuler un clic sur le document pour déclencher le reset
+    await userEvent.click(document.body)
+
+    // Attendre que les erreurs soient effacées
+    await waitFor(() => {
+      expect(
+        screen.queryByText('Identifiant ou mot de passe incorrect.')
+      ).not.toBeInTheDocument()
+    })
+  })
+
+  describe('tracking', () => {
+    beforeEach(() => {
+      vi.spyOn(useAnalytics, 'useAnalytics').mockImplementation(() => ({
+        logEvent: mockLogEvent,
+      }))
+    })
+
+    it('should trigger a tracking event', async () => {
+      renderSignIn()
+      await userEvent.click(
+        screen.getByRole('link', {
+          name: 'S’inscrire',
+        })
+      )
+      await waitFor(() => {
+        expect(mockLogEvent).toHaveBeenCalledTimes(1)
+        expect(mockLogEvent).toHaveBeenNthCalledWith(
+          1,
+          Events.CLICKED_CREATE_ACCOUNT
+        )
+      })
+    })
+
+    it('should trigger a tracking event when user clicks forgotten password"', async () => {
+      renderSignIn()
+
+      await userEvent.click(
+        screen.getByRole('link', {
+          name: 'Réinitialisez votre mot de passe',
+        })
+      )
+      expect(mockLogEvent).toHaveBeenCalledTimes(1)
+      expect(mockLogEvent).toHaveBeenNthCalledWith(
+        1,
+        Events.CLICKED_FORGOTTEN_PASSWORD
+      )
+    })
+  })
+})

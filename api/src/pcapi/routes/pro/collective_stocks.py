@@ -1,0 +1,112 @@
+import logging
+
+from flask_login import current_user
+from flask_login import login_required
+
+from pcapi.core.educational import exceptions
+from pcapi.core.educational import repository
+from pcapi.core.educational.api import stock as educational_api_stock
+from pcapi.core.offerers import exceptions as offerers_exceptions
+from pcapi.core.offerers import repository as offerers_repository
+from pcapi.core.offers import exceptions as offers_exceptions
+from pcapi.models.api_errors import ApiErrors
+from pcapi.models.api_errors import ForbiddenError
+from pcapi.models.api_errors import resource_not_found_error
+from pcapi.routes.pro import blueprint
+from pcapi.routes.pro.blueprint import pro_blueprint
+from pcapi.routes.serialization import collective_stock_serialize
+from pcapi.serialization.decorator import spectree_serialize
+from pcapi.utils import rest as rest_utils
+from pcapi.utils.transaction_manager import atomic
+
+
+logger = logging.getLogger(__name__)
+
+
+@pro_blueprint.route("/collective/stocks", methods=["POST"])
+@atomic()
+@login_required
+@spectree_serialize(
+    on_success_status=201,
+    on_error_statuses=[400, 404],
+    response_model=collective_stock_serialize.CollectiveStockResponseModel,
+    api=blueprint.pro_schema,
+)
+def create_collective_stock(
+    body: collective_stock_serialize.CollectiveStockCreationBodyModel,
+) -> collective_stock_serialize.CollectiveStockResponseModel:
+    try:
+        venue = offerers_repository.get_venue_by_collective_offer_id(body.offerId)
+    except offerers_exceptions.CannotFindOffererForOfferId:
+        raise resource_not_found_error()
+    rest_utils.check_user_has_access_to_offerer(current_user, venue.managingOffererId)
+    rest_utils.check_venue_is_opened(venue)
+
+    try:
+        collective_stock = educational_api_stock.create_collective_stock(body)
+    except exceptions.CollectiveStockAlreadyExists:
+        raise ApiErrors({"code": "EDUCATIONAL_STOCK_ALREADY_EXISTS"})
+    except exceptions.StartAndEndEducationalYearDifferent:
+        raise ApiErrors({"code": "START_AND_END_EDUCATIONAL_YEAR_DIFFERENT"})
+    except exceptions.StartEducationalYearMissing:
+        raise ApiErrors({"code": "START_EDUCATIONAL_YEAR_MISSING"})
+    except exceptions.EndEducationalYearMissing:
+        raise ApiErrors({"code": "END_EDUCATIONAL_YEAR_MISSING"})
+    except exceptions.EducationalException as exc:
+        raise ApiErrors(exc.errors)
+
+    return collective_stock_serialize.CollectiveStockResponseModel.model_validate(collective_stock)
+
+
+@pro_blueprint.route("/collective/stocks/<int:collective_stock_id>", methods=["PATCH"])
+@atomic()
+@login_required
+@spectree_serialize(
+    on_success_status=200,
+    on_error_statuses=[400, 401, 404],
+    api=blueprint.pro_schema,
+    response_model=collective_stock_serialize.CollectiveStockResponseModel,
+)
+def edit_collective_stock(
+    collective_stock_id: int, body: collective_stock_serialize.CollectiveStockEditionBodyModel
+) -> collective_stock_serialize.CollectiveStockResponseModel:
+    collective_stock = repository.get_collective_stock(collective_stock_id)
+    if collective_stock is None:
+        raise resource_not_found_error()
+
+    try:
+        venue = offerers_repository.get_venue_by_collective_stock_id(collective_stock.id)
+    except offerers_exceptions.CannotFindOffererForOfferId:
+        raise resource_not_found_error()
+    rest_utils.check_user_has_access_to_offerer(current_user, venue.managingOffererId)
+    rest_utils.check_venue_is_opened(venue)
+
+    try:
+        educational_api_stock.edit_collective_stock(
+            stock=collective_stock, stock_data=body.model_dump(exclude_unset=True)
+        )
+
+        # re-fetch collective stock to reload relations
+        collective_stock = repository.get_collective_stock(collective_stock_id)
+
+        return collective_stock_serialize.CollectiveStockResponseModel.model_validate(collective_stock)
+    except exceptions.CollectiveOfferForbiddenAction:
+        raise ForbiddenError({"global": ["Cette action n'est pas autorisée sur l'offre collective liée à ce stock."]})
+    except exceptions.EndDatetimeBeforeStartDatetime:
+        raise ApiErrors({"educationalStock": ["La date de fin de l'évènement ne peut précéder la date de début."]})
+    except (
+        offers_exceptions.BookingLimitDatetimeTooLate
+    ):  # (tcoudray-pass, 14/05/2025) TODO: Refactor, educational_api should not raise this kind of error
+        raise ApiErrors(
+            {"educationalStock": ["La date limite de confirmation ne peut être fixée après la date de l évènement"]}
+        )
+    except (
+        offers_exceptions.OfferException
+    ) as error:  # (tcoudray-pass, 14/05/2025) TODO: Refactor, should not raise this kind of error
+        raise ApiErrors(error.errors)
+    except exceptions.StartAndEndEducationalYearDifferent:
+        raise ApiErrors({"code": "START_AND_END_EDUCATIONAL_YEAR_DIFFERENT"})
+    except exceptions.StartEducationalYearMissing:
+        raise ApiErrors({"code": "START_EDUCATIONAL_YEAR_MISSING"})
+    except exceptions.EndEducationalYearMissing:
+        raise ApiErrors({"code": "END_EDUCATIONAL_YEAR_MISSING"})

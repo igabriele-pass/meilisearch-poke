@@ -1,0 +1,93 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_outline.scss" as outline;
+
+$offer-image-height: rem.torem(273px);
+$offer-image-width: rem.torem(216px);
+
+.container {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: $offer-image-width;
+  gap: var(--size-spacing-l);
+}
+
+.offer-link {
+  &:active {
+    opacity: 0.64;
+
+    .offer-image {
+      box-shadow: none;
+    }
+
+    .offer-name,
+    .offer-venue-name,
+    .offer-venue-distance {
+      text-decoration: none;
+    }
+  }
+
+  &:hover {
+    .offer-image {
+      box-shadow: var(--shadow-overlay);
+    }
+
+    .offer-name,
+    .offer-venue-name,
+    .offer-venue-distance {
+      text-decoration: underline;
+    }
+  }
+
+  &:focus-visible {
+    @include outline.focus-outline(rem.torem(4px));
+
+    border-radius: var(--size-border-radius-l);
+  }
+}
+
+.offer-image-container {
+  height: rem.torem(273px);
+}
+
+.offer-image {
+  width: $offer-image-width;
+  height: $offer-image-height;
+  border-radius: var(--size-border-radius-l);
+  border: rem.torem(1px) solid var(--color-border-inverted);
+  object-fit: cover;
+
+  &.offer-image-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--color-background-subtle);
+    color: var(--color-icon-subtle);
+  }
+}
+
+.offer-favorite-button-container {
+  position: absolute;
+  z-index: 1;
+  top: rem.torem(12px);
+  right: rem.torem(12px);
+}
+
+.offer-tag-container {
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-s);
+  width: 100%;
+  margin: var(--size-spacing-l) 0;
+}
+
+.offer-name {
+  @include fonts.body-accent;
+
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  margin-bottom: var(--size-spacing-l);
+}

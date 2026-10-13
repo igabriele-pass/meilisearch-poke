@@ -1,0 +1,134 @@
+import {
+  BACKEND_VERSION_HIGHER_EVENT,
+  BACKEND_VERSION_LOWER_EVENT,
+  notifyIfBackendVersionChanged,
+} from '../backendVersionCompatibility'
+
+vi.mock('@/commons/utils/config', () => ({
+  API_URL: 'https://backend.example',
+  VITE_APP_VERSION: '345.2.0',
+  IS_DEV: false,
+  IS_TESTING: false,
+}))
+
+describe('notifyIfBackendVersionChanged', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn())
+  })
+
+  it.each([404, 405, 501])(
+    'should check the backend version for an HTTP %s error',
+    async (status) => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        text: async () => '345.10.0',
+      } as Response)
+      const mismatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+
+      await notifyIfBackendVersionChanged(new Response(null, { status }))
+
+      expect(fetch).toHaveBeenCalledExactlyOnceWith(
+        'https://backend.example/health/api',
+        { cache: 'no-store' }
+      )
+      expect(mismatchEventSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ type: BACKEND_VERSION_HIGHER_EVENT })
+      )
+    }
+  )
+
+  it('should emit an event when the backend version is lower', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      text: async () => '345.0.0',
+    } as Response)
+    const mismatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+
+    await notifyIfBackendVersionChanged(new Response(null, { status: 404 }))
+
+    expect(mismatchEventSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ type: BACKEND_VERSION_LOWER_EVENT })
+    )
+  })
+
+  it('should emit an event when the backend version is higher', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      text: async () => '347.0.0',
+    } as Response)
+    const mismatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+
+    await notifyIfBackendVersionChanged(new Response(null, { status: 404 }))
+
+    expect(mismatchEventSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ type: BACKEND_VERSION_HIGHER_EVENT })
+    )
+  })
+
+  it.each([400, 403, 422, 500])(
+    'should not check the backend version for an HTTP %s error',
+    async (status) => {
+      const mismatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+
+      await notifyIfBackendVersionChanged(new Response(null, { status }))
+
+      expect(fetch).not.toHaveBeenCalled()
+      expect(mismatchEventSpy).not.toHaveBeenCalled()
+    }
+  )
+
+  it('should not check the backend version on the testing environment', async () => {
+    vi.resetModules()
+    vi.doMock('@/commons/utils/config', () => ({
+      API_URL: 'https://backend.example',
+      VITE_APP_VERSION: 'current-version',
+      IS_DEV: false,
+      IS_TESTING: true,
+    }))
+    const { notifyIfBackendVersionChanged: notify } = await import(
+      '../backendVersionCompatibility'
+    )
+    const mismatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+
+    await notify(new Response(null, { status: 404 }))
+
+    expect(fetch).not.toHaveBeenCalled()
+    expect(mismatchEventSpy).not.toHaveBeenCalled()
+
+    vi.doUnmock('@/commons/utils/config')
+  })
+
+  it('should not emit an event when backend and frontend versions match', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: true,
+      text: async () => '345.2.0',
+    } as Response)
+    const mismatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+
+    await notifyIfBackendVersionChanged(new Response(null, { status: 404 }))
+
+    expect(mismatchEventSpy).not.toHaveBeenCalled()
+  })
+
+  it('should not emit an event when the health check is not successful', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false,
+      text: async () => '345.10.0',
+    } as Response)
+    const mismatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+
+    await notifyIfBackendVersionChanged(new Response(null, { status: 404 }))
+
+    expect(mismatchEventSpy).not.toHaveBeenCalled()
+  })
+
+  it('should keep the original API error flow when the health check fails', async () => {
+    vi.mocked(fetch).mockRejectedValue(new Error('Network error'))
+    const mismatchEventSpy = vi.spyOn(window, 'dispatchEvent')
+
+    await expect(
+      notifyIfBackendVersionChanged(new Response(null, { status: 404 }))
+    ).resolves.toBeUndefined()
+    expect(mismatchEventSpy).not.toHaveBeenCalled()
+  })
+})

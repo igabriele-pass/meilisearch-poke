@@ -1,0 +1,11 @@
+@use "styles/mixins/rem" as rem;
+
+.venue-providers {
+  display: flex;
+  gap: var(--size-spacing-l);
+  flex-flow: row wrap;
+}
+
+.venue-providers-synchro {
+  max-width: rem.torem(486px);
+}

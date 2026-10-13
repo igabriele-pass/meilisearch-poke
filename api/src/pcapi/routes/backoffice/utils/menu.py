@@ -1,0 +1,324 @@
+import dataclasses
+import typing
+
+from flask import request
+from flask import url_for
+from flask_login import current_user
+
+from pcapi.routes.backoffice.utils import access_control
+from pcapi.routes.backoffice.utils import extra_funcs
+
+
+@dataclasses.dataclass
+class MenuItem:
+    label: str
+    url_name: str
+    permissions: list[str] | None = None
+    url_kwargs_getter: typing.Callable | None = None
+    settings: list[str] | None = None
+
+    @property
+    def is_available(self) -> bool:
+        if not getattr(current_user, "backoffice_profile", None):
+            return False
+
+        conditions: list[bool] = []
+        for permission in self.permissions or []:
+            conditions.append(access_control.has_current_user_permission(permission))
+
+        for setting in self.settings or []:
+            conditions.append(extra_funcs.get_setting(setting))
+
+        # If no conditions then return True as there is no check for the menu item
+        return all(conditions)
+
+    @property
+    def url(self) -> str:
+        kwargs = {}
+        if self.url_kwargs_getter:
+            kwargs = self.url_kwargs_getter()
+        return url_for(self.url_name, **kwargs)
+
+    @property
+    def is_active(self) -> bool:
+        return request.path == self.url
+
+
+@dataclasses.dataclass
+class MenuSection:
+    label: str
+    all_items: list[MenuItem]
+
+    @property
+    def is_available(self) -> bool:
+        return any(item.is_available for item in self.all_items)
+
+    @property
+    def items(self) -> list[MenuItem]:
+        return [item for item in self.all_items if item.is_available]
+
+
+MENU_SECTIONS = [
+    MenuSection(
+        label="Jeunes et grand public",
+        all_items=[
+            MenuItem(
+                label="Jeunes bénéficiaires ou à venir",
+                url_name="backoffice.public_accounts.list_public_accounts",
+                permissions=["READ_PUBLIC_ACCOUNT"],
+            ),
+            MenuItem(
+                label="Demandes de modifications DN",
+                url_name="backoffice.account_update.list_account_update_requests",
+                permissions=["MANAGE_ACCOUNT_UPDATE_REQUEST"],
+            ),
+            MenuItem(
+                label="Extraction des données jeunes",
+                url_name="backoffice.gdpr_extract.list_gdpr_user_data_extract",
+                permissions=["MANAGE_PUBLIC_ACCOUNT"],
+            ),
+            MenuItem(
+                label="Opérations spéciales",
+                url_name="backoffice.operations.list_events",
+                permissions=["READ_SPECIAL_EVENTS"],
+            ),
+            MenuItem(
+                label="Chroniques",
+                url_name="backoffice.chronicles.list_chronicles",
+                permissions=["READ_CHRONICLE"],
+            ),
+            MenuItem(
+                label="Tags des jeunes",
+                url_name="backoffice.account_tag.list_account_tags",
+                permissions=["READ_TAGS"],
+            ),
+        ],
+    ),
+    MenuSection(
+        label="Acteurs culturels",
+        all_items=[
+            MenuItem(
+                label="Liste des acteurs culturels",
+                url_name="backoffice.pro.search_pro",
+                permissions=["READ_PRO_ENTITY"],
+            ),
+            MenuItem(
+                label="Entités juridiques à valider",
+                url_name="backoffice.validation.list_offerers_to_validate",
+                permissions=["READ_PRO_ENTITY"],
+            ),
+            MenuItem(
+                label="Rattachements à valider",
+                url_name="backoffice.validation.list_offerers_attachments_to_validate",
+                permissions=["READ_PRO_ENTITY"],
+            ),
+            MenuItem(
+                label="Tags des entités juridiques",
+                url_name="backoffice.offerer_tag.list_offerer_tags",
+                permissions=["READ_TAGS"],
+            ),
+            MenuItem(
+                label="Offres individuelles",
+                url_name="backoffice.offer.list_offers",
+                permissions=["READ_OFFERS"],
+            ),
+            MenuItem(
+                label="Offres collectives",
+                url_name="backoffice.collective_offer.list_collective_offers",
+                permissions=["READ_OFFERS"],
+            ),
+            MenuItem(
+                label="Offres collectives vitrine",
+                url_name="backoffice.collective_offer_template.list_collective_offer_templates",
+                permissions=["READ_OFFERS"],
+            ),
+            MenuItem(
+                label="Tags des offres et partenaires culturels",
+                url_name="backoffice.tags.list_tags",
+                permissions=["READ_TAGS"],
+            ),
+            MenuItem(
+                label="Valorisations thématiques",
+                url_name="backoffice.highlights.list_highlights",
+                permissions=["READ_HIGHLIGHT"],
+            ),
+            MenuItem(
+                label="Actions sur les partenaires culturels",
+                url_name="backoffice.venue.list_venues",
+                permissions=["READ_PRO_ENTITY", "MANAGE_PRO_ENTITY"],
+            ),
+            MenuItem(
+                label="Préférences",
+                url_name="backoffice.preferences.edit_preferences",
+                permissions=["READ_PRO_ENTITY"],
+            ),
+        ],
+    ),
+    MenuSection(
+        label="Support Pro",
+        all_items=[
+            MenuItem(
+                label="Déplacer un SIRET",
+                url_name="backoffice.move_siret.move_siret",
+                permissions=["MOVE_SIRET"],
+            ),
+            MenuItem(
+                label="Synchronisation Pivot",
+                url_name="backoffice.pivots.get_pivots",
+                permissions=["READ_TECH_PARTNERS"],
+            ),
+            MenuItem(
+                label="Synchronisation partenaires techniques",
+                url_name="backoffice.providers.list_providers",
+                permissions=["READ_TECH_PARTNERS"],
+            ),
+            MenuItem(
+                label="Tarifs dérogatoires",
+                url_name="backoffice.reimbursement_rules.list_custom_reimbursement_rules",
+                permissions=["READ_REIMBURSEMENT_RULES"],
+            ),
+        ],
+    ),
+    MenuSection(
+        label="Réservations",
+        all_items=[
+            MenuItem(
+                label="Réservations individuelles",
+                url_name="backoffice.individual_bookings.list_individual_bookings",
+                permissions=["READ_BOOKINGS"],
+            ),
+            MenuItem(
+                label="Réservations collectives",
+                url_name="backoffice.collective_bookings.list_collective_bookings",
+                permissions=["READ_BOOKINGS"],
+            ),
+        ],
+    ),
+    MenuSection(
+        label="Catalogue",
+        all_items=[
+            MenuItem(
+                label="Base de données produits",
+                url_name="backoffice.product.search_product",
+                permissions=["READ_OFFERS"],
+            ),
+            MenuItem(
+                label="Artistes",
+                url_name="backoffice.artist.list_artists",
+                permissions=["READ_OFFERS"],
+            ),
+            MenuItem(
+                label="Recherche EAN via Tite Live",
+                url_name="backoffice.titelive.search_titelive",
+                permissions=["READ_OFFERS"],
+            ),
+        ],
+    ),
+    MenuSection(
+        label="Finance",
+        all_items=[
+            MenuItem(
+                label="Lots de virements",
+                url_name="backoffice.settlements.list_settlement_batches",
+                permissions=["READ_SETTLEMENTS"],
+            ),
+            MenuItem(
+                label="Gestion des incidents",
+                url_name="backoffice.finance_incidents.list_incidents",
+                permissions=["READ_INCIDENTS"],
+            ),
+            MenuItem(
+                label="Gestion des avis d'impayé",
+                url_name="backoffice.non_payment_notices.list_notices",
+                permissions=["READ_NON_PAYMENT_NOTICES"],
+            ),
+        ],
+    ),
+    MenuSection(
+        label="Fraude et conformité",
+        all_items=[
+            MenuItem(
+                label="Règles de validation d'offres",
+                url_name="backoffice.offer_validation_rules.list_rules",
+                permissions=["PRO_FRAUD_ACTIONS"],
+            ),
+            MenuItem(
+                label="Règles de modification de prix d'offres",
+                url_name="backoffice.offer_price_limitation_rules.list_rules",
+                permissions=["PRO_FRAUD_ACTIONS"],
+            ),
+            MenuItem(
+                label="Suspension de comptes jeunes",
+                url_name="backoffice.fraud.list_blacklisted_domain_names",
+                permissions=["BENEFICIARY_FRAUD_ACTIONS"],
+            ),
+        ],
+    ),
+    MenuSection(
+        label="Admin",
+        all_items=[
+            MenuItem(
+                label="Mon compte backoffice",
+                url_name="backoffice.bo_users.get_bo_user",
+                url_kwargs_getter=lambda: {"user_id": current_user.id, "active_tab": "roles"},
+            ),
+            MenuItem(
+                label="Rôles et permissions",
+                url_name="backoffice.get_roles",
+                permissions=["READ_PERMISSIONS"],
+            ),
+            MenuItem(
+                label="Utilisateurs BackOffice",
+                url_name="backoffice.bo_users.search_bo_users",
+                permissions=["READ_ADMIN_ACCOUNTS"],
+            ),
+            MenuItem(
+                label="Feature flipping",
+                url_name="backoffice.list_feature_flags",
+            ),
+            MenuItem(
+                label="Liste des sous-catégories",
+                url_name="backoffice.get_subcategories",
+            ),
+            MenuItem(
+                label="Campagnes de mise à jour de données",
+                url_name="backoffice.user_profile_refresh_campaigns.list_campaigns",
+                permissions=["READ_USER_PROFILE_REFRESH_CAMPAIGN"],
+            ),
+        ],
+    ),
+    MenuSection(
+        label="Dev",
+        all_items=[
+            MenuItem(
+                label="Générateur d'utilisateurs de test",
+                url_name="backoffice.dev.generate_user",
+                settings=["ENABLE_TEST_USER_GENERATION"],
+            ),
+            MenuItem(
+                label="Générateur d'offres de test",
+                url_name="backoffice.dev.get_generate_offer_form",
+                settings=["ENABLE_TEST_OFFER_GENERATION"],
+            ),
+            MenuItem(
+                label="Suppression d'utilisateur",
+                url_name="backoffice.dev.delete_user",
+                settings=["ENABLE_TEST_USER_GENERATION"],
+            ),
+            MenuItem(
+                label="Liste des composants",
+                url_name="backoffice.dev.components",
+                settings=["ENABLE_BO_COMPONENT_PAGE"],
+            ),
+            MenuItem(  # only here as an alpha version
+                label="Explorer les logs",
+                url_name="backoffice.logs.list_logs",
+                permissions=["READ_TECH_LOGS"],
+            ),
+        ],
+    ),
+]
+
+
+def get_menu_sections() -> list[MenuSection]:
+    return [menu_section for menu_section in MENU_SECTIONS if menu_section.is_available]

@@ -1,0 +1,22 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.booking-status-history-title {
+  @include fonts.body-accent;
+
+  margin-top: var(--size-spacing-s);
+}
+
+.booking-status-history-list {
+  @include fonts.body-accent-xs;
+
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-s);
+  margin-top: var(--size-spacing-s);
+
+  &-element {
+    margin: 0;
+    list-style-type: disc;
+    list-style-position: inside;
+  }
+}

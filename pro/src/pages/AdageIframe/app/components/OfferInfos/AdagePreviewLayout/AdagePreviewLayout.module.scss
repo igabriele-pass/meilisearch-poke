@@ -1,0 +1,60 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.fake-adage-page {
+  margin-top: var(--size-spacing-xxl);
+  background-color: var(--color-background-subtle);
+  border: 1px solid transparent;
+
+  &-header {
+    background-color: var(--color-adage-blue-external);
+    height: rem.torem(54px);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 rem.torem(10px);
+
+    &-logo {
+      max-height: 100%;
+    }
+
+    &-burger {
+      border: 0.5px solid var(--color-border-inverted);
+      border-radius: var(--size-border-radius-m);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: rem.torem(48px);
+      height: rem.torem(32px);
+    }
+  }
+
+  &-pass {
+    background-color: var(--color-background-default);
+    border-radius: var(--size-border-radius-l);
+    box-shadow: var(--shadow-overlay);
+
+    &-header {
+      padding: 0 rem.torem(16px);
+      color: var(--color-text-brand-primary);
+      box-shadow: var(--shadow-overlay);
+      height: rem.torem(48px);
+      display: flex;
+      align-items: center;
+      border-top-right-radius: rem.torem(16px);
+      border-top-left-radius: rem.torem(16px);
+      position: relative;
+      z-index: 1;
+    }
+
+    &-content {
+      padding-top: var(--size-spacing-xl);
+    }
+  }
+}
+
+@media screen and (min-width: size.$tablet) {
+  .fake-adage-page-pass {
+    margin: var(--size-spacing-xxxl);
+  }
+}

@@ -1,0 +1,8 @@
+.explanation {
+  text-align: left;
+
+  &-list {
+    list-style: disc;
+    margin-left: var(--size-spacing-xxl);
+  }
+}

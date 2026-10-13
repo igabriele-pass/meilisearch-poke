@@ -1,0 +1,27 @@
+{% set field_id = random_hash() %}
+<div class="w-100 d-none"
+     data-field-list-container="{{ field.name }}-{{ field_id }}">
+  <ul {% if field.max_entries %}data-max-entries="{{ field.max_entries }}"{% endif %}
+      {% if field.min_entries %}data-min-entries="{{ field.min_entries }}"{% endif %}
+      data-field-name="{{ field.name }}"
+      class="field-list list-unstyled flex-grow mb-4">
+    {% for subfield in field %}
+      <li class="d-flex align-items-start justify-content-between pt-2"
+          data-field-number="{{ subfield.name|field_list_get_number_from_name }}">
+        {{ subfield }}
+        <button class="btn btn-outline-primary-subtle-bg field-list-rm-btn align-self-center ms-2 border-0 rounded-xs"
+                type="button">
+          <i class="bi bi-trash3"></i>
+        </button>
+      </li>
+    {% endfor %}
+  </ul>
+  <button class="btn btn-outline-primary-subtle-bg field-list-add-btn"
+          type="button">
+    Filtre<i class="bi bi-plus-lg ms-2"></i>
+  </button>
+  <button class="btn btn-outline-primary-subtle-bg field-list-rm-all-btn mx-3"
+          type="button">
+    Tout effacer<i class="bi bi-trash3 ms-2"></i>
+  </button>
+</div>

@@ -1,0 +1,1035 @@
+import datetime
+import decimal
+import logging
+import re
+import typing
+import warnings
+from io import BytesIO
+
+import flask
+import pytz
+import sqlalchemy as sa
+from PIL import Image
+from PIL import UnidentifiedImageError
+from dateutil.relativedelta import relativedelta
+from pydantic.v1 import HttpUrl
+
+from pcapi.core.artist import api as artist_api
+from pcapi.core.categories import subcategories
+from pcapi.core.categories.genres import music
+from pcapi.core.categories.genres import show
+from pcapi.core.categories.subcategories import ExtraDataFieldEnum
+from pcapi.core.educational import models as educational_models
+from pcapi.core.finance import repository as finance_repository
+from pcapi.core.finance import utils as finance_utils
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offerers import utils as offerers_utils
+from pcapi.core.offerers.schemas import VenueTypeCode
+from pcapi.core.offers import constants
+from pcapi.core.offers import exceptions
+from pcapi.core.offers import models
+from pcapi.core.offers import repository
+from pcapi.core.providers import constants as providers_constants
+from pcapi.core.providers import models as providers_models
+from pcapi.core.providers import titelive_gtl
+from pcapi.core.videos import api as videos_api
+from pcapi.core.videos import exceptions as videos_exceptions
+from pcapi.models import api_errors
+from pcapi.models import db
+from pcapi.models.offer_mixin import OfferStatus
+from pcapi.models.offer_mixin import OfferValidationStatus
+from pcapi.routes.serialization import stock_serialize as serialization
+from pcapi.utils import date
+from pcapi.utils.custom_keys import get_field
+from pcapi.utils.string import is_canonical_integer
+
+
+logger = logging.getLogger(__name__)
+
+EDITABLE_FIELDS_FOR_ALLOCINE_STOCK = {"bookingLimitDatetime", "price", "priceCategory", "quantity"}
+
+MAX_THUMBNAIL_SIZE = 10_000_000
+MIN_THUMBNAIL_WIDTH = 400
+MIN_THUMBNAIL_HEIGHT = 400
+STANDARD_THUMBNAIL_WIDTH = 400
+STANDARD_THUMBNAIL_HEIGHT = 600
+ACCEPTED_THUMBNAIL_FORMATS = ("png", "jpg", "jpeg", "mpo", "webp")
+
+
+def check_can_edit_synchronized_stock(
+    offer: models.Offer,
+    editing_provider: providers_models.Provider | None = None,
+    modifications_set: set[str] | None = None,
+) -> None:
+    if not offer.isFromProvider:
+        return
+    if offer.isFromAllocine or offer.isFromCinemaProvider:
+        return
+    # we authorize the edition of stock quantity for synchronized thing offer
+    # as sometimes this piece of data is not correctly synchronized and pro users
+    # have a tendency to create fake offers to circumvent the issue (which is worse
+    # than allowing them to modify the stock)
+    if offer.isThing and editing_provider is None and modifications_set == {"quantity"}:
+        return
+    if offer.lastProvider != editing_provider:
+        raise exceptions.OfferException({"global": ["Les offres importées ne sont pas modifiables"]})
+
+
+def check_fields_are_editable(
+    updated_fields: set[str],
+    editable_fields: typing.Collection[str] | None = None,
+    not_editable_fields: typing.Collection[str] = (),
+) -> None:
+    rejected_fields = set(updated_fields) & set(not_editable_fields)
+
+    if editable_fields is not None:
+        rejected_fields |= set(updated_fields) - set(editable_fields)
+    if rejected_fields:
+        api_error = api_errors.ApiErrors()
+        for field in sorted(rejected_fields):
+            api_error.add_error(field, "Vous ne pouvez pas modifier ce champ")
+
+        raise api_error
+
+
+def check_stock_quantity(quantity: int | None, bookingQuantity: int = 0) -> None:
+    errors = api_errors.ApiErrors()
+
+    if quantity is not None and quantity < 0:
+        errors.add_error("quantity", "Le stock doit être positif")
+
+    if quantity is not None and bookingQuantity and (quantity - bookingQuantity) < 0:
+        errors.add_error("quantity", "Le stock total ne peut être inférieur au nombre de réservations")
+
+    if errors.errors:
+        raise errors
+
+
+def check_stocks_price(
+    stocks: list[serialization.EventStockCreateBodyModel] | list[serialization.EventStockUpdateBodyModel],
+    offer: models.Offer,
+) -> None:
+    price_categories = {price_category.id: price_category for price_category in offer.priceCategories}
+    price_categories_index_by_id = {price_category.id: idx for idx, price_category in enumerate(offer.priceCategories)}
+    for stock in stocks:
+        if stock.price_category_id not in price_categories:
+            raise api_errors.ApiErrors(
+                {"price_category_id": ["Le tarif avec l'id %s n'existe pas" % stock.price_category_id]}
+            )
+        check_stock_price(
+            price_categories[stock.price_category_id].price,
+            offer,
+            error_key=f"priceCategories.{price_categories_index_by_id[stock.price_category_id]}.price",
+        )
+
+
+def check_stock_price(
+    price: decimal.Decimal, offer: models.Offer, old_price: decimal.Decimal | None = None, error_key: str = "price"
+) -> None:
+    currency = offerers_utils.get_venue_currency(offer.venue)
+    price_in_currency = finance_utils.euros_to_currency(price, currency)
+    max_price = constants.MAX_STOCK_PRICE_BY_CURRENCY[currency]
+    currency_name = constants.CURRENCY_NAME_MAPPING[currency]
+    if price_in_currency < 0:
+        errors = api_errors.ApiErrors()
+        errors.add_error(error_key, "Le prix doit être positif")
+        raise errors
+    if price_in_currency > max_price:
+        if error_key == "price":
+            error_key += str(max_price)
+        errors = api_errors.ApiErrors()
+        errors.add_error(
+            error_key,
+            f"Le prix d’une offre ne peut excéder {max_price} {currency_name}.",
+        )
+        raise errors
+
+    offer_price_limitation_rule = (
+        db.session.query(models.OfferPriceLimitationRule)
+        .filter(models.OfferPriceLimitationRule.subcategoryId == offer.subcategoryId)
+        .one_or_none()
+    )
+    if (
+        offer_price_limitation_rule
+        and offer.validation is not OfferValidationStatus.DRAFT
+        and not offer.ean
+        and (offer.lastValidationPrice is not None or offer.stocks)
+    ):
+        if offer.lastValidationPrice is not None:
+            reference_price = offer.lastValidationPrice
+        else:
+            reference_price = min(offer.stocks, key=lambda s: s.id).price
+            # Save reference price to ensure that it cannot be changed beyond limit step by step
+            # (saved only when check is ok, otherwise rollback)
+            offer.lastValidationPrice = reference_price
+            db.session.add(offer)
+
+        if (
+            price < (1 - offer_price_limitation_rule.rate) * reference_price
+            or price > (1 + offer_price_limitation_rule.rate) * reference_price
+        ):
+            logger.info(
+                "Stock update blocked because of price limitation",
+                extra={
+                    "offer_id": offer.id,
+                    "reference_price": reference_price,
+                    "old_price": old_price,
+                    "stock_price": price,
+                },
+                technical_message_id="stock.price.forbidden",
+            )
+
+            errors = api_errors.ApiErrors()
+            errors.add_error(
+                error_key,
+                "Prix invalide",
+            )
+            raise errors
+
+    # Cache this part to avoid N+1 when creating many stocks on the same offer.
+    cache_attribute = f"_cached_checked_custom_reimbursement_rules_{offer.id}"
+    if not flask.has_request_context() or not getattr(flask.request, cache_attribute, False):
+        if finance_repository.has_active_or_future_custom_reimbursement_rule(offer):
+            # We obviously look for active rules, but also future ones: if
+            # a reimbursement rule has been negotiated that will enter in
+            # effect tomorrow, we don't want to let the offerer change its
+            # price today.
+            error = (
+                "Vous ne pouvez pas modifier le prix ou créer un stock pour cette offre, "
+                "car elle bénéficie d'un montant de remboursement spécifique."
+            )
+            current_prices = {stock.price for stock in offer.stocks if not stock.isSoftDeleted}
+            if len(current_prices) > 1:
+                # This is not supposed to happen, we should be notified.
+                logger.error(
+                    "An offer with a custom reimbursement rule has multiple prices",
+                    extra={
+                        "offer": offer.id,
+                        "prices": current_prices,
+                    },
+                )
+                raise api_errors.ApiErrors({"price": [error]})
+            if not current_prices:
+                # Do not allow an offerer to (soft-)delete all its stocks
+                # and create a new one with a different price.
+                raise api_errors.ApiErrors({"price": [error]})
+            if current_prices.pop() != price:
+                raise api_errors.ApiErrors({"price": [error]})
+        if flask.has_request_context():
+            setattr(flask.request, cache_attribute, True)
+
+
+def _get_number_of_existing_stocks(offer_id: int) -> int:
+    return (
+        db.session.query(models.Stock).filter_by(offerId=offer_id).filter(models.Stock.isSoftDeleted == False).count()
+    )
+
+
+def check_stocks_count(stocks_count: int) -> None:
+    if stocks_count > models.Offer.MAX_STOCKS_PER_OFFER:
+        raise api_errors.ApiErrors(
+            {"stocks": [f"Le nombre maximum de stocks par offre est de {models.Offer.MAX_STOCKS_PER_OFFER}"]}
+        )
+
+
+def check_stocks_count_with_previous_offer_stock(
+    stocks_to_create: list[serialization.EventStockCreateBodyModel],
+    offer: models.Offer,
+) -> None:
+    if stocks_to_create:
+        number_of_existing_stocks = _get_number_of_existing_stocks(offer.id)
+        stocks_count = number_of_existing_stocks + len(stocks_to_create)
+        check_stocks_count(stocks_count)
+
+
+def check_required_dates_for_stock(
+    offer: models.Offer,
+    beginning: datetime.datetime | None,
+    booking_limit_datetime: datetime.datetime | None,
+) -> None:
+    if offer.isThing:
+        if beginning:
+            raise api_errors.ApiErrors(
+                {
+                    "global": [
+                        "Impossible de mettre une date de début si l'offre ne porte pas sur un évènement",
+                    ]
+                }
+            )
+    else:
+        if not beginning:
+            raise api_errors.ApiErrors({"beginningDatetime": ["Ce paramètre est obligatoire"]})
+
+        if not booking_limit_datetime:
+            raise api_errors.ApiErrors({"bookingLimitDatetime": ["Ce paramètre est obligatoire"]})
+
+
+def check_provider_can_create_stock(
+    offer: models.Offer, creating_provider: providers_models.Provider | None = None
+) -> None:
+    if offer.isFromProvider and offer.lastProvider != creating_provider:
+        errors = api_errors.ApiErrors()
+        errors.add_error("global", "Les offres importées ne sont pas modifiables")
+        raise errors
+
+
+def check_stock_is_updatable(
+    stock: models.Stock,
+    editing_provider: providers_models.Provider | None = None,
+    modifications_set: set[str] | None = None,
+) -> None:
+    """
+    :modifications_set: set of attributes that are going to be updated
+    """
+    if stock.offer.validation == models.OfferValidationStatus.DRAFT:
+        return
+    check_validation_status(stock.offer)
+    check_can_edit_synchronized_stock(stock.offer, editing_provider, modifications_set)
+    check_event_expiration(stock)
+
+
+def check_price_category_is_updatable(
+    price_category: models.PriceCategory, editing_provider: providers_models.Provider | None = None
+) -> None:
+    check_validation_status(price_category.offer)
+    check_can_edit_synchronized_stock(price_category.offer, editing_provider)
+
+
+def check_event_expiration(stock: educational_models.CollectiveStock | models.Stock) -> None:
+    if stock.isEventExpired:
+        errors = api_errors.ApiErrors()
+        errors.add_error("global", "Les évènements passés ne sont pas modifiables")
+        raise errors
+
+
+def check_stock_is_deletable(stock: models.Stock) -> None:
+    check_validation_status(stock.offer)
+    if not stock.isEventDeletable:
+        raise exceptions.OfferException(
+            {"global": ["L'évènement s'est terminé il y a plus de deux jours, la suppression est impossible."]}
+        )
+
+
+def check_can_input_id_at_provider(provider: providers_models.Provider | None, id_at_provider: str | None) -> None:
+    if id_at_provider and not provider:
+        raise exceptions.OfferException(
+            {
+                "idAtProvider": [
+                    "Une offre ne peut être créée ou éditée avec un idAtProvider si elle n'a pas de provider"
+                ]
+            }
+        )
+
+
+def check_can_input_id_at_provider_for_this_venue(
+    venue_id: int,
+    id_at_provider: str | None,
+    offer_id: int | None = None,
+) -> None:
+    """
+    Raise a validation error if `id_at_provider` is already used to identify another venue offer.
+    """
+    if not id_at_provider:
+        return
+
+    id_at_provider_is_taken = repository.is_id_at_provider_taken_by_another_venue_offer(
+        venue_id=venue_id,
+        id_at_provider=id_at_provider,
+        offer_id=offer_id,
+    )
+
+    if id_at_provider_is_taken:
+        raise exceptions.OfferException(
+            {"idAtProvider": [f"`{id_at_provider}` is already taken by another venue offer"]}
+        )
+
+
+def check_update_only_allowed_stock_fields_for_allocine_offer(updated_fields: set) -> None:
+    if not updated_fields.issubset(EDITABLE_FIELDS_FOR_ALLOCINE_STOCK):
+        errors = api_errors.ApiErrors()
+        errors.status_code = 400
+        errors.add_error("global", "Pour les offres importées, certains champs ne sont pas modifiables")
+        raise errors
+
+
+def check_image_size(image_as_bytes: bytes, max_size: int | None = MAX_THUMBNAIL_SIZE) -> None:
+    if max_size is not None and len(image_as_bytes) > max_size:
+        raise exceptions.FileSizeExceeded(max_size=max_size)
+
+
+def check_image(
+    image_as_bytes: bytes,
+    *,
+    accepted_types: tuple = ACCEPTED_THUMBNAIL_FORMATS,
+    min_width: int | None = MIN_THUMBNAIL_WIDTH,
+    min_height: int | None = MIN_THUMBNAIL_HEIGHT,
+    max_width: int | None = None,
+    max_height: int | None = None,
+    max_size: int | None = MAX_THUMBNAIL_SIZE,
+) -> None:
+    check_image_size(image_as_bytes, max_size)
+    try:
+        # to raise an error when PIL warns for a possible decompression bomb
+        # as this warning always lead to the pod being out of memory
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        image = Image.open(BytesIO(image_as_bytes))
+    except UnidentifiedImageError:
+        raise exceptions.UnidentifiedImage()
+    except Exception:
+        raise exceptions.ImageValidationError()
+    assert image.format is not None  # helps mypy
+
+    if image.format.lower() not in accepted_types:
+        raise exceptions.UnacceptedFileType(accepted_types, image.format)
+
+    if min_width is not None and image.width < min_width or min_height is not None and image.height < min_height:
+        raise exceptions.ImageTooSmall(min_width, min_height)
+
+    if max_width is not None and image.width > max_width or max_height is not None and image.height > max_height:
+        raise exceptions.ImageTooLarge(max_width, max_height)
+
+
+def check_validation_status(offer: models.Offer) -> None:
+    if offer.validation in (models.OfferValidationStatus.PENDING, models.OfferValidationStatus.REJECTED):
+        raise exceptions.OfferException(
+            {"global": ["Les offres refusées ou en attente de validation ne sont pas modifiables"]}
+        )
+
+
+def check_offer_can_have_activation_codes(offer: models.Offer) -> None:
+    if not offer.hasUrl or not offer.isThing:
+        raise api_errors.ApiErrors(
+            {"global": ["Impossible de créer des codes d'activation sur une offre qui n'est pas un bien numérique"]}
+        )
+
+
+def check_url_is_coherent_with_subcategory(subcategory: subcategories.Subcategory, url: HttpUrl | str | None) -> None:
+    if url and subcategory.is_offline_only:
+        raise api_errors.ApiErrors(
+            {"url": [f'Une offre de sous-catégorie "{subcategory.pro_label}" ne peut contenir un champ `url`']}
+        )
+
+    if not url and subcategory.is_online_only:
+        raise api_errors.ApiErrors(
+            {"url": [f'Une offre de catégorie "{subcategory.pro_label}" doit contenir un champ `url`']}
+        )
+
+
+def check_url_and_offererAddress_are_not_both_set(
+    url: HttpUrl | str | None, offererAddress: offerers_models.OffererAddress | None
+) -> None:
+    """
+    An offer is either:
+        - digital -> `url` is not null or empty & `offererAddress=None`
+        - physicial -> `offererAddress` is not null and `url=None`
+    """
+    if url and offererAddress is not None:
+        raise api_errors.ApiErrors({"offererAddress": ["Une offre numérique ne peut pas avoir d'adresse"]})
+
+    if not url and offererAddress is None:
+        raise api_errors.ApiErrors({"offererAddress": ["Une offre physique doit avoir une adresse"]})
+
+
+def check_can_input_id_at_provider_for_this_price_category(
+    offer_id: int,
+    id_at_provider: str,
+    price_category_id: int | None = None,
+) -> None:
+    id_at_provider_is_taken = repository.is_id_at_provider_taken_by_another_offer_price_category(
+        offer_id,
+        id_at_provider,
+        price_category_id,
+    )
+
+    if id_at_provider_is_taken:
+        raise exceptions.OfferException(
+            {"idAtProvider": [f"`{id_at_provider}` is already taken by another offer price category"]}
+        )
+
+
+def check_can_input_id_at_provider_for_this_stock(
+    offer_id: int,
+    id_at_provider: str,
+    stock_id: int | None = None,
+) -> None:
+    id_at_provider_is_taken = repository.is_id_at_provider_taken_by_another_offer_stock(
+        offer_id,
+        id_at_provider,
+        stock_id,
+    )
+
+    if id_at_provider_is_taken:
+        raise exceptions.OfferException(
+            {"idAtProvider": [f"`{id_at_provider}` is already taken by another offer stock"]}
+        )
+
+
+def check_activation_codes_expiration_datetime(
+    activation_codes_expiration_datetime: datetime.datetime | None,
+    booking_limit_datetime: datetime.datetime | None,
+) -> None:
+    if activation_codes_expiration_datetime is None:
+        return
+
+    if booking_limit_datetime is None and activation_codes_expiration_datetime is not None:
+        errors = api_errors.ApiErrors()
+        errors.add_error(
+            "bookingLimitDatetime",
+            (
+                "Une date limite de validité a été renseignée. Dans ce cas, il faut également"
+                " renseigner une date limite de réservation qui doit être antérieure d'au moins 7 jours."
+            ),
+        )
+        raise errors
+
+    if booking_limit_datetime is not None:
+        if activation_codes_expiration_datetime.tzinfo is None:
+            activation_codes_expiration_datetime = activation_codes_expiration_datetime.replace(tzinfo=datetime.UTC)
+        if booking_limit_datetime.tzinfo is None:
+            booking_limit_datetime = booking_limit_datetime.replace(tzinfo=datetime.UTC)
+
+        if activation_codes_expiration_datetime < booking_limit_datetime + datetime.timedelta(days=7):
+            errors = api_errors.ApiErrors()
+            errors.add_error(
+                "activationCodesExpirationDatetime",
+                (
+                    "La date limite de validité des codes d'activation doit être ultérieure"
+                    " d'au moins 7 jours à la date limite de réservation"
+                ),
+            )
+            raise errors
+
+
+def check_activation_codes_expiration_datetime_on_stock_edition(
+    activation_codes: list[models.ActivationCode] | None,
+    booking_limit_datetime: datetime.datetime | None,
+) -> None:
+    if activation_codes is None or len(activation_codes) == 0:
+        return
+
+    activation_codes_expiration_datetime = activation_codes[0].expirationDate
+    check_activation_codes_expiration_datetime(activation_codes_expiration_datetime, booking_limit_datetime)
+
+
+def check_offer_withdrawal(
+    *,
+    withdrawal_type: models.WithdrawalTypeEnum | None,
+    withdrawal_delay: int | None,
+    subcategory_id: str,
+    booking_contact: str | None,
+    provider: providers_models.Provider | None,
+    venue_provider: providers_models.VenueProvider | None = None,
+) -> None:
+    is_offer_withdrawable = subcategory_id in subcategories.WITHDRAWABLE_SUBCATEGORIES
+    if is_offer_withdrawable and withdrawal_type is None:
+        raise exceptions.OfferException(
+            {"offer": ["Une offre qui a un ticket retirable doit avoir un type de retrait renseigné"]}
+        )
+
+    if is_offer_withdrawable and not booking_contact:
+        raise exceptions.OfferException(
+            {"offer": ["Une offre qui a un ticket retirable doit avoir l'email du contact de réservation"]}
+        )
+
+    if withdrawal_type == models.WithdrawalTypeEnum.NO_TICKET and withdrawal_delay is not None:
+        raise exceptions.OfferException(
+            {"offer": ["Il ne peut pas y avoir de délai de retrait lorsqu'il s'agit d'un évènement sans ticket"]}
+        )
+
+    if (
+        withdrawal_type in (models.WithdrawalTypeEnum.ON_SITE, models.WithdrawalTypeEnum.BY_EMAIL)
+        and withdrawal_delay is None
+    ):
+        raise exceptions.OfferException({"offer": ["Un évènement avec ticket doit avoir un délai de renseigné"]})
+
+    # Only providers that have set a ticketing system at provider level or at venue level
+    # can create offers with in app Withdrawal
+    if withdrawal_type == models.WithdrawalTypeEnum.IN_APP:
+        has_ticketing_system_at_provider_level = provider and provider.hasTicketingService
+        has_ticketing_system_at_venue_level = venue_provider and venue_provider.hasTicketingService
+        if not (has_ticketing_system_at_provider_level or has_ticketing_system_at_venue_level):
+            raise exceptions.OfferException(
+                {"offer": ["Vous devez supporter l'interface de billeterie pour créer des offres avec billet"]}
+            )
+
+
+def check_offer_subcategory_is_valid(offer_subcategory_id: str | None) -> None:
+    if not offer_subcategory_id:
+        return
+    if offer_subcategory_id not in subcategories.ALL_SUBCATEGORIES_DICT:
+        raise exceptions.OfferException({"subcategory": ["La sous-catégorie de cette offre est inconnue"]})
+    if not subcategories.ALL_SUBCATEGORIES_DICT[offer_subcategory_id].is_selectable:
+        raise exceptions.OfferException(
+            {"subcategory": ["Une offre ne peut être créée ou éditée en utilisant cette sous-catégorie"]}
+        )
+
+
+def check_booking_limit_datetime(
+    stock: educational_models.CollectiveStock | models.Stock | None,
+    beginning: datetime.datetime | None,
+    booking_limit_datetime: datetime.datetime | None,
+) -> list[datetime.datetime]:
+    if not (beginning and booking_limit_datetime):  # nothing to check
+        return []
+
+    if stock:
+        offer: educational_models.CollectiveOffer | models.Offer
+        if isinstance(stock, educational_models.CollectiveStock):
+            offer = stock.collectiveOffer
+        else:
+            offer = stock.offer
+
+        if offer.offererAddress and not isinstance(stock, educational_models.CollectiveStock):
+            reference_tz = offer.offererAddress.address.timezone
+        else:
+            reference_tz = offer.venue.offererAddress.address.timezone
+
+        if reference_tz is not None:  # update to timezone
+            beginning = date.default_timezone_to_local_datetime(beginning, reference_tz)
+            booking_limit_datetime = date.default_timezone_to_local_datetime(booking_limit_datetime, reference_tz)
+    if booking_limit_datetime > beginning:
+        raise exceptions.BookingLimitDatetimeTooLate()
+    return [beginning, booking_limit_datetime]
+
+
+def check_can_update_offer(
+    offer: models.Offer,
+    updates: dict[str, typing.Any],
+    *,
+    mandatory_extra_data_fields: typing.Collection[str],
+    editable_fields: typing.Collection[str] | None = None,
+    not_editable_fields: typing.Collection[str] = (),
+    venue_provider: providers_models.VenueProvider | None = None,
+) -> None:
+    check_validation_status(offer)
+
+    if not updates:
+        return
+
+    updated_fields = set(updates)
+
+    check_fields_are_editable(updated_fields, editable_fields, not_editable_fields)
+
+    if "subcategoryId" in updates and offer.status != OfferStatus.DRAFT:
+        raise exceptions.UnallowedUpdate("subcategoryId")
+
+    subcategory_id = get_field(offer, updates, "subcategoryId")
+    subcategory = subcategories.ALL_SUBCATEGORIES_DICT[subcategory_id]
+
+    if updated_fields & {
+        "audioDisabilityCompliant",
+        "mentalDisabilityCompliant",
+        "motorDisabilityCompliant",
+        "visualDisabilityCompliant",
+    }:
+        check_accessibility_compliance(
+            audio_disability_compliant=get_field(offer, updates, "audioDisabilityCompliant"),
+            mental_disability_compliant=get_field(offer, updates, "mentalDisabilityCompliant"),
+            motor_disability_compliant=get_field(offer, updates, "motorDisabilityCompliant"),
+            visual_disability_compliant=get_field(offer, updates, "visualDisabilityCompliant"),
+        )
+
+    if updated_fields & {"extraData", "ean"}:
+        check_extra_data(
+            format_extra_data(subcategory_id, get_field(offer, updates, "extraData")) or {},
+            offer.venue,
+            mandatory_extra_data_fields,
+            offer=offer,
+            ean=get_field(offer, updates, "ean"),
+        )
+
+    if "isDuo" in updates:
+        check_is_duo_compliance(get_field(offer, updates, "isDuo"), subcategory)
+
+    if "idAtProvider" in updates:
+        id_at_provider = get_field(offer, updates, "idAtProvider")
+        check_can_input_id_at_provider(offer.lastProvider, id_at_provider)
+        check_can_input_id_at_provider_for_this_venue(offer.venueId, id_at_provider, offer.id)
+
+    if "name" in updates:
+        name = get_field(offer, updates, "name")
+        if name is None:
+            raise exceptions.OfferException({"name": ["cannot be null"]})
+        check_offer_name_does_not_contain_ean(name)
+
+    if updated_fields & {"withdrawalType", "withdrawalDelay", "withdrawalDetails", "bookingContact"}:
+        check_offer_withdrawal(
+            withdrawal_type=get_field(offer, updates, "withdrawalType"),
+            withdrawal_delay=get_field(offer, updates, "withdrawalDelay"),
+            subcategory_id=subcategory_id,
+            booking_contact=get_field(offer, updates, "bookingContact"),
+            provider=offer.lastProvider,
+            venue_provider=venue_provider,
+        )
+
+    if "durationMinutes" in updates:
+        check_offer_duration(get_field(offer, updates, "durationMinutes"))
+
+    resulting_url = get_field(offer, updates, "url")
+
+    # the creation process is splitted into several steps. URL and
+    # address might be set only in the end. Therefore, this validation is
+    # meaningless until the offer has been finalized, apart from the URL
+    # of an online offer, which can never be removed.
+    if offer.status != OfferStatus.DRAFT:
+        check_url_is_coherent_with_subcategory(subcategory, resulting_url)
+        check_url_and_offererAddress_are_not_both_set(resulting_url, get_field(offer, updates, "offererAddress"))
+    elif offer.url and resulting_url is None:
+        check_url_is_coherent_with_subcategory(subcategory, None)
+
+
+def format_extra_data(subcategory_id: str, extra_data: dict[str, typing.Any] | None) -> models.OfferExtraData | None:
+    """Keep only the fields that are defined in the subcategory conditional fields"""
+    if extra_data is None:
+        return None
+
+    formatted_extra_data: models.OfferExtraData = {}
+
+    for field_name in subcategories.ALL_SUBCATEGORIES_DICT[subcategory_id].conditional_fields:
+        if extra_data.get(field_name):
+            formatted_extra_data[field_name] = extra_data.get(field_name)  # type: ignore[literal-required]
+
+    return formatted_extra_data
+
+
+def check_offer_extra_data(
+    subcategory_id: str,
+    extra_data: models.OfferExtraData | None,
+    venue: offerers_models.Venue,
+    is_from_private_api: bool,
+    offer: models.Offer | None = None,
+    ean: str | None = None,
+) -> None:
+    subcategory = subcategories.ALL_SUBCATEGORIES_DICT[subcategory_id]
+    mandatory_fields = [
+        name
+        for name, conditional_field in subcategory.conditional_fields.items()
+        if (is_from_private_api and conditional_field.is_required_in_internal_form)
+        or (not is_from_private_api and conditional_field.is_required_in_external_form)
+    ]
+    check_extra_data(extra_data, venue, mandatory_fields, offer=offer, ean=ean)
+
+
+def check_extra_data(
+    extra_data: models.OfferExtraData | None,
+    venue: offerers_models.Venue,
+    mandatory_fields: typing.Collection[str],
+    offer: models.Offer | None = None,
+    ean: str | None = None,
+) -> None:
+    errors = api_errors.ApiErrors()
+
+    if extra_data is None:
+        extra_data = {}
+
+    for field in mandatory_fields:
+        if field == "ean":
+            if not ean:
+                errors.add_error(field, "Ce champ est obligatoire")
+            continue
+
+        if not extra_data.get(field):
+            errors.add_error(field, "Ce champ est obligatoire")
+
+    try:
+        _check_offer_has_product(offer)
+    except exceptions.OfferException as e:
+        errors.add_client_error(e)
+
+    try:
+        if ean:
+            _check_ean_field(ean)
+
+            offer_id = offer.id if offer else None
+            check_other_offer_with_ean_does_not_exist(ean, venue, offer_id)
+    except exceptions.OfferException as e:
+        errors.add_client_error(e)
+
+    try:
+        _check_gtl_id_is_allowed(extra_data)
+        _check_value_is_allowed(extra_data, ExtraDataFieldEnum.MUSIC_TYPE, music.MUSIC_TYPES_LABEL_BY_CODE)
+        _check_value_is_allowed(extra_data, ExtraDataFieldEnum.MUSIC_SUB_TYPE, music.MUSIC_SUB_TYPES_BY_CODE)
+        _check_value_is_allowed(extra_data, ExtraDataFieldEnum.SHOW_TYPE, show.SHOW_TYPES_LABEL_BY_CODE)
+        _check_value_is_allowed(extra_data, ExtraDataFieldEnum.SHOW_SUB_TYPE, show.SHOW_SUB_TYPES_BY_CODE)
+    except exceptions.OfferException as e:
+        errors.add_client_error(e)
+
+    if errors.errors:
+        raise errors
+
+
+def check_product_for_venue_and_subcategory(
+    product: models.Product | None,
+    subcategory_id: str | None,
+    venue_type_code: VenueTypeCode,
+) -> None:
+    if venue_type_code != VenueTypeCode.RECORD_STORE:
+        return
+
+    if subcategory_id not in [
+        subcategories.SUPPORT_PHYSIQUE_MUSIQUE_CD.id,
+    ]:
+        return
+    if product is not None:
+        return
+    raise exceptions.OfferException(
+        {ExtraDataFieldEnum.EAN.value: ["EAN non reconnu. Assurez-vous qu'il n'y ait pas d'erreur de saisie."]}
+    )
+
+
+def check_other_offer_with_ean_does_not_exist(
+    ean: str | None, venue: offerers_models.Venue, offer_id: int | None = None
+) -> None:
+    if repository.has_active_offer_with_ean(ean, venue, offer_id):
+        if ean:
+            raise exceptions.OfferException(
+                {"ean": ["Une offre avec cet EAN existe déjà. Vous pouvez la retrouver dans l'onglet Offres."]}
+            )
+
+
+def check_offer_name_does_not_contain_ean(offer_name: str) -> None:
+    if re.search(r"\d{13}", offer_name):
+        raise exceptions.OfferException({"name": ["Le titre d'une offre ne peut contenir l'EAN"]})
+
+
+DURATION_MINUTES_ERROR_MESSAGE = (
+    "La durée doit être inférieure à 24 heures. Pour les événements durant 24 heures ou plus "
+    "(par exemple, un pass festival de 3 jours), veuillez laisser ce champ vide."
+)
+EVENT_DURATION_ERROR_MESSAGE = (
+    "The duration must be under 1440 minutes (24 hours). For events lasting 24 hours or more "
+    "(e.g., a 3-day festival pass), please leave this field empty."
+)
+
+
+def check_offer_duration(duration_minutes: int | None) -> None:
+    if duration_minutes and duration_minutes >= 24 * 60:
+        raise exceptions.OfferException({"durationMinutes": [DURATION_MINUTES_ERROR_MESSAGE]})
+
+
+def check_duration_minutes(duration_minutes: int | None, is_from_private_api: bool) -> None:
+    if is_from_private_api:
+        check_offer_duration(duration_minutes)
+        return
+
+    if duration_minutes and duration_minutes >= 24 * 60:
+        raise exceptions.OfferException({"eventDuration": [EVENT_DURATION_ERROR_MESSAGE]})
+
+
+def _check_offer_has_product(offer: models.Offer | None) -> None:
+    if offer and offer.product is not None:
+        raise exceptions.OfferException({"global": ["Les extraData des offres avec produit ne sont pas modifiables"]})
+
+
+def check_product_cgu_and_offerer(
+    product: models.Product | None, ean: str, offerer: offerers_models.Offerer | None
+) -> None:
+    if product is None:
+        raise api_errors.ApiErrors(
+            errors={
+                "ean": ["EAN non reconnu. Assurez-vous qu'il n'y ait pas d'erreur de saisie."],
+            },
+            status_code=422,
+        )
+    if offerer is None:
+        raise api_errors.ApiErrors(
+            errors={
+                "ean": ["Structure non reconnue."],
+            },
+            status_code=422,
+        )
+    # Context give only the offerer, not the specific venue on wich the offer is created.
+    # We can only check the existence of an offer with this EAN if the offerer has one venue.
+    if len(offerer.managedVenues) == 1:
+        try:
+            check_other_offer_with_ean_does_not_exist(ean, offerer.managedVenues[0])
+        except exceptions.OfferException as exc:
+            raise api_errors.ApiErrors(errors=exc.errors, status_code=422)
+    if not product.isGcuCompatible:
+        raise api_errors.ApiErrors(
+            errors={
+                "ean": ["EAN invalide. Ce produit n'est pas conforme à nos CGU."],
+            },
+            status_code=422,
+        )
+
+
+def _check_value_is_allowed(
+    extra_data: models.OfferExtraData, extra_data_field: ExtraDataFieldEnum, allowed_values: dict
+) -> None:
+    field_value = extra_data.get(extra_data_field.value)
+    if field_value is None:
+        return
+    if not isinstance(field_value, (str, int)):
+        raise exceptions.OfferException({extra_data_field.value: ["should be an int or a string"]})
+    # Codes can be negative so we accept a leading "-"
+    if isinstance(field_value, str):
+        if not is_canonical_integer(field_value.removeprefix("-")):
+            raise exceptions.OfferException({extra_data_field.value: ["should be an int or an int string"]})
+        field_value = int(field_value)
+    if field_value not in allowed_values:
+        raise exceptions.OfferException({extra_data_field.value: ["should be in allowed values"]})
+
+
+def _check_gtl_id_is_allowed(extra_data: models.OfferExtraData) -> None:
+    field_value = extra_data.get(ExtraDataFieldEnum.GTL_ID.value)
+    if field_value is None:
+        return
+    if not isinstance(field_value, str):
+        raise exceptions.OfferException({ExtraDataFieldEnum.GTL_ID.value: ["should be a string"]})
+    # A gtl_id is valid if it belongs to the Titelive GTL taxonomy or to the music genre mapping
+    if titelive_gtl.get_gtl(field_value) is None and field_value not in providers_constants.MUSIC_SLUG_BY_GTL_ID:
+        raise exceptions.OfferException({ExtraDataFieldEnum.GTL_ID.value: ["should be a valid GTL id"]})
+
+
+def _check_ean_field(ean: str) -> None:
+    if not ean:
+        return
+
+    if not isinstance(ean, str):
+        raise exceptions.OfferException({"ean": ["L'EAN doit être une chaîne de caractères"]})
+
+    if not ean.isdigit() or not len(ean) == 13:
+        raise exceptions.OfferException({"ean": ["L'EAN doit être composé de 13 chiffres"]})
+
+
+def check_offer_is_from_current_cinema_provider(offer: models.Offer) -> None:
+    venue_cinema_pivot = (
+        db.session.query(providers_models.CinemaProviderPivot)
+        .filter(providers_models.CinemaProviderPivot.venueId == offer.venueId)
+        .one_or_none()
+    )
+    if not venue_cinema_pivot or offer.lastProviderId != venue_cinema_pivot.providerId:
+        raise exceptions.UnexpectedCinemaProvider()
+
+
+def check_is_duo_compliance(is_duo: bool | None, subcategory: subcategories.Subcategory) -> None:
+    if is_duo and not subcategory.can_be_duo:
+        raise exceptions.OfferException(
+            {"enableDoubleBookings": ["the category chosen does not allow double bookings"]}
+        )
+
+
+def check_artist_offer_links(
+    artist_offer_links: typing.Sequence[artist_api.ArtistOfferLinkBody], subcategory: subcategories.Subcategory
+) -> None:
+    for link in artist_offer_links:
+        artist_api.check_artist_type_is_allowed_for_subcategory(link.artist_type, subcategory)
+
+
+def check_accessibility_compliance(
+    audio_disability_compliant: bool | None,
+    mental_disability_compliant: bool | None,
+    motor_disability_compliant: bool | None,
+    visual_disability_compliant: bool | None,
+) -> None:
+    fields = (
+        audio_disability_compliant,
+        mental_disability_compliant,
+        motor_disability_compliant,
+        visual_disability_compliant,
+    )
+    if None in fields:
+        raise exceptions.OfferException({"global": ["L’accessibilité de l’offre doit être définie"]})
+
+
+def check_offer_is_bookable_before_stock_booking_limit_datetime(
+    offer: models.Offer,
+    booking_limit_datetime: datetime.datetime,
+) -> None:
+    """
+    :booking_limit_datetime: ⚠️ Must be a naive utc datetime
+    """
+    errors = []
+
+    # To ensure ALL the datetimes are naive UTC datetimes
+    booking_limit_datetime = booking_limit_datetime.astimezone(pytz.UTC).replace(tzinfo=None)
+    publication_datetime = offer.publicationDatetime
+    booking_allowed_datetime = offer.bookingAllowedDatetime
+    if publication_datetime:
+        publication_datetime = publication_datetime.astimezone(pytz.UTC).replace(tzinfo=None)
+    if booking_allowed_datetime:
+        booking_allowed_datetime = booking_allowed_datetime.astimezone(pytz.UTC).replace(tzinfo=None)
+
+    if publication_datetime and booking_limit_datetime < publication_datetime:
+        errors += [
+            "the stock will not be published before its `bookingLimitDatetime`. Either change `bookingLimitDatetime` to a later date, or update the offer `publicationDatetime`"
+        ]
+
+    if booking_allowed_datetime and booking_limit_datetime < booking_allowed_datetime:
+        errors += [
+            "the stock will not be bookable before its `bookingLimitDatetime`. Either change `bookingLimitDatetime` to a later date, or update the offer `bookingAllowedDatetime`"
+        ]
+
+    if errors:
+        raise exceptions.OfferException({"bookingLimitDatetime": errors})
+
+
+def check_publication_date(publication_date: datetime.datetime) -> None:
+    # TODO(jbaudet - 09/2025): once models all uses timezone aware
+    # datetime objects, compare without removing tzinfo or using UTC
+    # date.
+    if publication_date.replace(tzinfo=None) > date.get_naive_utc_now() + relativedelta(years=2):
+        raise exceptions.OfferException(
+            {"publication_date": ["Impossible sélectionner une date de publication plus de 2 ans en avance"]}
+        )
+
+
+def check_price_categories_deletable(offer: models.Offer, price_category: models.PriceCategory) -> None:
+    if price_category.offerId != offer.id:
+        raise api_errors.ApiErrors({"priceCategories": ["La catégorie de prix n'appartient pas à cette offre"]})
+    if offer.validation != models.OfferValidationStatus.DRAFT:
+        raise api_errors.ApiErrors(
+            {"global": "Les catégories de prix ne sont pas supprimables sur les offres qui ne sont pas en brouillon"}
+        )
+
+
+def check_for_duplicated_price_categories(
+    new_labels_and_prices: set[tuple[str, decimal.Decimal]], offer_id: int
+) -> None:
+    existing_price_category = (
+        db.session.query(models.PriceCategory)
+        .filter_by(offerId=offer_id)
+        .filter(sa.func.ROW(models.PriceCategory.label, models.PriceCategory.price).in_(new_labels_and_prices))
+        .first()
+    )
+
+    if existing_price_category:
+        raise api_errors.ApiErrors(
+            {"priceCategories": [f"The price category {existing_price_category.label} already exists"]}
+        )
+
+
+class OfferValidationError(Exception):
+    field = "all"
+    msg = "Invalid"
+
+
+def check_offer_is_eligible_to_be_headline(offer: models.Offer) -> None:
+    if offer.status != OfferStatus.ACTIVE:
+        raise exceptions.InactiveOfferCanNotBeHeadline()
+    if not offer.hasActiveImage:
+        raise exceptions.OfferWithoutImageCanNotBeHeadline()
+
+
+def check_video_url(video_url: HttpUrl | None) -> str | None:
+    if not video_url:
+        return None
+
+    try:
+        return videos_api.extract_video_id(video_url)
+    except videos_exceptions.InvalidVideoUrl:
+        raise api_errors.ApiErrors(
+            errors={
+                "videoUrl": [
+                    "Veuillez renseigner une URL provenant de la plateforme Youtube. Les chaînes ne sont pas acceptées."
+                ]
+            }
+        )
+
+
+def check_offer_can_ask_for_highlight_request(offer: models.Offer) -> None:
+    if not offer.isEvent:
+        raise api_errors.ApiErrors(
+            errors={"global": ["La sous catégorie de l'offre ne lui permet pas de participer à un temps fort"]}
+        )

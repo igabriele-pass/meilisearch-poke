@@ -1,0 +1,103 @@
+import { useFormContext } from 'react-hook-form'
+
+import type {
+  ActivityNotOpenToPublic,
+  ActivityOpenToPublic,
+} from '@/apiClient/v1'
+import { useEducationalDomains } from '@/commons/hooks/swr/useEducationalDomains'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { ActivityNotOpenToPublicMap } from '@/commons/mappings/ActivityNotOpenToPublic'
+import { ActivityOpenToPublicMap } from '@/commons/mappings/ActivityOpenToPublic'
+import { toSelectOptions } from '@/commons/mappings/helpers'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { pluralizeFr } from '@/commons/utils/pluralize'
+import { withVenueHelpers } from '@/commons/utils/withVenueHelpers'
+import { FormLayout } from '@/components/FormLayout/FormLayout'
+import { MultiSelect } from '@/ui-kit/form/MultiSelect/MultiSelect'
+import { Select } from '@/ui-kit/form/Select/Select'
+
+import { defaultCulturalDomain } from './activityDomainsHelper'
+
+interface ActivityFormFields {
+  activity?: ActivityOpenToPublic | ActivityNotOpenToPublic | null
+  isOpenToPublic: string
+  culturalDomains?: string[]
+  description?: string
+}
+
+export const ActivityDetails = () => {
+  const venue = useAppSelector(ensureSelectedPartnerVenue)
+  const isClosed = withVenueHelpers(venue).isClosed
+  const { register, watch, setValue, formState } =
+    useFormContext<ActivityFormFields>()
+
+  const { data: educationalDomains, isLoading: isLoadingEducationalDomains } =
+    useEducationalDomains()
+
+  const defaultCulturalDomains = defaultCulturalDomain(
+    formState,
+    educationalDomains
+  )
+
+  const activityOptions =
+    watch('isOpenToPublic') === 'true'
+      ? toSelectOptions(ActivityOpenToPublicMap)
+      : toSelectOptions(ActivityNotOpenToPublicMap)
+
+  return (
+    <>
+      <FormLayout.Row mdSpaceAfter>
+        <Select
+          {...register('activity')}
+          value={watch('activity') ?? ''}
+          options={[
+            ...(watch('activity') === null // TODO: make `activity` not nullable after migrating all the venues with VenueTypeCode and no matching activity
+              ? [
+                  {
+                    value: '',
+                    label: 'Sélectionnez votre activité principale',
+                  },
+                ]
+              : []),
+            ...activityOptions,
+          ]}
+          label="Activité principale"
+          error={formState.errors.activity?.message}
+          required
+          disabled={isClosed}
+        />
+      </FormLayout.Row>
+      {!isLoadingEducationalDomains && (
+        <FormLayout.Row mdSpaceAfter>
+          <MultiSelect
+            options={educationalDomains.map((educationalDomain) => ({
+              id: String(educationalDomain.id),
+              label: educationalDomain.name,
+            }))}
+            defaultOptions={defaultCulturalDomains}
+            error={formState.errors.culturalDomains?.message}
+            label="Domaine(s) d'activité"
+            required={watch('isOpenToPublic') === 'false'}
+            onSelectedOptionsChanged={(selectedOptions) => {
+              setValue(
+                'culturalDomains',
+                selectedOptions.map((opt) => opt.label),
+                { shouldDirty: true }
+              )
+            }}
+            buttonLabel={
+              (watch('culturalDomains') ?? []).length > 0
+                ? pluralizeFr(
+                    (watch('culturalDomains') ?? []).length,
+                    'domaine sélectionné',
+                    'domaines sélectionnés'
+                  )
+                : "Sélectionnez un ou plusieurs domaines d'activité"
+            }
+            disabled={isClosed}
+          />
+        </FormLayout.Row>
+      )}
+    </>
+  )
+}

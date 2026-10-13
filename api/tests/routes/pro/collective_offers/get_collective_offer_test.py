@@ -1,0 +1,369 @@
+from datetime import timedelta
+
+import pytest
+
+from pcapi.core import testing
+from pcapi.core.educational import factories
+from pcapi.core.educational import models
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.providers import factories as providers_factories
+from pcapi.core.testing import assert_num_queries
+from pcapi.core.users import factories as users_factories
+from pcapi.models.api_errors import OBJECT_NOT_FOUND_ERROR_MESSAGE
+from pcapi.utils import date as date_utils
+from pcapi.utils.date import format_into_utc_date
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+class Returns200Test:
+    # session + user
+    # offerer
+    # user_offerer
+    # collective_offer
+    # collective_addtional_fees (selectinload)
+    # google_places_info (only when venue.bannerUrl is not filled)
+    num_queries = 6
+
+    # collective_addtional_fees is not loaded when there is no stock
+    num_queries_no_stock = num_queries - 1
+
+    def test_basics(self, client):
+        template = factories.CollectiveOfferTemplateFactory()
+        stock = factories.CollectiveStockFactory()
+        additional_fee = factories.CollectiveAdditionalFeeFactory(collectiveStock=stock)
+        teacher = factories.EducationalRedactorFactory()
+        national_program = factories.NationalProgramFactory()
+        provider = providers_factories.ProviderFactory()
+        venue = offerers_factories.VenueFactory(
+            bannerUrl="http://localhost/image.png",
+            bannerMeta={"image_credit": "John Doe", "image_alternative_text": "An alternative text"},
+        )
+        offer = factories.CollectiveOfferFactory(
+            collectiveStock=stock,
+            teacher=teacher,
+            template=template,
+            nationalProgram=national_program,
+            provider=provider,
+            venue=venue,
+            additionalDetails="some details",
+            imageAlternativeText="A collective offer image",
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        client = client.with_session_auth(email="user@example.com")
+        offer_id = offer.id
+        expected_num_queries = self.num_queries
+        expected_num_queries -= 1  # google_places_info
+        with assert_num_queries(expected_num_queries):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 200
+
+        assert response.json == {
+            "additionalDetails": offer.additionalDetails,
+            "allowedActions": ["CAN_DUPLICATE", "CAN_ARCHIVE"],
+            "audioDisabilityCompliant": False,
+            "booking": None,
+            "bookingEmails": offer.bookingEmails,
+            "collectiveStock": {
+                "bookingLimitDatetime": format_into_utc_date(stock.bookingLimitDatetime),
+                "priceDetail": stock.priceDetail,
+                "endDatetime": format_into_utc_date(stock.endDatetime),
+                "id": stock.id,
+                "numberOfTickets": stock.numberOfTickets,
+                "numberOfTeachers": stock.numberOfTeachers,
+                "price": float(stock.price),
+                "servicePrice": float(stock.servicePrice),
+                "startDatetime": format_into_utc_date(stock.startDatetime),
+                "collectiveAdditionalFees": [
+                    {
+                        "amount": additional_fee.amount,
+                        "label": additional_fee.label,
+                        "type": additional_fee.type.value,
+                    }
+                ],
+            },
+            "contactEmail": offer.contactEmail,
+            "contactPhone": offer.contactPhone,
+            "dateCreated": format_into_utc_date(offer.dateCreated),
+            "dates": {
+                "end": format_into_utc_date(stock.startDatetime),
+                "start": format_into_utc_date(stock.endDatetime),
+            },
+            "description": offer.description,
+            "displayedStatus": models.CollectiveOfferDisplayedStatus.PUBLISHED.value,
+            "domains": [],
+            "durationMinutes": None,
+            "formats": [f.value for f in offer.formats],
+            "history": {
+                "future": [
+                    "PREBOOKED",
+                    "BOOKED",
+                    "ENDED",
+                    "REIMBURSED",
+                ],
+                "past": [{"datetime": format_into_utc_date(offer.lastValidationDate), "status": "PUBLISHED"}],
+            },
+            "id": offer.id,
+            "imageAlternativeText": "A collective offer image",
+            "imageCredit": None,
+            "imageUrl": None,
+            "institution": None,
+            "interventionArea": offer.interventionArea,
+            "isPublicApi": True,
+            "isTemplate": False,
+            "location": {
+                "location": None,
+                "locationComment": None,
+                "locationType": "TO_BE_DEFINED",
+            },
+            "mentalDisabilityCompliant": False,
+            "motorDisabilityCompliant": False,
+            "name": offer.name,
+            "nationalProgram": {
+                "id": national_program.id,
+                "name": national_program.name,
+            },
+            "provider": {
+                "name": provider.name,
+            },
+            "students": ["Lycée - Seconde"],
+            "teacher": {
+                "civility": teacher.civility,
+                "email": teacher.email,
+                "firstName": teacher.firstName,
+                "lastName": teacher.lastName,
+            },
+            "templateId": template.id,
+            "venue": {
+                "departementCode": "75",
+                "id": venue.id,
+                "imgAlternativeText": "An alternative text",
+                "imgUrl": "http://localhost/image.png",
+                "managingOfferer": {
+                    "id": venue.managingOfferer.id,
+                    "name": venue.managingOfferer.name,
+                    "siren": venue.managingOfferer.siren,
+                },
+                "name": venue.name,
+                "publicName": venue.publicName,
+            },
+            "visualDisabilityCompliant": False,
+        }
+
+    def test_location_address_venue(self, client):
+        venue = offerers_factories.VenueFactory()
+        offer = factories.CollectiveOfferFactory(
+            venue=venue,
+            locationType=models.CollectiveLocationType.ADDRESS,
+            locationComment=None,
+            interventionArea=None,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        client = client.with_session_auth(email="user@example.com")
+
+        offer_id = offer.id
+        with assert_num_queries(self.num_queries_no_stock):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 200
+
+        response_json = response.json
+        response_location = response_json["location"]
+        assert response_location["locationType"] == "ADDRESS"
+        assert response_location["locationComment"] is None
+        assert response_location["location"]["isVenueLocation"] is True
+        assert response_location["location"]["banId"] == venue.offererAddress.address.banId
+        assert response_json["interventionArea"] == []
+
+    def test_location_school(self, client):
+        offer = factories.CollectiveOfferFactory(
+            locationType=models.CollectiveLocationType.SCHOOL,
+            locationComment=None,
+            offererAddressId=None,
+            interventionArea=["33", "75", "93"],
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        client = client.with_session_auth(email="user@example.com")
+
+        offer_id = offer.id
+        with assert_num_queries(self.num_queries_no_stock):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 200
+
+        response_json = response.json
+        response_location = response_json["location"]
+        assert response_location["locationType"] == "SCHOOL"
+        assert response_location["locationComment"] is None
+        assert response_location["location"] is None
+        assert response_json["interventionArea"] == ["33", "75", "93"]
+
+    def test_location_address(self, client):
+        venue = offerers_factories.VenueFactory()
+        oa = offerers_factories.OfferLocationFactory(offerer=venue.managingOfferer, venue=venue)
+        offer = factories.CollectiveOfferFactory(
+            locationType=models.CollectiveLocationType.ADDRESS,
+            locationComment=None,
+            offererAddress=oa,
+            interventionArea=None,
+            venue=venue,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        client = client.with_session_auth(email="user@example.com")
+
+        offer_id = offer.id
+        with assert_num_queries(self.num_queries_no_stock):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 200
+
+        response_json = response.json
+        response_location = response_json["location"]
+        assert response_location["locationType"] == "ADDRESS"
+        assert response_location["locationComment"] is None
+        assert response_location["location"] is not None
+        assert response_location["location"]["isVenueLocation"] is False
+        assert response_location["location"]["banId"] == oa.address.banId
+        assert response_json["interventionArea"] == []
+
+    def test_location_to_be_defined(self, client):
+        offer = factories.CollectiveOfferFactory(
+            locationType=models.CollectiveLocationType.TO_BE_DEFINED,
+            locationComment="In space",
+            offererAddressId=None,
+            interventionArea=["33", "75", "93"],
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        client = client.with_session_auth(email="user@example.com")
+
+        offer_id = offer.id
+        with assert_num_queries(self.num_queries_no_stock):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 200
+
+        response_json = response.json
+        response_location = response_json["location"]
+        assert response_location["locationType"] == "TO_BE_DEFINED"
+        assert response_location["locationComment"] == "In space"
+        assert response_location["location"] is None
+        assert response_json["interventionArea"] == ["33", "75", "93"]
+
+    def test_performance(self, client):
+        stock = factories.CollectiveStockFactory()
+        factories.CancelledCollectiveBookingFactory.create_batch(5, collectiveStock=stock)
+        offer = factories.CollectiveOfferFactory(collectiveStock=stock)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        client = client.with_session_auth(email="user@example.com")
+        offer_id = offer.id
+
+        with testing.assert_num_queries(self.num_queries):
+            with testing.assert_no_duplicated_queries():
+                client.get(f"/collective/offers/{offer_id}")
+
+    def test_booking_field(self, client):
+        stock = factories.CollectiveStockFactory()
+        offer = factories.CollectiveOfferFactory(collectiveStock=stock)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        factories.CollectiveBookingFactory(collectiveStock=stock, status=models.CollectiveBookingStatus.CANCELLED)
+        booking = factories.CollectiveBookingFactory(
+            collectiveStock=stock, status=models.CollectiveBookingStatus.REIMBURSED
+        )
+
+        client = client.with_session_auth(email="user@example.com")
+        offer_id = offer.id
+        with assert_num_queries(self.num_queries):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 200
+
+        assert response.json["booking"] == {
+            "id": booking.id,
+            "status": models.CollectiveBookingStatus.REIMBURSED.value,
+            "dateCreated": format_into_utc_date(booking.dateCreated),
+            "cancellationLimitDate": format_into_utc_date(booking.cancellationLimitDate),
+            "cancellationReason": None,
+            "confirmationLimitDate": format_into_utc_date(booking.confirmationLimitDate),
+            "educationalRedactor": {
+                "civility": booking.educationalRedactor.civility,
+                "email": booking.educationalRedactor.email,
+                "firstName": booking.educationalRedactor.firstName,
+                "lastName": booking.educationalRedactor.lastName,
+            },
+        }
+
+    def test_booking_field_cancelled(self, client):
+        offer = factories.CancelledWithBookingCollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        [booking] = offer.collectiveStock.collectiveBookings
+
+        client = client.with_session_auth(email="user@example.com")
+        offer_id = offer.id
+        with assert_num_queries(self.num_queries):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 200
+
+        assert response.json["booking"] == {
+            "id": booking.id,
+            "status": models.CollectiveBookingStatus.CANCELLED.value,
+            "dateCreated": format_into_utc_date(booking.dateCreated),
+            "cancellationLimitDate": format_into_utc_date(booking.cancellationLimitDate),
+            "cancellationReason": models.CollectiveBookingCancellationReasons.OFFERER.value,
+            "confirmationLimitDate": format_into_utc_date(booking.confirmationLimitDate),
+            "educationalRedactor": {
+                "civility": booking.educationalRedactor.civility,
+                "email": booking.educationalRedactor.email,
+                "firstName": booking.educationalRedactor.firstName,
+                "lastName": booking.educationalRedactor.lastName,
+            },
+        }
+
+    def test_dates_on_offer(self, client):
+        beginningDate = date_utils.get_naive_utc_now() + timedelta(days=100)
+        endDate = date_utils.get_naive_utc_now() + timedelta(days=125)
+        stock = factories.CollectiveStockFactory(
+            startDatetime=beginningDate,
+            endDatetime=endDate,
+        )
+        offer = factories.CollectiveOfferFactory(
+            collectiveStock=stock,
+            isActive=True,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        client = client.with_session_auth(email="user@example.com")
+        offer_id = offer.id
+        with testing.assert_num_queries(self.num_queries):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 200
+
+        assert response.json["dates"] == {
+            "start": beginningDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "end": endDate.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        }
+
+
+class Returns404Test:
+    def test_access_by_unauthorized_pro_user(self, client):
+        pro_user = users_factories.ProFactory()
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        client = client.with_session_auth(email=pro_user.email)
+        offer_id = offer.id
+        expected_num_queries = 5
+        # session + user
+        # offerer
+        # user_offerer
+        # rollback
+        # rollback
+        with assert_num_queries(expected_num_queries):
+            response = client.get(f"/collective/offers/{offer_id}")
+            assert response.status_code == 404
+            assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}
+
+    def test_offer_not_found(self, client):
+        pro_user = users_factories.ProFactory()
+        client = client.with_session_auth(email=pro_user.email)
+        response = client.get("/collective/offers/123456789")
+
+        assert response.status_code == 404
+        assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}

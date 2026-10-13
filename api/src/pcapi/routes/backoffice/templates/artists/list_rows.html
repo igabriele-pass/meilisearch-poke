@@ -1,0 +1,29 @@
+{% import "components/badges.html" as badges with context %}
+{% import "components/links.html" as links with context %}
+{% for row in rows %}
+  {% set artist = row.Artist %}
+  <tr id="artist-row-{{ artist.id }}">
+    <td>{{ links.build_artist_details_link(artist, text_attr="id") }}</td>
+    <td class="px-2 py-3">
+      {% if artist.image %}
+        <div class="rounded pc-offer-table-image pc-offer-table-image-container"
+             style="background-image: url('{{ artist.image }}')"></div>
+      {% else %}
+        <div class="rounded pc-offer-table-no-image pc-offer-table-image-container">
+          <i class="bi bi-person-bounding-box fs-4"></i>
+        </div>
+      {% endif %}
+    </td>
+    <td data-pc-sort-table-value="{{ artist.name }}">{{ links.build_artist_details_link(artist) }}</td>
+    <td>
+      {% call badges.badges_container() %}
+        {{ artist.is_blacklisted | format_artist_visibility_status }}
+      {% endcall %}
+    </td>
+    <td class="text-center"
+        data-pc-sort-table-value="{{ row.products_count }}">{{ row.products_count }}</td>
+    <td data-pc-sort-table-value="{% if artist.date_created %}{{ artist.date_created.timestamp() }}{% endif %}">
+      {{ artist.date_created | format_date if artist.date_created else '-' }}
+    </td>
+  </tr>
+{% endfor %}

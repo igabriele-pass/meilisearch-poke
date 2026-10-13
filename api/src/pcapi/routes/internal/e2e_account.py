@@ -1,0 +1,131 @@
+import datetime
+import itertools
+
+from pcapi.core import token as token_utils
+from pcapi.core.subscription.bonus import tasks as bonus_tasks
+from pcapi.core.users import constants as users_constants
+from pcapi.core.users import generator as users_generator
+from pcapi.core.users import models as users_models
+from pcapi.models.utils import get_or_404
+from pcapi.routes.backoffice.dev import forms as dev_forms
+from pcapi.routes.backoffice.dev.blueprint import create_disabled_adult_allowance_fraud_check_mock
+from pcapi.routes.backoffice.dev.blueprint import create_disabled_child_education_allowance_fraud_check_mock
+from pcapi.routes.backoffice.dev.blueprint import create_qf_fraud_check_mock
+from pcapi.routes.backoffice.dev.blueprint import create_ubble_fraud_check
+from pcapi.routes.backoffice.dev.blueprint import get_token_expiration_timestamp
+from pcapi.routes.internal.auth import api_key_required
+from pcapi.routes.internal.blueprint import testing_blueprint
+from pcapi.utils import transaction_manager
+
+
+@testing_blueprint.route("/e2e/account", methods=["POST"])
+@transaction_manager.atomic()
+@api_key_required
+def generate_account() -> tuple[dict, int]:
+    form = dev_forms.UserGeneratorForm()
+
+    if not form.validate():
+        transaction_manager.mark_transaction_as_invalid()
+        return form.errors, 400
+
+    raw_date_created = form.date_created.data
+    user_data = users_generator.GenerateUserData(
+        age=form.age.data,
+        birth_date=form.birth_date.data,
+        credit=form.credit.data,
+        id_provider=users_generator.GeneratedIdProvider[form.id_provider.data],
+        step=users_generator.GeneratedSubscriptionStep[form.step.data],
+        date_created=datetime.datetime(raw_date_created.year, raw_date_created.month, raw_date_created.day),
+        postal_code=form.postal_code.data,
+    )
+    user = users_generator.generate_user(user_data)
+
+    token = token_utils.Token.create(
+        token_utils.TokenType.SIGNUP_EMAIL_CONFIRMATION, users_constants.EMAIL_VALIDATION_TOKEN_LIFE_TIME, user.id
+    )
+    return {
+        "id": user.id,
+        "email": user.email,
+        "access_token": token.encoded_token,
+        "expiration_timestamp": get_token_expiration_timestamp(token),
+    }, 200
+
+
+@testing_blueprint.route("/e2e/account/<user_id>/ubble", methods=["POST"])
+@transaction_manager.atomic()
+@api_key_required
+def configure_ubble_responses(user_id: int) -> tuple[dict, int]:
+    user = get_or_404(users_models.User, user_id)
+    form = dev_forms.UbbleConfigurationForm()
+
+    if not form.validate():
+        transaction_manager.mark_transaction_as_invalid()
+        return form.errors, 400
+
+    create_ubble_fraud_check(user, form)
+
+    return {}, 200
+
+
+@testing_blueprint.route("/e2e/account/<user_id>/quotient_familial", methods=["POST"])
+@transaction_manager.atomic()
+@api_key_required
+def configure_api_quotient_familial_response(user_id: int) -> tuple[dict, int]:
+    user = get_or_404(users_models.User, user_id)
+    form = dev_forms.QuotientFamilialConfigurationForm()
+
+    if not form.validate():
+        transaction_manager.mark_transaction_as_invalid()
+        return form.errors, 400
+
+    create_qf_fraud_check_mock(user, form)
+
+    return {}, 200
+
+
+@testing_blueprint.route("/e2e/account/<user_id>/aah", methods=["POST"])
+@transaction_manager.atomic()
+@api_key_required
+def configure_api_disabled_adult_allowance_response(user_id: int) -> tuple[dict, int]:
+    user = get_or_404(users_models.User, user_id)
+    form = dev_forms.DisabledAdultAllowanceConfigurationForm()
+
+    if not form.validate():
+        transaction_manager.mark_transaction_as_invalid()
+        return form.errors, 400
+
+    create_disabled_adult_allowance_fraud_check_mock(user, form)
+
+    return {}, 200
+
+
+@testing_blueprint.route("/e2e/account/<user_id>/aeeh", methods=["POST"])
+@transaction_manager.atomic()
+@api_key_required
+def configure_api_disabled_child_education_allowance_response(user_id: int) -> tuple[dict, int]:
+    user = get_or_404(users_models.User, user_id)
+    form = dev_forms.DisabledChildEducationAllowanceConfigurationForm()
+
+    if not form.validate():
+        transaction_manager.mark_transaction_as_invalid()
+        return form.errors, 400
+
+    create_disabled_child_education_allowance_fraud_check_mock(user, form)
+
+    return {}, 200
+
+
+@testing_blueprint.route("/e2e/bonus_credit/<user_id>/recover", methods=["POST"])
+@transaction_manager.atomic()
+@api_key_required
+def recover_started_bonus_credit_applications(user_id: int) -> tuple[dict[str, list[int]], int]:
+    handled_fraud_checks = bonus_tasks.recover_started_bonus_credit_applications(user_id=user_id)
+    handled_fraud_checks.sort(key=lambda fraud_check: fraud_check.type.value)
+
+    fraud_check_ids_by_type: dict[str, list[int]] = {}
+    for fraud_check_type, fraud_check_group in itertools.groupby(
+        handled_fraud_checks, key=lambda fraud_check: fraud_check.type.value
+    ):
+        fraud_check_ids_by_type[fraud_check_type] = [fraud_check.id for fraud_check in fraud_check_group]
+
+    return fraud_check_ids_by_type, 200

@@ -1,0 +1,144 @@
+import enum
+import re
+import typing
+import urllib.parse
+
+import sqlalchemy.orm as sa_orm
+import wtforms
+from flask_wtf import FlaskForm
+
+from pcapi.core.educational import models as educational_models
+from pcapi.core.offerers import models as offerers_models
+from pcapi.models import db
+from pcapi.routes.backoffice import filters
+from pcapi.routes.backoffice.forms import fields
+from pcapi.routes.backoffice.forms import search as search_forms
+from pcapi.routes.backoffice.forms import utils
+from pcapi.routes.backoffice.forms.constants import area_choices
+
+from .utils import CONNECT_AS_OBJECT_TYPES
+
+
+DIGITS_AND_WHITESPACES_REGEX = re.compile(r"^[\d\s]+$")
+
+
+class TypeOptions(enum.Enum):
+    VENUE = "venue"
+    OFFERER = "offerer"
+    USER = "user"
+    BANK_ACCOUNT = "bank-account"
+
+
+def format_search_type_options(type_option: TypeOptions) -> str:
+    match type_option:
+        case TypeOptions.VENUE:
+            return "Partenaire culturel"
+        case TypeOptions.OFFERER:
+            return "Entité juridique"
+        case TypeOptions.USER:
+            return "Compte pro"
+        case TypeOptions.BANK_ACCOUNT:
+            return "Compte bancaire"
+        case _:
+            return type_option.value
+
+
+class ProSearchForm(search_forms.SearchForm):
+    pro_type = fields.PCSelectField(
+        "Type",
+        choices=utils.choices_from_enum(TypeOptions, format_search_type_options),
+        default=TypeOptions.VENUE,
+    )
+    departments = fields.PCSelectMultipleField("Départements", choices=area_choices, full_row=True)
+
+    def filter_q(self, q: str | None) -> str | None:
+        # Remove spaces from SIREN, SIRET and IDs
+        if q and DIGITS_AND_WHITESPACES_REGEX.match(q):
+            return re.sub(r"\s+", "", q)
+        return q
+
+    def validate_pro_type(self, pro_type: fields.PCSelectField) -> fields.PCSelectField:
+        try:
+            pro_type.data = TypeOptions[pro_type.data]
+        except KeyError:
+            raise wtforms.validators.ValidationError("Le type sélectionné est invalide")
+        return pro_type
+
+
+class CompactProSearchForm(ProSearchForm):
+    # Compact form on top of search results and details pages
+    departments = fields.PCSelectMultipleField("Départements", choices=area_choices, search_inline=True)
+
+
+def _get_educational_domains_query() -> sa_orm.Query:
+    return db.session.query(educational_models.EducationalDomain).order_by(educational_models.EducationalDomain.name)
+
+
+class CreateVenueWithoutSIRETForm(FlaskForm):
+    public_name = fields.PCStringField(
+        "Nom d'usage du partenaire culturel",
+        validators=(
+            wtforms.validators.DataRequired("Information obligatoire"),
+            wtforms.validators.Length(max=255, message="doit contenir au maximum %(max)d caractères"),
+        ),
+    )
+    attachement_venue = fields.PCSelectWithPlaceholderValueField("SIRET de rattachement", choices=[], coerce=int)
+
+    is_open_to_public = fields.PCSwitchBooleanField("Accueil du public", full_row=True)
+
+    activity = fields.PCSelectWithPlaceholderValueField(
+        "Activité principale",
+        choices=utils.choices_from_enum(
+            offerers_models.Activity,
+            formatter=filters.format_activity,
+            exclude_opts=offerers_models.DEPRECATED_ACTIVITIES,
+        ),
+    )
+
+    cultural_domains = fields.PCQuerySelectMultipleField(
+        "Domaine(s) d'activité",
+        query_factory=_get_educational_domains_query,
+        get_pk=lambda educational_domain: educational_domain.id,
+        get_label=lambda educational_domain: educational_domain.name,
+    )
+
+    booking_email = fields.PCEmailField("Email (notifications de réservation)")
+
+    def __init__(self, offerer: offerers_models.Offerer, *args: typing.Any, **kwargs: typing.Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.attachement_venue.choices = [
+            (offerer_venue.id, f"{offerer_venue.siret} ({offerer_venue.publicName})")
+            for offerer_venue in offerer.managedVenues
+            if offerer_venue.siret
+        ]
+
+    def validate_activity(
+        self, activity: fields.PCSelectWithPlaceholderValueField
+    ) -> fields.PCSelectWithPlaceholderValueField:
+        is_open_to_public = self._fields["is_open_to_public"].data
+        if is_open_to_public and activity.data not in offerers_models.ActivityOpenToPublic:
+            raise wtforms.ValidationError("L'activité sélectionnée n'est pas compatible avec l'accueil du public")
+
+        return activity
+
+
+class ConnectAsForm(FlaskForm):
+    object_id = fields.PCHiddenField()
+    object_type = fields.PCHiddenField()
+    redirect = fields.PCHiddenField(
+        validators=[
+            wtforms.validators.DataRequired("Information obligatoire"),
+            wtforms.validators.Length(min=1, max=512, message="doit contenir entre %(min)d et %(max)d caractères"),
+        ],
+    )
+
+    def validate_object_type(self, object_type: fields.PCHiddenField) -> fields.PCHiddenField:
+        if object_type.data not in CONNECT_AS_OBJECT_TYPES:
+            raise wtforms.validators.ValidationError("object type invalide")
+        return object_type
+
+    def validate_redirect(self, redirect: fields.PCHiddenField) -> fields.PCHiddenField:
+        if not redirect.data.startswith("/"):
+            raise wtforms.validators.ValidationError("doit être un chemin commençant par /")
+        redirect.data = urllib.parse.quote(redirect.data, safe="/?=&")
+        return redirect

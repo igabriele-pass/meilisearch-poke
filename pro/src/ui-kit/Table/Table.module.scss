@@ -1,0 +1,197 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_a11y.scss" as a11y;
+
+.wrapper {
+  width: 100%;
+}
+
+.table {
+  @include fonts.body;
+
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0 rem.torem(24px);
+
+  &-pagination {
+    margin-top: var(--size-spacing-xxl);
+  }
+}
+
+.table-separate {
+  border-collapse: separate;
+  border-spacing: 0 rem.torem(24px);
+
+  &-cell {
+    padding: var(--size-spacing-s);
+    text-align: left;
+    border-top: 1px solid var(--color-border-subtle);
+    border-bottom: 1px solid var(--color-border-subtle);
+
+    &:first-child {
+      border-left: 1px solid var(--color-border-subtle);
+      border-top-left-radius: var(--size-border-radius-m, 8px);
+      border-bottom-left-radius: var(--size-border-radius-m, 8px);
+    }
+
+    &:last-child {
+      border-right: 1px solid var(--color-border-subtle);
+      border-top-right-radius: var(--size-border-radius-m, 8px);
+      border-bottom-right-radius: var(--size-border-radius-m, 8px);
+    }
+  }
+}
+
+.table-collapse {
+  border-collapse: collapse;
+  border-spacing: 0 rem.torem(24px);
+
+  &-cell {
+    padding: var(--size-spacing-s);
+    text-align: left;
+
+    &:last-of-type {
+      width: var(--last-cell-width, inherit);
+    }
+  }
+}
+
+.table-row {
+  border-bottom: var(
+    --table-row-border-bottom,
+    1px solid var(--color-border-subtle)
+  );
+}
+
+.table-header {
+  @include fonts.body-accent-xs;
+
+  background-color: var(--color-background-subtle);
+
+  &-sticky {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  &-th {
+    border-bottom: var(--table-header-th-border-bottom, none);
+    text-align: left;
+    padding: var(--size-spacing-s);
+    white-space: nowrap;
+
+    &:first-child {
+      border-top-left-radius: var(--size-border-radius-m);
+    }
+
+    // Last child that is not for full row only
+    // @see https://stackoverflow.com/a/8300258
+    &:nth-last-child(1 of :not(.table-header-full-row)) {
+      border-top-right-radius: var(--size-border-radius-m);
+      padding-right: var(--size-spacing-l);
+    }
+  }
+
+  &-sortable-th {
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  &-center-th {
+    text-align: center;
+  }
+
+  &-full-row {
+    @include a11y.visually-hidden;
+
+    padding: 0;
+  }
+}
+
+.table-select-all {
+  display: flex;
+  gap: var(--size-spacing-s);
+  align-items: center;
+}
+
+.table-select-all-tooltip {
+  z-index: 99;
+  margin-left: var(--size-spacing-xxl);
+}
+
+.table-checkbox-label {
+  /* stylelint-disable */
+  *:not(input) {
+    @include a11y.visually-hidden;
+  }
+}
+
+.visually-hidden {
+  @include a11y.visually-hidden;
+}
+
+.table-fullrow-content {
+  padding: var(--size-spacing-xl) var(--size-spacing-s);
+
+  &-raw {
+    padding: 0;
+  }
+}
+
+@media (max-width: size.$tablet) {
+  .table-header {
+    display: none;
+  }
+
+  .table-row {
+    display: grid;
+    grid-template-columns: 1fr;
+    margin-top: var(--size-spacing-s);
+    background: var(--color-background-default, #fff);
+    border: 1px solid var(--color-border-subtle);
+    border-radius: var(--size-border-radius-m, 8px);
+    padding: var(--size-spacing-s);
+  }
+
+  .table-collapse-cell {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--size-spacing-xs) var(--size-spacing-m);
+    align-items: start;
+
+    + .table-collapse-cell {
+      padding-top: var(--size-spacing-s);
+      border-top: 1px solid var(--color-border-subtle);
+    }
+
+    &::before {
+      @include fonts.body-accent-xs;
+
+      content: attr(data-label);
+      color: var(--color-text-subtle);
+      white-space: normal;
+    }
+
+    > * {
+      justify-self: end;
+    }
+
+    [data-actions] {
+      justify-self: end;
+      display: flex;
+      gap: var(--size-spacing-s);
+      flex-wrap: wrap;
+    }
+
+    &:last-child {
+      border-radius: 0;
+      display: flex;
+      justify-content: space-between;
+    }
+  }
+
+  .table-fullrow-content {
+    padding: var(--size-spacing-s);
+  }
+}

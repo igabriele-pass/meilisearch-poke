@@ -1,0 +1,84 @@
+/* No need to test this file */
+/* istanbul ignore file */
+
+import { Navigate } from 'react-router'
+
+import { noop } from '@/commons/utils/noop'
+
+import type { CustomRouteGroupChild } from './types'
+
+export const routesSimulator: CustomRouteGroupChild[] = [
+  {
+    lazy: () => import('@/pages/Simulator/SimulatorSiret/SimulatorSiret'),
+    loader: noop,
+    path: '/inscription/preparation/siret',
+    handle: {
+      title: 'Renseignez votre SIRET',
+    },
+    featureName: 'WIP_PRE_SIGNUP_SIMULATION',
+  },
+  {
+    lazy: () =>
+      import('@/pages/Simulator/SimulatorOpenToPublic/SimulatorOpenToPublic'),
+
+    loader: noop,
+    path: '/inscription/preparation/accueil-public',
+    handle: {
+      title: 'Accueil du public',
+    },
+    featureName: 'WIP_PRE_SIGNUP_SIMULATION',
+  },
+  {
+    lazy: () => import('@/pages/Simulator/SimulatorActivity/SimulatorActivity'),
+
+    loader: noop,
+    path: '/inscription/preparation/activite',
+    handle: {
+      title: 'Quelle est votre activité principale ?',
+    },
+    featureName: 'WIP_PRE_SIGNUP_SIMULATION',
+  },
+  {
+    lazy: () => import('@/pages/Simulator/SimulatorTarget/SimulatorTarget'),
+    loader: noop,
+    path: '/inscription/preparation/publics',
+    handle: {
+      title: 'Quels publics souhaitez-vous cibler ?',
+    },
+    featureName: 'WIP_PRE_SIGNUP_SIMULATION',
+  },
+  {
+    lazy: () => import('@/pages/Simulator/SimulatorResults/SimulatorResults'),
+    loader: noop,
+    path: '/inscription/preparation/resultats',
+    handle: {
+      title: 'Voici les justificatifs à préparer pour votre inscription',
+    },
+    featureName: 'WIP_PRE_SIGNUP_SIMULATION',
+  },
+  {
+    lazy: () => import('@/pages/Simulator/SimulatorEmail/SimulatorEmail'),
+    loader: noop,
+    path: '/inscription/preparation/email',
+    handle: {
+      title: 'Recevez votre liste de justificatifs par email',
+    },
+    featureName: 'WIP_PRE_SIGNUP_SIMULATION',
+  },
+  {
+    lazy: () =>
+      import('@/pages/Simulator/SimulatorEmail/SimulatorEmailConfirmation'),
+    loader: noop,
+    path: '/inscription/preparation/email-confirmation',
+    handle: {
+      title: 'La liste de justificatifs a bien été envoyée par mail',
+    },
+    featureName: 'WIP_PRE_SIGNUP_SIMULATION',
+  },
+  {
+    element: <Navigate to="/inscription/preparation/siret" />,
+    loader: noop,
+    path: '/inscription/preparation',
+    featureName: 'WIP_PRE_SIGNUP_SIMULATION',
+  },
+]

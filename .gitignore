@@ -1,0 +1,52 @@
+# macOS file system hidden file
+.DS_Store
+
+# please don't keep sensitive secrets in plain text files
+*.secret
+
+# env files
+development_env_file
+.env
+
+# IntelliJ
+.idea/
+*.iml
+.graphqlconfig
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info
+.pytest_cache/
+
+# debug files for python unit tests
+/api/stacks
+
+# VS-Code Synk plugin
+.dccache
+
+# storybook build
+docs-build/
+
+# Backoffice scss to css tmp assets
+/api/src/pcapi/static/backoffice/css/compiled/
+/api/src/pcapi/static/backoffice/css/bundle.css
+/api/src/pcapi/static/backoffice/js/bundle.js
+
+# Certificate to start the api with a proxy
+*.pem
+
+# Certificates for local mutal TLS
+*.crt
+*.key
+*.pub
+
+# Script for VSCode local debugging
+/api/src/pcapi/scripts/local_debug_script.py
+
+# Ignore accidental root lockfile
+/pnpm-lock.yaml
+
+npm-debug.log*
+pnpm-debug.log*

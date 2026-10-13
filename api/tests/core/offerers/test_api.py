@@ -1,0 +1,5110 @@
+import dataclasses
+import datetime
+import decimal
+import logging
+import os
+import pathlib
+from dataclasses import asdict
+from unittest.mock import Mock
+from unittest.mock import call as mock_call
+from unittest.mock import patch
+
+import pytest
+import sqlalchemy as sa
+import time_machine
+
+import pcapi.core.favorites.models as favorites_models
+import pcapi.core.mails.testing as mails_testing
+from pcapi.connectors import acceslibre as acceslibre_connector
+from pcapi.connectors import api_adresse
+from pcapi.connectors.clickhouse import queries as clickhouse_queries
+from pcapi.connectors.entreprise import models as sirene_models
+from pcapi.core.bookings import factories as bookings_factories
+from pcapi.core.bookings import models as bookings_models
+from pcapi.core.categories import subcategories
+from pcapi.core.criteria import api as criteria_api
+from pcapi.core.criteria import factories as criteria_factories
+from pcapi.core.criteria import models as criteria_models
+from pcapi.core.educational import factories as educational_factories
+from pcapi.core.educational import models as educational_models
+from pcapi.core.external_bookings import factories as external_bookings_factories
+from pcapi.core.favorites import factories as favorite_factories
+from pcapi.core.finance import factories as finance_factories
+from pcapi.core.finance import models as finance_models
+from pcapi.core.geography import factories as geography_factories
+from pcapi.core.geography import models as geography_models
+from pcapi.core.history import factories as history_factories
+from pcapi.core.history import models as history_models
+from pcapi.core.mails.transactional.brevo_template_ids import TransactionalEmail
+from pcapi.core.offerers import api as offerers_api
+from pcapi.core.offerers import exceptions as offerers_exceptions
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offerers import repository as offerers_repository
+from pcapi.core.offerers import schemas as offerers_schemas
+from pcapi.core.offerers.models import Venue
+from pcapi.core.offers import factories as offers_factories
+from pcapi.core.offers import models as offers_models
+from pcapi.core.opening_hours import schemas as opening_hours_schemas
+from pcapi.core.providers import factories as providers_factories
+from pcapi.core.providers import models as providers_models
+from pcapi.core.providers import repository as providers_repository
+from pcapi.core.search.models import IndexationReason
+from pcapi.core.testing import assert_num_queries
+from pcapi.core.users import factories as users_factories
+from pcapi.models import api_errors
+from pcapi.models import db
+from pcapi.models.offer_mixin import OfferValidationStatus
+from pcapi.models.validation_status_mixin import ValidationStatus
+from pcapi.routes.serialization import address_serialize
+from pcapi.routes.serialization import offerers_serialize
+from pcapi.routes.serialization import venue_serialize
+from pcapi.utils import date as date_utils
+from pcapi.utils.human_ids import humanize
+from pcapi.utils.transaction_manager import atomic
+
+import tests
+from tests.connectors.cgr import soap_definitions
+from tests.core.providers.cinema_providers.cgr import fixtures as cgr_fixtures
+from tests.test_utils import gen_offerer_tags
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+@pytest.mark.parametrize("ape_code, expected_tag", list(offerers_api.APE_TAG_MAPPING.items()))
+def test_new_offerer_auto_tagging(db_session, ape_code, expected_tag):
+    # given
+    gen_offerer_tags()
+    offerer = offerers_factories.OffererFactory()
+    siren_info = sirene_models.SirenInfo(
+        ape_code=ape_code,
+        siren="777123456",
+        name="this is not a name",
+        head_office_siret="77712345600000",
+        legal_category_code="don't know",
+        active=True,
+        diffusible=True,
+        creation_date=datetime.date(2023, 1, 1),
+    )
+    user = users_factories.UserFactory()
+
+    # when
+    offerers_api.auto_tag_new_offerer(offerer, siren_info, user)
+
+    # then
+    db.session.refresh(offerer)
+    assert expected_tag in (tag.label for tag in offerer.tags)
+
+
+class UpdateVenueTest:
+    def test_update_venue_switch_addresses_twice(self):
+        """
+        This test ensures that we do no longer have the exception:
+        psycopg2.errors.UniqueViolation: duplicate key value violates unique constraint "ix_unique_offerer_address_per_label"
+        DETAIL:  Key ("offererId", "addressId", label)=(811, 512, Le Petit Rintintin 0) already exists.
+        """
+        venue = offerers_factories.VenueFactory(
+            offererAddress__address__street="Place de la Concorde",
+            offererAddress__address__postalCode="75001",
+            offererAddress__address__latitude="48.865609",
+            offererAddress__address__longitude="2.322913",
+            offererAddress__address__banId="75101_2259",
+        )
+        author = users_factories.UserFactory()
+
+        modifications_1 = {
+            "street": "Avenue des Champs Elysées",
+            "latitude": "48.871285",
+            "longitude": "2.302859",
+            "banId": "75108_1733",
+        }
+        modifications_2 = {
+            "street": "Place de la Concorde",
+            "postalCode": "75001",
+            "latitude": "48.865609",
+            "longitude": "2.322913",
+            "banId": "75101_2259",
+        }
+
+        offerers_api.update_venue(venue, {}, modifications_1, author)
+        offerer_address = venue.offererAddress
+        assert offerer_address.label is None
+        assert offerer_address.type == offerers_models.LocationType.VENUE_LOCATION
+        assert offerer_address.venue == venue
+        address_1 = offerer_address.address
+        assert address_1.street == modifications_1["street"]
+
+        offerers_api.update_venue(venue, {}, modifications_2, author)
+        assert venue.offererAddress == offerer_address  # same object updated
+        assert offerer_address.id == offerer_address.id
+        assert offerer_address.label is None
+        assert offerer_address.type == offerers_models.LocationType.VENUE_LOCATION
+        assert offerer_address.venue == venue
+        address_2 = offerer_address.address
+        assert address_2.id != address_1.id
+        assert address_2.street == modifications_2["street"]
+
+        offerers_api.update_venue(venue, {}, modifications_1, author)
+        assert venue.offererAddress == offerer_address  # same object updated
+        assert venue.offererAddress.address == address_1
+
+    def test_add_new_opening_hours_to_venue(self):
+        venue = offerers_factories.VenueFactory()
+        author = users_factories.UserFactory()
+
+        new_opening_hours = opening_hours_schemas.WeekdayOpeningHoursTimespans(MONDAY=[["10:00", "18:00"]])
+        offerers_api.update_venue(venue, {}, {}, author, opening_hours=new_opening_hours)
+
+        opening_hours = db.session.query(offerers_models.OpeningHours).filter_by(venueId=venue.id).all()
+        assert len(opening_hours) == 1
+
+        opening_hours = opening_hours[0]
+        assert opening_hours.weekday.value == "MONDAY"
+
+        assert len(opening_hours.timespan) == 1
+        assert opening_hours.timespan[0].lower == 10 * 60
+        assert opening_hours.timespan[0].upper == 18 * 60
+
+    @patch("pcapi.core.offerers.tasks.match_acceslibre_task.delay")
+    def test_changing_address_should_not_synchronize_when_closed_to_public(self, mock_match_acceslibre_task):
+        venue = offerers_factories.VenueFactory(isOpenToPublic=False, isPermanent=True)
+        author = users_factories.UserFactory()
+        modifications = {
+            "street": "Avenue des Champs Elysées",
+            "latitude": "48.871285",
+            "longitude": "2.302859",
+            "banId": "75108_1733",
+        }
+        offerers_api.update_venue(venue, {}, modifications, author)
+
+        mock_match_acceslibre_task.assert_not_called()
+
+
+class CreateVenueTest:
+    def base_data(self, offerer):
+        return {
+            "activity": offerers_models.Activity.FESTIVAL.name,
+            "address": {
+                "street": "rue du test",
+                "city": "Paris",
+                "postalCode": "75002",
+                "banId": "75113_1834_00007",
+                "latitude": 1,
+                "longitude": 2,
+            },
+            "managing_offerer_id": offerer.id,
+            "name": "La Venue",
+            "booking_email": "venue@example.com",
+            "siret": offerer.siren + "00000",
+            "is_open_to_public": False,
+            "audio_disability_compliant": True,
+            "mental_disability_compliant": True,
+            "motor_disability_compliant": True,
+            "visual_disability_compliant": True,
+            "comment": None,
+            "public_name": "La Venue",
+            "venue_label_id": None,
+            "withdrawal_details": None,
+            "contact": None,
+            "description": None,
+            "cultural_domains": None,
+        }
+
+    def test_basics(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        data = venue_serialize.PostVenueBodyModel(**self.base_data(user_offerer.offerer))
+        offerers_api.create_venue(data, user_offerer.user)
+
+        venue = db.session.query(offerers_models.Venue).one()
+        assert venue.managingOfferer == user_offerer.offerer
+        assert venue.name == "La Venue"
+        assert venue.publicName == "La Venue"  # empty/non public name copies name
+        assert venue.bookingEmail == "venue@example.com"
+        assert venue.dmsToken
+        assert venue.current_pricing_point_id == venue.id
+
+        offerer_address = db.session.query(offerers_models.OffererAddress).one()
+        assert offerer_address.label is None
+        assert offerer_address.offerer == user_offerer.offerer
+        assert offerer_address.type == offerers_models.LocationType.VENUE_LOCATION
+        assert offerer_address.venue == venue
+        assert offerer_address.address.banId == "75113_1834_00007"
+        assert offerer_address.address.street == "rue du test"
+        assert offerer_address.address.postalCode == "75002"
+        assert offerer_address.address.city == "Paris"
+        assert offerer_address.address.latitude == 1
+        assert offerer_address.address.longitude == 2
+        assert offerer_address.address.departmentCode == "75"
+        assert offerer_address.address.timezone == "Europe/Paris"
+        assert offerer_address.address.isManualEdition is False
+        assert venue.offererAddress == offerer_address
+
+        action = db.session.query(history_models.ActionHistory).one()
+        assert action.actionType == history_models.ActionType.VENUE_CREATED
+        assert action.authorUser == user_offerer.user
+        assert action.user is None
+        assert action.offerer is None
+        assert action.venue == venue
+
+    def test_venue_is_permanent_when_created_with_siret(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        data = venue_serialize.PostVenueBodyModel(**self.base_data(user_offerer.offerer))
+        offerers_api.create_venue(data, user_offerer.user)
+
+        venue = db.session.query(offerers_models.Venue).one()
+        assert venue.isPermanent is True
+
+    def test_venue_is_permanent_when_created_open_to_public(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        init_data = self.base_data(user_offerer.offerer) | {
+            "siret": None,
+            "comment": "no siret",
+            "is_open_to_public": True,
+        }
+        data = venue_serialize.PostVenueBodyModel(**init_data)
+        offerers_api.create_venue(data, user_offerer.user)
+
+        venue = db.session.query(offerers_models.Venue).one()
+        assert venue.isPermanent is True
+
+    def test_venue_is_permanent_when_created_with_siret_and_open_to_public(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        init_data = self.base_data(user_offerer.offerer) | {"is_open_to_public": True}
+        data = venue_serialize.PostVenueBodyModel(**init_data)
+        offerers_api.create_venue(data, user_offerer.user)
+
+        venue = db.session.query(offerers_models.Venue).one()
+        assert venue.isPermanent is True
+
+    def test_create_venue_closed_to_public_should_be_permanent(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        init_data = self.base_data(user_offerer.offerer) | {
+            "is_open_to_public": False,
+        }
+        data = venue_serialize.PostVenueBodyModel(**init_data)
+        offerers_api.create_venue(data, user_offerer.user)
+
+        venue = db.session.query(offerers_models.Venue).one()
+        assert venue.isPermanent is True
+
+    def test_venue_with_no_siret_has_no_pricing_point(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        data = self.base_data(user_offerer.offerer) | {"siret": None, "comment": "no siret"}
+        data = venue_serialize.PostVenueBodyModel(**data)
+
+        offerers_api.create_venue(data, user_offerer.user)
+
+        venue = db.session.query(offerers_models.Venue).one()
+        assert venue.siret is None
+        assert venue.current_pricing_point_id is None
+
+    def test_venue_with_cultural_domains(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        for domain_name in ["Architecture", "Média et information", "Bande dessinée", "Musique"]:
+            educational_factories.EducationalDomainFactory(name=domain_name)
+        data = self.base_data(user_offerer.offerer) | {
+            "cultural_domains": ["Architecture", "Bande dessinée"],
+            "activity": offerers_models.Activity.ART_GALLERY,
+        }
+        offerers_api.create_venue(venue_serialize.PostVenueBodyModel(**data), user_offerer.user)
+
+        venue = db.session.query(offerers_models.Venue).one()
+        assert venue.activity == offerers_models.Activity.ART_GALLERY
+        assert {domain.name for domain in venue.collectiveDomains} == {"Architecture", "Bande dessinée"}
+
+
+class DeleteVenueTest:
+    def test_delete_venue_should_abort_when_venue_has_any_bookings(self):
+        booking = bookings_factories.BookingFactory()
+        venue_to_delete = booking.venue
+
+        with pytest.raises(offerers_exceptions.CannotDeleteVenueWithBookingsException) as exception:
+            offerers_api.delete_venue(venue_to_delete.id)
+
+        assert exception.value.errors["cannotDeleteVenueWithBookingsException"] == [
+            "Partenaire culturel non supprimable car il contient des réservations"
+        ]
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(offers_models.Stock).count() == 1
+        assert db.session.query(bookings_models.Booking).count() == 1
+
+    def test_delete_venue_should_abort_when_venue_has_any_collective_bookings(self):
+        booking = educational_factories.CollectiveBookingFactory()
+        venue_to_delete = booking.venue
+
+        with pytest.raises(offerers_exceptions.CannotDeleteVenueWithBookingsException) as exception:
+            offerers_api.delete_venue(venue_to_delete.id)
+
+        assert exception.value.errors["cannotDeleteVenueWithBookingsException"] == [
+            "Partenaire culturel non supprimable car il contient des réservations"
+        ]
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(educational_models.CollectiveStock).count() == 1
+        assert db.session.query(educational_models.CollectiveBooking).count() == 1
+
+    def test_delete_venue_should_abort_when_pricing_point_for_another_venue(self):
+        venue_to_delete = offerers_factories.VenueFactory(pricing_point="self")
+        offerers_factories.VenueFactory(pricing_point=venue_to_delete, managingOfferer=venue_to_delete.managingOfferer)
+
+        with pytest.raises(offerers_exceptions.CannotDeleteVenueUsedAsPricingPointException) as exception:
+            offerers_api.delete_venue(venue_to_delete.id)
+
+        assert exception.value.errors["cannotDeleteVenueUsedAsPricingPointException"] == [
+            "Partenaire culturel non supprimable car il est utilisé comme point de valorisation d'un autre partenaire culturel"
+        ]
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 2
+        assert db.session.query(offerers_models.VenuePricingPointLink).count() == 2
+
+    def test_delete_venue_should_abort_when_there_is_no_other_venue(self):
+        venue_to_delete = offerers_factories.VenueFactory()
+
+        with pytest.raises(offerers_exceptions.CannotDeleteLastVenue) as exception:
+            offerers_api.delete_venue(venue_to_delete.id)
+
+        assert exception.value.errors["CannotDeleteLastVenue"] == [
+            "Partenaire culturel non supprimable car c'est le seul SIRET de l'entité juridique"
+        ]
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 1
+
+    def test_delete_venue_remove_former_pricing_point_for_another_venue(self):
+        venue_to_delete = offerers_factories.VenueFactory(pricing_point="self")
+        offerers_factories.VenuePricingPointLinkFactory.create_batch(
+            2,  # other venues
+            pricingPoint=venue_to_delete,
+            timespan=[
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=10),
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            ],
+        )
+        offerers_factories.VenueFactory(managingOfferer=venue_to_delete.managingOfferer)  # remaining venue
+
+        offerers_api.delete_venue(venue_to_delete.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 3
+        assert db.session.query(offerers_models.VenuePricingPointLink).count() == 0
+
+    def test_delete_venue_should_abort_when_pricing_exists_on_former_pricing_point_link(self):
+        venue_to_delete = offerers_factories.VenueFactory(pricing_point="self")
+        links = offerers_factories.VenuePricingPointLinkFactory.create_batch(
+            2,
+            pricingPoint=venue_to_delete,
+            timespan=[
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=10),
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=5),
+            ],
+        )
+        finance_event = finance_factories.FinanceEventFactory(
+            venue=links[1].venue,
+            pricingPoint=venue_to_delete,
+            pricingOrderingDate=date_utils.get_naive_utc_now() - datetime.timedelta(days=7),
+        )
+        finance_factories.PricingFactory(
+            booking=finance_event.booking, pricingPoint=venue_to_delete, event=finance_event
+        )
+
+        with pytest.raises(offerers_exceptions.CannotDeleteVenueUsedAsPricingPointException):
+            offerers_api.delete_venue(venue_to_delete.id)
+
+    def test_delete_venue_should_abort_when_finance_event_is_linked_to_venue(self):
+        venue_to_delete = offerers_factories.VenueFactory(pricing_point="self")
+        finance_factories.FinanceEventFactory(
+            venue=venue_to_delete,
+            pricingPoint=offerers_factories.VenueFactory(managingOfferer=venue_to_delete.managingOfferer),
+        )
+
+        with pytest.raises(offerers_exceptions.CannotDeleteVenueLinkedToFinanceEventException):
+            offerers_api.delete_venue(venue_to_delete.id)
+
+    def test_delete_venue_should_remove_offers_stocks_and_activation_codes(self):
+        venue_to_delete = offerers_factories.VenueFactory()
+        offers_factories.OfferFactory.create_batch(2, venue=venue_to_delete)
+        stock = offers_factories.StockFactory(offer__venue=venue_to_delete)
+        offers_factories.EventStockFactory(offer__venue=venue_to_delete)
+
+        other_venue = offerers_factories.VenueFactory(managingOfferer=venue_to_delete.managingOfferer)
+        offers_factories.ActivationCodeFactory(stock=stock)
+        stock_with_another_venue = offers_factories.EventStockFactory(
+            offer__venue=other_venue, priceCategory__label="otherLabel"
+        )
+        offers_factories.ActivationCodeFactory(stock=stock_with_another_venue)
+
+        offerers_api.delete_venue(venue_to_delete.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(offers_models.Offer).count() == 1
+        assert db.session.query(offers_models.Stock).count() == 1
+        assert db.session.query(offers_models.ActivationCode).count() == 1
+        assert db.session.query(offers_models.PriceCategory).one().label == "otherLabel"
+
+    def test_delete_venue_should_remove_collective_offers_stocks_and_templates(self):
+        venue_to_delete = offerers_factories.VenueFactory()
+        educational_factories.CollectiveOfferFactory(venue=venue_to_delete)
+        template1 = educational_factories.CollectiveOfferTemplateFactory(venue=venue_to_delete)
+        educational_factories.EducationalRedactorWithFavoriteCollectiveOfferTemplateFactory(
+            favoriteCollectiveOfferTemplates=[template1]
+        )
+        educational_factories.CollectiveStockFactory(collectiveOffer__venue=venue_to_delete)
+        educational_factories.CollectiveStockFactory(
+            collectiveOffer__venue__managingOfferer=venue_to_delete.managingOfferer
+        )
+        educational_factories.CollectiveOfferRequestFactory(collectiveOfferTemplate=template1)
+
+        offerers_api.delete_venue(venue_to_delete.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(educational_models.CollectiveOffer).count() == 1
+        assert db.session.query(educational_models.CollectiveOfferTemplate).count() == 0
+        assert db.session.query(educational_models.CollectiveStock).count() == 1
+        assert db.session.query(educational_models.CollectiveOfferRequest).count() == 0
+
+    def test_delete_venue_should_remove_pricing_point_links(self):
+        venue = offerers_factories.VenueFactory(pricing_point="self")
+        remaining_venue = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+
+        offerers_api.delete_venue(venue.id)
+
+        assert db.session.query(offerers_models.Venue.id).all() == [(remaining_venue.id,)]
+        assert db.session.query(offerers_models.VenuePricingPointLink).count() == 0
+
+    def test_delete_venue_should_remove_mediations_of_managed_offers(self):
+        venue = offerers_factories.VenueFactory()
+        venue_to_delete = offerers_factories.VenueFactory()
+        offers_factories.MediationFactory(offer__venue=venue_to_delete)
+        offers_factories.MediationFactory(offer__venue=venue)
+        offerers_factories.VenueFactory(managingOfferer=venue_to_delete.managingOfferer)  # remaining venue
+
+        offerers_api.delete_venue(venue_to_delete.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 2
+        assert db.session.query(offers_models.Offer).count() == 1
+        assert db.session.query(offers_models.Mediation).count() == 1
+
+    def test_delete_venue_should_remove_favorites_of_managed_offers(self):
+        venue = offerers_factories.VenueFactory()
+        venue_to_delete = offerers_factories.VenueFactory()
+        favorite_factories.FavoriteOfferFactory(offer__venue=venue_to_delete)
+        favorite_factories.FavoriteOfferFactory(offer__venue=venue)
+        offerers_factories.VenueFactory(managingOfferer=venue_to_delete.managingOfferer)  # remaining venue
+
+        offerers_api.delete_venue(venue_to_delete.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 2
+        assert db.session.query(offers_models.Offer).count() == 1
+        assert db.session.query(favorites_models.FavoriteOffer).count() == 1
+
+    def test_delete_venue_should_remove_criterions(self):
+        offers_factories.OfferFactory(
+            venue=offerers_factories.VenueFactory(), criteria=[criteria_factories.CriterionFactory()]
+        )
+        offer_venue_to_delete = offers_factories.OfferFactory(
+            venue=offerers_factories.VenueFactory(), criteria=[criteria_factories.CriterionFactory()]
+        )
+        offerers_factories.VenueFactory(managingOfferer=offer_venue_to_delete.venue.managingOfferer)  # remaining venue
+
+        offerers_api.delete_venue(offer_venue_to_delete.venue.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 2
+        assert db.session.query(offers_models.Offer).count() == 1
+        assert db.session.query(criteria_models.OfferCriterion).count() == 1
+        assert db.session.query(criteria_models.Criterion).count() == 2
+
+    def test_delete_venue_should_remove_synchronization_to_provider(self):
+        venue = offerers_factories.VenueFactory()
+        venue_to_delete = offerers_factories.VenueFactory()
+        providers_factories.VenueProviderFactory(venue=venue_to_delete)
+        providers_factories.VenueProviderFactory(venue=venue)
+        offerers_factories.VenueFactory(managingOfferer=venue_to_delete.managingOfferer)  # remaining venue
+
+        offerers_api.delete_venue(venue_to_delete.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 2
+        assert db.session.query(providers_models.VenueProvider).count() == 1
+        assert db.session.query(providers_models.Provider).count() > 0
+
+    def test_delete_venue_should_remove_synchronization_to_allocine_provider(self):
+        venue = offerers_factories.VenueFactory()
+        venue_to_delete = offerers_factories.VenueFactory()
+        providers_factories.AllocineVenueProviderFactory(venue=venue_to_delete)
+        providers_factories.AllocineVenueProviderFactory(venue=venue)
+        providers_factories.AllocinePivotFactory(venue=venue_to_delete)
+        providers_factories.AllocinePivotFactory(venue=venue, theaterId="ABCDEFGHIJKLMNOPQR==", internalId="PABCDE")
+        offerers_factories.VenueFactory(managingOfferer=venue_to_delete.managingOfferer)  # remaining venue
+
+        offerers_api.delete_venue(venue_to_delete.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 2
+        assert db.session.query(providers_models.VenueProvider).count() == 1
+        assert db.session.query(providers_models.AllocineVenueProvider).count() == 1
+        assert db.session.query(providers_models.AllocinePivot).count() == 1
+        assert db.session.query(providers_models.Provider).count() > 0
+
+    def test_delete_venue_when_template_has_offer_on_other_venue(self):
+        venue = offerers_factories.VenueFactory()
+        venue2 = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+        template = educational_factories.CollectiveOfferTemplateFactory(venue=venue)
+        offer = educational_factories.CollectiveOfferFactory(venue=venue2, template=template)
+        offerers_api.delete_venue(venue.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(educational_models.CollectiveOffer).count() == 1
+        assert db.session.query(educational_models.CollectiveOfferTemplate).count() == 0
+        assert offer.template is None
+
+    def test_delete_venue_should_remove_links(self):
+        bank_account = finance_factories.BankAccountFactory()
+        venue_to_delete = offerers_factories.VenueFactory()
+        offerers_factories.VenueBankAccountLinkFactory(venue=venue_to_delete, bankAccount=bank_account)
+        bank_account_id = bank_account.id
+        remaining_venue = offerers_factories.VenueFactory(managingOfferer=venue_to_delete.managingOfferer)
+
+        offerers_api.delete_venue(venue_to_delete.id)
+
+        assert db.session.query(offerers_models.Venue.id).all() == [(remaining_venue.id,)]
+        assert db.session.query(offerers_models.VenueBankAccountLink).count() == 0
+        assert (
+            db.session.query(finance_models.BankAccount)
+            .filter(finance_models.BankAccount.id == bank_account_id)
+            .one_or_none()
+        )
+
+    def test_delete_venue_should_remove_playlist(self):
+        venue = offerers_factories.CollectiveVenueFactory()
+        template = educational_factories.CollectiveOfferTemplateFactory(venue=venue)
+        educational_factories.PlaylistFactory(venue=None, collective_offer_template=template)
+        educational_factories.PlaylistFactory(venue=venue, collective_offer_template=None)
+        remaining_venue = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+
+        offerers_api.delete_venue(venue.id)
+
+        assert db.session.query(offerers_models.Venue.id).all() == [(remaining_venue.id,)]
+        assert db.session.query(educational_models.CollectivePlaylist).count() == 0
+
+    @pytest.mark.parametrize(
+        "timespan",
+        [
+            [
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=150),
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=50),
+            ],
+            [
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=100),
+                None,
+            ],
+            [
+                date_utils.get_naive_utc_now() + datetime.timedelta(days=10),
+                date_utils.get_naive_utc_now() + datetime.timedelta(days=30),
+            ],
+        ],
+    )
+    def test_delete_venue_should_abort_when_venue_has_active_or_future_custom_reimbursement_rule(self, timespan):
+        venue = offerers_factories.VenueFactory()
+        finance_factories.CustomReimbursementRuleFactory(venue=venue, offer=None, timespan=timespan)
+
+        with pytest.raises(offerers_exceptions.CannotDeleteVenueWithActiveOrFutureCustomReimbursementRule):
+            offerers_api.delete_venue(venue.id)
+
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(finance_models.CustomReimbursementRule).count() == 1
+
+    @pytest.mark.parametrize(
+        "factory",
+        [
+            providers_factories.CDSCinemaDetailsFactory,
+            providers_factories.BoostCinemaDetailsFactory,
+            providers_factories.CGRCinemaDetailsFactory,
+            providers_factories.EMSCinemaDetailsFactory,
+        ],
+    )
+    def test_delete_venue_with_pivot(self, factory):
+        detail = factory()
+        venue = detail.cinemaProviderPivot.venue
+        remaining_venue = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+
+        offerers_api.delete_venue(venue.id)
+
+        assert db.session.query(offerers_models.Venue.id).all() == [(remaining_venue.id,)]
+        assert db.session.query(factory._meta.model).count() == 0
+
+    def test_delete_venue_with_allocine_pivot(self):
+        detail = providers_factories.AllocinePivotFactory()
+        venue = detail.venue
+        remaining_venue = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+
+        offerers_api.delete_venue(venue.id)
+
+        assert db.session.query(offerers_models.Venue.id).all() == [(remaining_venue.id,)]
+        assert db.session.query(providers_models.AllocinePivot).count() == 0
+
+
+class EditVenueContactTest:
+    def test_create_venue_contact(self, app):
+        user_offerer = offerers_factories.UserOffererFactory(
+            user__email="user.pro@test.com",
+        )
+        venue = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+        contact_data = offerers_schemas.VenueContactModel(
+            email="contact@venue.com",
+            phone_number="+33766778899",
+            social_medias={"instagram": "https://instagram.com/@venue"},
+        )
+
+        venue = offerers_api.upsert_venue_contact(venue, contact_data)
+
+        assert venue.contact
+        assert venue.contact.email == contact_data.email
+        assert venue.contact.phone_number == contact_data.phone_number
+        assert venue.contact.social_medias == contact_data.social_medias
+
+    def test_update_venue_contact(self, app):
+        user_offerer = offerers_factories.UserOffererFactory(
+            user__email="user.pro@test.com",
+        )
+        venue = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+
+        contact_data = offerers_schemas.VenueContactModel(
+            email="other.contact@venue.com", socialMedias={"instagram": "https://instagram.com/@venue"}
+        )
+
+        venue = offerers_api.upsert_venue_contact(venue, contact_data)
+
+        assert venue.contact
+        assert venue.contact.email == contact_data.email
+        assert venue.contact.social_medias == contact_data.social_medias
+        assert not venue.contact.phone_number
+
+
+class ApiKeyTest:
+    def test_get_provider_from_api_key(self):
+        value = "development_prefix_a very secret key"
+        offerer = offerers_factories.OffererFactory()
+        provider = providers_factories.ProviderFactory(localClass=None, name="RiotRecords")
+        providers_factories.OffererProviderFactory(offerer=offerer, provider=provider)
+        offerers_factories.ApiKeyFactory(provider=provider, prefix="development_prefix", secret="a very secret key")
+
+        with assert_num_queries(1):
+            found_api_key = offerers_api.find_api_key(value)
+
+        assert found_api_key.provider == provider
+
+    def test_no_key_found(self):
+        assert not offerers_api.find_api_key("")
+        assert not offerers_api.find_api_key("idonotexist")
+        assert not offerers_api.find_api_key("development_prefix_value")
+
+
+class CreateOffererTest:
+    def test_create_offerer_if_siren_is_not_already_registered(self):
+        # Given
+        gen_offerer_tags()
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="777084112",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+
+        # When
+        created_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.name == offerer_informations.name
+        assert created_offerer.siren == offerer_informations.siren
+        assert created_offerer.validationStatus == ValidationStatus.NEW
+        assert created_offerer.isActive
+        assert "Collectivité" in (tag.label for tag in created_offerer.tags)
+
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.validationStatus == ValidationStatus.VALIDATED
+        assert created_user_offerer.dateCreated is not None
+
+        assert not created_user_offerer.user.has_pro_role
+
+        actions_list = db.session.query(history_models.ActionHistory).all()
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == created_offerer
+
+    def test_create_new_offerer_attachment_if_siren_is_already_registered(self):
+        # Given
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+        offerer = offerers_factories.OffererFactory(siren=offerer_informations.siren)
+
+        # When
+        created_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.name == offerer.name
+        assert created_offerer.isValidated
+        assert created_offerer.isActive
+
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.validationStatus == ValidationStatus.NEW
+        assert created_user_offerer.dateCreated is not None
+
+        assert not created_user_offerer.user.has_pro_role
+
+        actions_list = db.session.query(history_models.ActionHistory).all()
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.USER_OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == offerer
+
+    def test_keep_offerer_validation_token_if_siren_is_already_registered_but_not_validated(self):
+        # Given
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+        offerer = offerers_factories.PendingOffererFactory(siren=offerer_informations.siren)
+
+        # When
+        created_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.name == offerer.name
+        assert created_offerer.validationStatus == ValidationStatus.PENDING
+        assert not created_offerer.isValidated
+
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.validationStatus == ValidationStatus.NEW
+        assert created_user_offerer.dateCreated is not None
+
+    def test_create_offerer_if_siren_was_previously_rejected(self):
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+        offerer = offerers_factories.RejectedOffererFactory(
+            name=offerer_informations.name,
+            siren=offerer_informations.siren,
+        )
+        first_creation_date = offerer.dateCreated
+        offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        created_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+        db.session.commit()  # due to synchronize_session=False in delete_venue
+
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.id == offerer.id
+        assert created_offerer.name == offerer_informations.name
+        assert created_offerer.siren == offerer_informations.siren
+        assert created_offerer.validationStatus == ValidationStatus.NEW
+        assert created_offerer.isActive
+        assert created_offerer.dateCreated > first_creation_date
+
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.validationStatus == ValidationStatus.VALIDATED
+        assert created_user_offerer.dateCreated is not None
+
+        assert not created_user_offerer.user.has_pro_role
+
+        actions_list = db.session.query(history_models.ActionHistory).all()
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == created_offerer
+        assert actions_list[0].comment == "Nouvelle demande sur un SIREN précédemment rejeté"
+
+        assert not offerer.managedVenues
+
+    def test_create_offerer_if_siren_was_previously_rejected_on_user_rejected(self):
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+        offerer = offerers_factories.RejectedOffererFactory(
+            name=offerer_informations.name,
+            siren=offerer_informations.siren,
+        )
+        offerers_factories.RejectedUserOffererFactory(user=user, offerer=offerer)
+
+        # When
+        updated_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        assert offerer.validationStatus == ValidationStatus.NEW
+        assert updated_user_offerer.validationStatus == ValidationStatus.VALIDATED
+        assert updated_user_offerer.dateCreated is not None
+
+        assert not updated_user_offerer.user.has_pro_role
+
+        actions_list = (
+            db.session.query(history_models.ActionHistory).order_by(history_models.ActionHistory.actionType).all()
+        )
+        created_offerer = updated_user_offerer.offerer
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == created_offerer
+        assert actions_list[0].comment == "Nouvelle demande sur un SIREN précédemment rejeté"
+
+    def test_create_offerer_if_siren_was_previously_rejected_on_user_deleted(self):
+        # Given
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+            latitude=48,
+            longitude=2,
+        )
+        offerer = offerers_factories.RejectedOffererFactory(
+            name=offerer_informations.name,
+            siren=offerer_informations.siren,
+        )
+        offerers_factories.DeletedUserOffererFactory(user=user, offerer=offerer)
+
+        # When
+        updated_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        assert updated_user_offerer.offerer.validationStatus == ValidationStatus.NEW
+        assert updated_user_offerer.validationStatus == ValidationStatus.VALIDATED
+        assert updated_user_offerer.dateCreated is not None
+
+        assert not updated_user_offerer.user.has_pro_role
+
+        actions_list = (
+            db.session.query(history_models.ActionHistory).order_by(history_models.ActionHistory.actionType).all()
+        )
+        created_offerer = updated_user_offerer.offerer
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == created_offerer
+        assert actions_list[0].comment == "Nouvelle demande sur un SIREN précédemment rejeté"
+
+    def test_create_offerer_on_known_offerer_by_user_rejected(self):
+        # Given
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+        offerer = offerers_factories.OffererFactory(siren=offerer_informations.siren)
+        offerers_factories.RejectedUserOffererFactory(user=user, offerer=offerer)
+
+        # When
+        updated_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        assert offerer.validationStatus == ValidationStatus.VALIDATED
+        assert updated_user_offerer.validationStatus == ValidationStatus.NEW
+        assert updated_user_offerer.dateCreated is not None
+
+        assert not updated_user_offerer.user.has_pro_role
+
+        actions_list = (
+            db.session.query(history_models.ActionHistory).order_by(history_models.ActionHistory.actionType).all()
+        )
+        created_offerer = updated_user_offerer.offerer
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.USER_OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == created_offerer
+
+    def test_create_offerer_on_known_offerer_twice(self):
+        # Given
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+        offerer = offerers_factories.OffererFactory(siren=offerer_informations.siren)
+        offerers_factories.RejectedUserOffererFactory(user=user, offerer=offerer)
+
+        # When
+        updated_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+        updated_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        assert offerer.validationStatus == ValidationStatus.VALIDATED
+        assert updated_user_offerer.validationStatus == ValidationStatus.NEW
+        assert updated_user_offerer.dateCreated is not None
+
+        assert not updated_user_offerer.user.has_pro_role
+
+        actions_list = (
+            db.session.query(history_models.ActionHistory).order_by(history_models.ActionHistory.actionType).all()
+        )
+        created_offerer = updated_user_offerer.offerer
+        assert len(actions_list) == 2
+        assert actions_list[0].actionType == history_models.ActionType.USER_OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == created_offerer
+        assert actions_list[1].actionType == history_models.ActionType.USER_OFFERER_NEW
+        assert actions_list[1].authorUser == user
+        assert actions_list[1].user == user
+        assert actions_list[1].offerer == created_offerer
+
+    def test_create_new_offerer_twice(self):
+        # Given
+        user = users_factories.NonAttachedProFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+
+        # When
+        offerers_api.create_offerer(user, offerer_informations)
+        user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        created_offerer = user_offerer.offerer
+        assert created_offerer.validationStatus == ValidationStatus.NEW
+        assert user_offerer.validationStatus == ValidationStatus.VALIDATED
+        assert user_offerer.dateCreated is not None
+
+        assert not user.has_pro_role
+        assert user.has_non_attached_pro_role
+
+        actions_list = user.action_history
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == created_offerer
+
+    def test_create_new_offerer_on_known_offerer_by_user_deleted(self):
+        # Given
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="418166096",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+        offerer = offerers_factories.OffererFactory(siren=offerer_informations.siren)
+        offerers_factories.DeletedUserOffererFactory(user=user, offerer=offerer)
+
+        # When
+        updated_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        assert offerer.validationStatus == ValidationStatus.VALIDATED
+        assert updated_user_offerer.validationStatus == ValidationStatus.NEW
+        assert updated_user_offerer.dateCreated is not None
+
+        assert not updated_user_offerer.user.has_pro_role
+
+        actions_list = (
+            db.session.query(history_models.ActionHistory).order_by(history_models.ActionHistory.actionType).all()
+        )
+        created_offerer = updated_user_offerer.offerer
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.USER_OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].offerer == created_offerer
+
+    def test_create_offerer_auto_tagging_no_error_if_tag_not_in_db(self):
+        # Given
+        user = users_factories.UserFactory()
+        offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer",
+            siren="777084112",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+
+        # When
+        created_user_offerer = offerers_api.create_offerer(user, offerer_informations)
+
+        # Then
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.name == offerer_informations.name
+
+    @pytest.mark.settings(NATIONAL_PARTNERS_EMAIL_DOMAINS="howdy.com,partner.com")
+    def test_create_offerer_national_partner_autotagging(self):
+        # Given
+        national_partner_tag = offerers_factories.OffererTagFactory(name="partenaire-national")
+        not_a_partner_user = users_factories.UserFactory(email="noël.flantier@example.com")
+        partner_user = users_factories.UserFactory(email="ssap.erutluc@partner.com")
+        not_a_partner_offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer Not Partner",
+            siren="777084112",
+            street="123 rue de Paris",
+            postal_code="93100",
+            city="Montreuil",
+        )
+        partner_offerer_informations = offerers_serialize.CreateOffererBodyModel(
+            name="Test Offerer Partner",
+            siren="777084121",
+            street="123 rue de Paname",
+            postal_code="93100",
+            city="Montreuil",
+        )
+
+        # When
+        created_user_offerer_not_partner = offerers_api.create_offerer(
+            not_a_partner_user, not_a_partner_offerer_informations
+        )
+        created_user_offerer_partner = offerers_api.create_offerer(partner_user, partner_offerer_informations)
+
+        # Then
+        created_offerer_not_partner = created_user_offerer_not_partner.offerer
+        created_offerer_partner = created_user_offerer_partner.offerer
+
+        assert national_partner_tag not in created_offerer_not_partner.tags
+        assert national_partner_tag in created_offerer_partner.tags
+
+
+class UpdateOffererTest:
+    def test_update_offerer(self):
+        offerer = offerers_factories.OffererFactory()
+        author = users_factories.UserFactory()
+
+        offerers_api.update_offerer(offerer, author, name="Test")
+        offerer = db.session.query(offerers_models.Offerer).one()
+        assert offerer.name == "Test"
+
+    def test_update_offerer_logs_action(self):
+        offerer = offerers_factories.OffererFactory(name="Original")
+        author = users_factories.UserFactory()
+
+        offerers_api.update_offerer(offerer, author, name="Updated")
+
+        action = db.session.query(history_models.ActionHistory).one()
+        assert action.actionType == history_models.ActionType.INFO_MODIFIED
+        assert action.actionDate is not None
+        assert action.authorUserId == author.id
+        assert action.userId is None
+        assert action.offererId == offerer.id
+        assert action.venueId is None
+        assert action.extraData["modified_info"] == {"name": {"new_info": "Updated", "old_info": "Original"}}
+
+
+class DeleteOffererTest:
+    def test_delete_cascade_offerer_should_abort_when_offerer_is_linked_to_provider(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        providers_factories.OffererProviderFactory(offerer=offerer_to_delete)
+
+        # When
+        with pytest.raises(offerers_exceptions.CannotDeleteOffererLinkedToProvider) as exception:
+            offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert exception.value.errors["cannotDeleteOffererLinkedToProvider"] == [
+            "Entité juridique non supprimable car elle est liée à un provider"
+        ]
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.OffererProvider).count() == 1
+
+    def test_delete_cascade_offerer_should_abort_when_offerer_has_any_bookings(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        offers_factories.OfferFactory(venue__managingOfferer=offerer_to_delete)
+        bookings_factories.BookingFactory(stock__offer__venue__managingOfferer=offerer_to_delete)
+
+        # When
+        with pytest.raises(offerers_exceptions.CannotDeleteOffererWithBookingsException) as exception:
+            offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert exception.value.errors["cannotDeleteOffererWithBookingsException"] == [
+            "Entité juridique non supprimable car elle contient des réservations"
+        ]
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 2
+        assert db.session.query(offers_models.Offer).count() == 2
+        assert db.session.query(offers_models.Stock).count() == 1
+        assert db.session.query(bookings_models.Booking).count() == 1
+
+    def test_delete_cascade_offerer_should_abort_when_offerer_has_collective_bookings(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        educational_factories.CollectiveOfferFactory(venue__managingOfferer=offerer_to_delete)
+        educational_factories.CollectiveBookingFactory(
+            collectiveStock__collectiveOffer__venue__managingOfferer=offerer_to_delete
+        )
+
+        # When
+        with pytest.raises(offerers_exceptions.CannotDeleteOffererWithBookingsException) as exception:
+            offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert exception.value.errors["cannotDeleteOffererWithBookingsException"] == [
+            "Entité juridique non supprimable car elle contient des réservations"
+        ]
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 2
+        assert db.session.query(educational_models.CollectiveOffer).count() == 2
+        assert db.session.query(educational_models.CollectiveStock).count() == 1
+        assert db.session.query(educational_models.CollectiveBooking).count() == 1
+
+    def test_delete_cascade_offerer_should_remove_managed_venues_offers_stocks_and_activation_codes(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        offers_factories.OfferFactory(venue__managingOfferer=offerer_to_delete)
+        stock_1 = offers_factories.StockFactory(offer__venue__managingOfferer=offerer_to_delete)
+        offers_factories.ActivationCodeFactory(stock=stock_1)
+        offers_factories.EventStockFactory(offer__venue__managingOfferer=offerer_to_delete)
+
+        other_offerer = offerers_factories.OffererFactory()
+
+        other_venue = offerers_factories.VenueFactory(managingOfferer=other_offerer)
+        stock_2 = offers_factories.StockFactory(offer__venue=other_venue)
+        offers_factories.ActivationCodeFactory(stock=stock_2)
+        offers_factories.EventStockFactory(offer__venue=other_venue)
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(offers_models.Offer).count() == 2
+        assert db.session.query(offers_models.Stock).count() == 2
+        assert db.session.query(offers_models.ActivationCode).count() == 1
+        assert db.session.query(offers_models.PriceCategory).count() == 1
+
+    def test_delete_cascade_offerer_should_remove_all_user_attachments_to_deleted_offerer(self):
+        # Given
+        pro = users_factories.ProFactory()
+        offerer_to_delete = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer_to_delete)
+        offerers_factories.UserOffererFactory(user=pro)
+
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.UserOfferer).count() == 1
+
+    def test_delete_cascade_offerer_should_remove_offers_of_offerer(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer_to_delete)
+        offers_factories.EventOfferFactory(venue=venue)
+        offers_factories.ThingOfferFactory(venue=venue)
+
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 0
+        assert db.session.query(offers_models.Offer).count() == 0
+
+    def test_delete_cascade_offerer_should_remove_pricing_point_links(self):
+        venue = offerers_factories.VenueFactory(pricing_point="self")
+        offerers_factories.VenueFactory(pricing_point=venue, managingOfferer=venue.managingOfferer)
+        offerer = venue.managingOfferer
+
+        offerers_api.delete_offerer(offerer.id)
+
+        assert db.session.query(offerers_models.Offerer).count() == 0
+        assert db.session.query(offerers_models.Venue).count() == 0
+        assert db.session.query(offerers_models.VenuePricingPointLink).count() == 0
+
+    def test_delete_cascade_offerer_should_remove_mediations_of_managed_offers(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        offers_factories.MediationFactory(offer__venue__managingOfferer=offerer_to_delete)
+        offers_factories.MediationFactory()
+
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(offers_models.Offer).count() == 1
+        assert db.session.query(offers_models.Mediation).count() == 1
+
+    def test_delete_cascade_offerer_should_remove_favorites_of_managed_offers(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        favorite_factories.FavoriteOfferFactory(offer__venue__managingOfferer=offerer_to_delete)
+        favorite_factories.FavoriteOfferFactory()
+
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(offers_models.Offer).count() == 1
+        assert db.session.query(favorites_models.FavoriteOffer).count() == 1
+
+    def test_delete_cascade_offerer_should_remove_criterion_attachment_of_managed_offers(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        offers_factories.OfferFactory(
+            venue__managingOfferer=offerer_to_delete,
+            criteria=[criteria_factories.CriterionFactory()],
+        )
+        offers_factories.OfferFactory(criteria=[criteria_factories.CriterionFactory()])
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(offers_models.Offer).count() == 1
+        assert db.session.query(criteria_models.OfferCriterion).count() == 1
+        assert db.session.query(criteria_models.Criterion).count() == 2
+
+    def test_delete_cascade_offerer_should_remove_venue_synchronization_to_provider(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        providers_factories.VenueProviderFactory(venue__managingOfferer=offerer_to_delete)
+        providers_factories.VenueProviderFactory()
+
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(providers_models.VenueProvider).count() == 1
+        assert db.session.query(providers_models.Provider).count() > 0
+
+    def test_delete_cascade_offerer_should_remove_venue_synchronization_to_allocine_provider(self):
+        # Given
+        offerer_to_delete = offerers_factories.OffererFactory()
+        venue_to_delete = offerers_factories.VenueFactory(managingOfferer=offerer_to_delete)
+        other_venue = offerers_factories.VenueFactory()
+        providers_factories.AllocineVenueProviderFactory(venue=venue_to_delete)
+        providers_factories.AllocineVenueProviderFactory(venue=other_venue)
+        providers_factories.AllocinePivotFactory(venue=venue_to_delete)
+        providers_factories.AllocinePivotFactory(
+            venue=other_venue, theaterId="ABCDEFGHIJKLMNOPQR==", internalId="PABCDE"
+        )
+
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(providers_models.VenueProvider).count() == 1
+        assert db.session.query(providers_models.AllocineVenueProvider).count() == 1
+        assert db.session.query(providers_models.AllocinePivot).count() == 1
+        assert db.session.query(providers_models.Provider).count() > 0
+
+    def test_delete_cascade_offerer_should_remove_related_bank_account(self):
+        # Given
+        bank_account = finance_factories.BankAccountFactory()
+        offerer_to_delete = bank_account.offerer
+
+        # When
+        offerers_api.delete_offerer(offerer_to_delete.id)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 0
+        assert db.session.query(finance_models.BankAccount).count() == 0
+
+    def test_delete_cascade_offerer_should_remove_collective_templates_and_playlists(self):
+        # Given
+        venue = offerers_factories.CollectiveVenueFactory()
+        template = educational_factories.CollectiveOfferTemplateFactory(venue=venue)
+        educational_factories.EducationalRedactorWithFavoriteCollectiveOfferTemplateFactory(
+            favoriteCollectiveOfferTemplates=[template]
+        )
+        educational_factories.PlaylistFactory(venue=venue, collective_offer_template=None)
+        educational_factories.PlaylistFactory(venue=None, collective_offer_template=template)
+
+        # When
+        offerers_api.delete_offerer(venue.managingOffererId)
+
+        # Then
+        assert db.session.query(offerers_models.Offerer).count() == 0
+        assert db.session.query(educational_models.CollectiveOfferTemplate).count() == 0
+        assert db.session.query(educational_models.CollectivePlaylist).count() == 0
+
+    @pytest.mark.parametrize(
+        "timespan",
+        [
+            [
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=100),
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=50),
+            ],
+            [
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=100),
+                None,
+            ],
+            [
+                date_utils.get_naive_utc_now() + datetime.timedelta(days=10),
+                date_utils.get_naive_utc_now() + datetime.timedelta(days=30),
+            ],
+        ],
+    )
+    def test_delete_cascade_offerer_should_abort_when_offerer_has_active_or_future_custom_reimbursement_rule(
+        self, timespan
+    ):
+        offerer = offerers_factories.OffererFactory()
+        finance_factories.CustomReimbursementRuleFactory(offerer=offerer, offer=None, timespan=timespan)
+
+        with pytest.raises(offerers_exceptions.CannotDeleteOffererWithActiveOrFutureCustomReimbursementRule):
+            offerers_api.delete_offerer(offerer.id)
+
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(finance_models.CustomReimbursementRule).count() == 1
+
+    @pytest.mark.parametrize(
+        "timespan",
+        [
+            [
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=100),
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=50),
+            ],
+            [
+                date_utils.get_naive_utc_now() - datetime.timedelta(days=100),
+                date_utils.get_naive_utc_now() + datetime.timedelta(days=30),
+            ],
+            [
+                date_utils.get_naive_utc_now() + datetime.timedelta(days=10),
+                date_utils.get_naive_utc_now() + datetime.timedelta(days=30),
+            ],
+        ],
+    )
+    def test_delete_cascade_offerer_should_abort_when_venue_has_active_or_future_custom_reimbursement_rule(
+        self, timespan
+    ):
+        offerer = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        finance_factories.CustomReimbursementRuleFactory(venue=venue, offer=None, timespan=timespan)
+
+        with pytest.raises(offerers_exceptions.CannotDeleteOffererWithActiveOrFutureCustomReimbursementRule):
+            offerers_api.delete_offerer(offerer.id)
+
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert db.session.query(offerers_models.Venue).count() == 1
+        assert db.session.query(finance_models.CustomReimbursementRule).count() == 1
+
+
+class SearchOffererTest:
+    def test_search_offerer(self):
+        offerer1 = offerers_factories.OffererFactory()
+        offerer2 = offerers_factories.OffererFactory(name=f"Musée Magique {offerer1.id}")
+
+        search_result = offerers_api.search_offerer(search_query=str(offerer1.id)).all()
+        assert len(search_result) == 1
+        assert offerer1 in search_result
+
+        search_result = offerers_api.search_offerer(search_query=offerer2.name).all()
+        assert offerer2 in search_result
+
+
+class ValidateOffererAttachmentTest:
+    def test_offerer_attachment_is_validated(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        applicant = users_factories.UserFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=applicant)
+
+        # When
+        offerers_api.validate_offerer_attachment(user_offerer, admin)
+
+        # Then
+        assert user_offerer.validationStatus == ValidationStatus.VALIDATED
+
+    def test_pro_role_is_added_to_user(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        applicant = users_factories.UserFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=applicant)
+
+        # When
+        offerers_api.validate_offerer_attachment(user_offerer, admin)
+
+        # Then
+        assert applicant.has_pro_role
+        assert not applicant.has_non_attached_pro_role
+
+    @patch("pcapi.core.mails.transactional.send_offerer_attachment_validation_email_to_pro")
+    def test_send_validation_confirmation_email(self, mocked_send_validation_confirmation_email_to_pro):
+        # Given
+        admin = users_factories.AdminFactory()
+        applicant = users_factories.UserFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=applicant)
+
+        # When
+        offerers_api.validate_offerer_attachment(user_offerer, admin)
+
+        # Then
+        mocked_send_validation_confirmation_email_to_pro.assert_called_once_with(user_offerer)
+
+    @patch("pcapi.core.mails.transactional.send_offerer_attachment_invitation_accepted")
+    def test_send_offerer_attachment_invitation_accepted_email(
+        self, mocked_send_offerer_attachment_invitation_accepted
+    ):
+        admin = users_factories.AdminFactory()
+        invited_user = users_factories.UserFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=invited_user)
+        offerer_invitation = offerers_factories.OffererInvitationFactory(
+            offerer=user_offerer.offerer, email=invited_user.email
+        )
+
+        offerers_api.validate_offerer_attachment(user_offerer, admin)
+
+        mocked_send_offerer_attachment_invitation_accepted.assert_called_once_with(
+            invited_user, offerer_invitation.user.email
+        )
+
+
+class RejectOffererAttachementTest:
+    def test_offerer_attachement_is_not_validated(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory()
+
+        # When
+        offerers_api.reject_offerer_attachment(user_offerer, admin)
+
+        # Then
+        user_offerer_query = db.session.query(offerers_models.UserOfferer)
+        assert user_offerer_query.count() == 1
+        assert user_offerer_query.one().validationStatus == ValidationStatus.REJECTED
+
+    def test_pro_role_is_not_added_to_user(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user = users_factories.UserFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=user)
+
+        # When
+        offerers_api.reject_offerer_attachment(user_offerer, admin)
+
+        # Then
+        assert not user.has_pro_role
+        assert user.has_non_attached_pro_role
+
+    def test_pro_role_is_not_removed_from_user(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        validated_user_offerer = offerers_factories.UserOffererFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=validated_user_offerer.user)
+
+        # When
+        offerers_api.reject_offerer_attachment(user_offerer, admin)
+
+        # Then
+        assert validated_user_offerer.user.has_pro_role
+
+    @patch("pcapi.core.mails.transactional.send_offerer_attachment_rejection_email_to_pro", return_value=True)
+    def test_send_rejection_confirmation_email(self, send_offerer_attachment_rejection_email_to_pro):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory()
+
+        # When
+        offerers_api.reject_offerer_attachment(user_offerer, admin)
+
+        # Then
+        send_offerer_attachment_rejection_email_to_pro.assert_called_once_with(user_offerer)
+
+    def test_action_is_logged(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user = users_factories.UserFactory()
+        offerer = offerers_factories.OffererFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=user, offerer=offerer)
+
+        # When
+        offerers_api.reject_offerer_attachment(user_offerer, admin)
+
+        # Then
+        action = db.session.query(history_models.ActionHistory).one()
+        assert action.actionType == history_models.ActionType.USER_OFFERER_REJECTED
+        assert action.actionDate is not None
+        assert action.authorUserId == admin.id
+        assert action.userId == user.id
+        assert action.offererId == offerer.id
+        assert action.venueId is None
+
+
+class DeleteOffererAttachementTest:
+    def test_offerer_attachement_is_not_validated(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory()
+
+        # When
+        offerers_api.delete_offerer_attachment(user_offerer, admin)
+
+        # Then
+        user_offerer_query = db.session.query(offerers_models.UserOfferer)
+        assert user_offerer_query.count() == 1
+        assert user_offerer_query.one().validationStatus == ValidationStatus.DELETED
+
+    def test_pro_role_is_not_added_to_user(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user = users_factories.UserFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=user)
+
+        # When
+        offerers_api.delete_offerer_attachment(user_offerer, admin)
+
+        # Then
+        assert not user.has_pro_role
+        assert user.has_non_attached_pro_role
+
+    def test_pro_role_is_not_removed_from_user(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        validated_user_offerer = offerers_factories.UserOffererFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=validated_user_offerer.user)
+
+        # When
+        offerers_api.delete_offerer_attachment(user_offerer, admin)
+
+        # Then
+        assert validated_user_offerer.user.has_pro_role
+
+    def test_action_is_logged(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user = users_factories.UserFactory()
+        offerer = offerers_factories.OffererFactory()
+        user_offerer = offerers_factories.NewUserOffererFactory(user=user, offerer=offerer)
+
+        # When
+        offerers_api.delete_offerer_attachment(user_offerer, admin)
+
+        # Then
+        action = db.session.query(history_models.ActionHistory).one()
+        assert action.actionType == history_models.ActionType.USER_OFFERER_DELETED
+        assert action.actionDate is not None
+        assert action.authorUserId == admin.id
+        assert action.userId == user.id
+        assert action.offererId == offerer.id
+        assert action.venueId is None
+
+
+class ValidateOffererTest:
+    @patch("pcapi.core.search.async_index_offers_of_venue_ids")
+    def test_offerer_is_validated(self, mocked_async_index_offers_of_venue_ids):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory()
+
+        # When
+        offerers_api.validate_offerer(user_offerer.offerer, admin)
+
+        # Then
+        assert user_offerer.offerer.isValidated
+        assert user_offerer.offerer.dateValidated.strftime("%d/%m/%Y") == datetime.date.today().strftime("%d/%m/%Y")
+        assert user_offerer.offerer.validationStatus == ValidationStatus.VALIDATED
+
+    @patch("pcapi.core.search.async_index_offers_of_venue_ids")
+    def test_offerer_is_validated_mail_sent(self, mocked_async_index_offers_of_venue_ids):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory()
+        venue1 = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer, adageId="11")
+        mails = offerers_repository.get_emails_by_venue(venue1)
+
+        # When
+        with patch("pcapi.core.mails.transactional.send_eac_offerer_activation_email") as mock_activation_mail:
+            offerers_api.validate_offerer(user_offerer.offerer, admin)
+
+        # Then
+        mock_activation_mail.assert_called_with(venue1, list(mails))
+
+    @patch("pcapi.core.search.async_index_offers_of_venue_ids")
+    def test_pro_role_is_added_to_user(self, mocked_async_index_offers_of_venue_ids):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory()
+        another_applicant = users_factories.UserFactory()
+        another_user_on_same_offerer = offerers_factories.NewUserOffererFactory(user=another_applicant)
+
+        # When
+        offerers_api.validate_offerer(user_offerer.offerer, admin)
+
+        # Then
+        assert user_offerer.user.has_pro_role
+        assert not another_applicant.has_pro_role
+        assert not another_user_on_same_offerer.isValidated
+        assert not user_offerer.user.has_non_attached_pro_role
+
+    @patch("pcapi.core.search.async_index_offers_of_venue_ids")
+    def test_managed_venues_are_reindexed(self, mocked_async_index_offers_of_venue_ids):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory()
+        venue_1 = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+        venue_2 = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+
+        # When
+        offerers_api.validate_offerer(user_offerer.offerer, admin)
+
+        # Then
+        mocked_async_index_offers_of_venue_ids.assert_called_once()
+        called_args, _ = mocked_async_index_offers_of_venue_ids.call_args
+        assert set(called_args[0]) == {venue_1.id, venue_2.id}
+
+    @patch("pcapi.core.mails.transactional.send_new_offerer_validation_email_to_pro", return_value=True)
+    @patch("pcapi.core.search.async_index_offers_of_venue_ids")
+    def test_send_validation_confirmation_email(
+        self, mocked_async_index_offers_of_venue_ids, mocked_send_new_offerer_validation_email_to_pro
+    ):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory()
+
+        # When
+        offerers_api.validate_offerer(user_offerer.offerer, admin)
+
+        # Then
+        mocked_send_new_offerer_validation_email_to_pro.assert_called_once_with(user_offerer.offerer)
+
+    @patch("pcapi.core.search.async_index_offers_of_venue_ids")
+    def test_action_is_logged(self, mocked_async_index_offers_of_venue_ids):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory()
+
+        # When
+        offerers_api.validate_offerer(user_offerer.offerer, admin)
+
+        # Then
+        action = db.session.query(history_models.ActionHistory).one()
+        assert action.actionType == history_models.ActionType.OFFERER_VALIDATED
+        assert action.actionDate is not None
+        assert action.authorUserId == admin.id
+        assert action.userId == user_offerer.user.id
+        assert action.offererId == user_offerer.offerer.id
+        assert action.venueId is None
+
+
+class RejectOffererTest:
+    def test_offerer_is_not_validated(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        offerer = offerers_factories.NewOffererFactory()
+        offerers_factories.UserOffererFactory(offerer=offerer)  # removed in reject_offerer()
+
+        # When
+        offerers_api.reject_offerer(offerer, admin, rejection_reason=offerers_models.OffererRejectionReason.OTHER)
+
+        # Then
+        assert not offerer.isValidated
+        assert offerer.dateValidated is None
+        assert offerer.validationStatus == ValidationStatus.REJECTED
+
+    def test_pro_role_is_not_added_to_user(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user = users_factories.UserFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory(user=user)
+
+        # When
+        offerers_api.reject_offerer(
+            user_offerer.offerer, admin, rejection_reason=offerers_models.OffererRejectionReason.OTHER
+        )
+
+        # Then
+        assert not user.has_pro_role
+        assert user.has_non_attached_pro_role
+
+    def test_pro_role_is_not_removed_from_user(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        validated_user_offerer = offerers_factories.UserOffererFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory(user=validated_user_offerer.user)
+
+        # When
+        offerers_api.reject_offerer(
+            user_offerer.offerer, admin, rejection_reason=offerers_models.OffererRejectionReason.OTHER
+        )
+
+        # Then
+        assert validated_user_offerer.user.has_pro_role
+        assert not validated_user_offerer.user.has_non_attached_pro_role
+
+    def test_attachment_has_been_removed(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory()
+
+        # When
+        offerers_api.reject_offerer(
+            user_offerer.offerer, admin, rejection_reason=offerers_models.OffererRejectionReason.OTHER
+        )
+
+        # Then
+        user_offerer_query = db.session.query(offerers_models.UserOfferer)
+        assert user_offerer_query.count() == 1
+        assert user_offerer_query.one().validationStatus == ValidationStatus.REJECTED
+
+    @patch("pcapi.core.mails.transactional.send_offerer_attachment_rejection_email_to_pro")
+    @patch("pcapi.core.mails.transactional.send_new_offerer_rejection_email_to_pro")
+    def test_send_rejection_confirmation_email(
+        self, send_new_offerer_rejection_email_to_pro, send_offerer_attachment_rejection_email_to_pro
+    ):
+        # Given
+        admin = users_factories.AdminFactory()
+        offerer = offerers_factories.NewOffererFactory()
+        offerers_factories.UserOffererFactory(offerer=offerer)  # removed in reject_offerer()
+
+        # When
+        offerers_api.reject_offerer(offerer, admin, rejection_reason=offerers_models.OffererRejectionReason.OTHER)
+
+        # Then
+        send_new_offerer_rejection_email_to_pro.assert_called_once_with(
+            offerer, offerers_models.OffererRejectionReason.OTHER
+        )
+        send_offerer_attachment_rejection_email_to_pro.assert_not_called()  # one email is enough
+
+    def test_action_is_logged(self):
+        # Given
+        admin = users_factories.AdminFactory()
+        user = users_factories.UserFactory()
+        offerer = offerers_factories.NewOffererFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=offerer)
+        offerers_factories.NewUserOffererFactory(offerer=offerer)  # another applicant
+
+        # When
+        offerers_api.reject_offerer(offerer, admin, rejection_reason=offerers_models.OffererRejectionReason.OTHER)
+
+        # Then
+        action = (
+            db.session.query(history_models.ActionHistory)
+            .filter_by(actionType=history_models.ActionType.OFFERER_REJECTED)
+            .one()
+        )
+        assert action.actionDate is not None
+        assert action.authorUserId == admin.id
+        assert action.userId == user.id
+        assert action.offererId == offerer.id
+        assert action.venueId is None
+
+        action = (
+            db.session.query(history_models.ActionHistory)
+            .filter_by(actionType=history_models.ActionType.USER_OFFERER_REJECTED, user=user)
+            .one()
+        )
+        assert action.actionDate is not None
+        assert action.authorUserId == admin.id
+        assert action.userId == user.id
+        assert action.offererId == offerer.id
+        assert action.venueId is None
+        assert action.comment == "Compte pro rejeté suite au rejet de l'entité juridique"
+
+
+class CloseOffererTest:
+    def test_offerer_was_not_validated(self):
+        admin = users_factories.AdminFactory()
+        offerer = offerers_factories.NewOffererFactory()
+        offerers_factories.UserOffererFactory(offerer=offerer)
+
+        offerers_api.close_offerer(offerer, closure_date=datetime.date(2025, 3, 7), author_user=admin)
+
+        assert offerer.isClosed
+
+    def test_offerer_was_validated(self):
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserOffererFactory()
+        offerer = user_offerer.offerer
+
+        offerers_api.close_offerer(offerer, closure_date=datetime.date(2025, 3, 7), author_user=admin)
+
+        assert offerer.isClosed
+        assert offerer.UserOfferers == [user_offerer]
+        assert user_offerer.isValidated
+        assert not user_offerer.user.has_pro_role
+        assert user_offerer.user.has_non_attached_pro_role
+
+    def test_pro_role_is_not_removed_from_user(self):
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserOffererFactory()
+        offerer = user_offerer.offerer
+        other_user_offerer = offerers_factories.UserOffererFactory(user=user_offerer.user)
+
+        offerers_api.close_offerer(offerer, closure_date=datetime.date(2025, 3, 7), author_user=admin)
+
+        assert offerer.isClosed
+        assert user_offerer.isValidated
+        assert other_user_offerer.user.has_pro_role
+        assert not other_user_offerer.user.has_non_attached_pro_role
+
+    @patch("pcapi.core.mails.transactional.send_offerer_closed_email_to_pro")
+    def test_send_offerer_closed_email(self, mock_send_offerer_closed_email_to_pro):
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(offerer=offerer)
+
+        offerers_api.close_offerer(offerer, closure_date=datetime.date(2025, 3, 7))
+
+        mock_send_offerer_closed_email_to_pro.assert_called_once_with(offerer, False, datetime.date(2025, 3, 7))
+
+    @patch("pcapi.core.mails.transactional.send_offerer_closed_email_to_pro")
+    def test_send_offerer_closed_manually_email(self, mock_send_offerer_closed_email_to_pro):
+        admin = users_factories.AdminFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(offerer=offerer)
+
+        offerers_api.close_offerer(offerer, is_manual=True, author_user=admin)
+
+        mock_send_offerer_closed_email_to_pro.assert_called_once_with(offerer, True, None)
+
+    def test_action_is_logged(self):
+        admin = users_factories.AdminFactory()
+        user = users_factories.UserFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=user, offerer=offerer)
+        offerers_factories.UserOffererFactory(offerer=offerer)  # another user
+
+        offerers_api.close_offerer(
+            offerer,
+            closure_date=datetime.date(2025, 3, 7),
+            author_user=admin,
+            comment="Test",
+            modified_info={"tags": {"new_info": "SIREN caduc"}},
+        )
+
+        action = db.session.query(history_models.ActionHistory).one()
+        assert action.actionType == history_models.ActionType.OFFERER_CLOSED
+        assert action.actionDate is not None
+        assert action.authorUserId == admin.id
+        assert action.userId is None
+        assert action.offererId == offerer.id
+        assert action.venueId is None
+        assert action.comment == "Test"
+        assert action.extraData == {
+            "modified_info": {"tags": {"new_info": "SIREN caduc"}},
+            "closure_date": "2025-03-07",
+        }
+
+    def test_future_closure_date(self):
+        admin = users_factories.AdminFactory()
+        user_offerer = offerers_factories.UserOffererFactory()
+        offerer = user_offerer.offerer
+
+        with pytest.raises(offerers_exceptions.FutureClosureDate):
+            offerers_api.close_offerer(
+                offerer, closure_date=datetime.date.today() + datetime.timedelta(days=1), author_user=admin
+            )
+
+        assert offerer.isValidated
+
+    def test_close_offerer_with_thing_bookings(self):
+        admin = users_factories.AdminFactory()
+        offerer = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        confirmed_booking = bookings_factories.BookingFactory(
+            stock=offers_factories.ThingStockFactory(offer__venue=venue)
+        )
+        used_booking = bookings_factories.UsedBookingFactory(
+            stock=offers_factories.ThingStockFactory(offer__venue=venue)
+        )
+        canceled_booking = bookings_factories.CancelledBookingFactory(
+            stock=offers_factories.ThingStockFactory(offer__venue=venue),
+            cancellationReason=bookings_models.BookingCancellationReasons.BENEFICIARY,
+        )
+        pending_reimbursement_booking = bookings_factories.PendingReimbursementBookingFactory(
+            stock=offers_factories.ThingStockFactory(offer__venue=venue)
+        )
+        reimbursed_booking = bookings_factories.ReimbursedBookingFactory(
+            stock=offers_factories.ThingStockFactory(offer__venue=venue)
+        )
+        other_booking = bookings_factories.BookingFactory(
+            stock=offers_factories.ThingStockFactory(), user=confirmed_booking.user
+        )
+        offerers_api.close_offerer(offerer, closure_date=datetime.date(2025, 3, 26), author_user=admin)
+
+        assert offerer.isClosed
+
+        # canceled:
+        assert confirmed_booking.status == bookings_models.BookingStatus.CANCELLED
+        assert confirmed_booking.cancellationReason == bookings_models.BookingCancellationReasons.OFFERER_CLOSED
+
+        # unchanged:
+        assert used_booking.status == bookings_models.BookingStatus.USED
+        assert canceled_booking.status == bookings_models.BookingStatus.CANCELLED
+        assert canceled_booking.cancellationReason == bookings_models.BookingCancellationReasons.BENEFICIARY
+        assert pending_reimbursement_booking.status == bookings_models.BookingStatus.PENDING_REIMBURSEMENT
+        assert reimbursed_booking.status == bookings_models.BookingStatus.REIMBURSED
+        assert other_booking.status == bookings_models.BookingStatus.CONFIRMED
+
+        # no user_offerer in this test, 1 booking canceled
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["template"] == dataclasses.asdict(
+            TransactionalEmail.BOOKING_CANCELLATION_BY_PRO_TO_BENEFICIARY.value
+        )
+        assert mails_testing.outbox[0]["To"] == confirmed_booking.user.email
+        assert mails_testing.outbox[0]["params"]["OFFER_NAME"] == confirmed_booking.stock.offer.name
+        assert mails_testing.outbox[0]["params"]["REASON"] == "OFFERER_CLOSED"
+
+    def test_close_offerer_with_event_bookings(self):
+        offerer = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        confirmed_booking_2_days_ago = bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                offer__venue=venue, beginningDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=2)
+            )
+        )
+        confirmed_booking_in_2_days = bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                offer__venue=venue, beginningDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=2)
+            )
+        )
+
+        used_booking = bookings_factories.UsedBookingFactory(
+            stock=offers_factories.EventStockFactory(offer__venue=venue)
+        )
+        canceled_booking = bookings_factories.CancelledBookingFactory(
+            stock=offers_factories.EventStockFactory(offer__venue=venue),
+            cancellationReason=bookings_models.BookingCancellationReasons.BENEFICIARY,
+        )
+        pending_reimbursement_booking = bookings_factories.PendingReimbursementBookingFactory(
+            stock=offers_factories.EventStockFactory(offer__venue=venue)
+        )
+        reimbursed_booking = bookings_factories.ReimbursedBookingFactory(
+            stock=offers_factories.EventStockFactory(offer__venue=venue)
+        )
+        other_booking = bookings_factories.BookingFactory(stock=offers_factories.EventStockFactory())
+
+        offerers_api.close_offerer(offerer, closure_date=datetime.date(2025, 3, 20))
+
+        assert offerer.isClosed
+
+        # canceled:
+        assert confirmed_booking_in_2_days.status == bookings_models.BookingStatus.CANCELLED
+        assert (
+            confirmed_booking_in_2_days.cancellationReason == bookings_models.BookingCancellationReasons.OFFERER_CLOSED
+        )
+
+        # unchanged:
+        assert confirmed_booking_2_days_ago.status == bookings_models.BookingStatus.CONFIRMED
+        assert used_booking.status == bookings_models.BookingStatus.USED
+        assert canceled_booking.status == bookings_models.BookingStatus.CANCELLED
+        assert canceled_booking.cancellationReason == bookings_models.BookingCancellationReasons.BENEFICIARY
+        assert pending_reimbursement_booking.status == bookings_models.BookingStatus.PENDING_REIMBURSEMENT
+        assert reimbursed_booking.status == bookings_models.BookingStatus.REIMBURSED
+        assert other_booking.status == bookings_models.BookingStatus.CONFIRMED
+
+        # no user_offerer in this test, 1 booking canceled
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["template"] == dataclasses.asdict(
+            TransactionalEmail.BOOKING_CANCELLATION_BY_PRO_TO_BENEFICIARY.value
+        )
+        assert mails_testing.outbox[0]["To"] == confirmed_booking_in_2_days.user.email
+        assert mails_testing.outbox[0]["params"]["OFFER_NAME"] == confirmed_booking_in_2_days.stock.offer.name
+        assert mails_testing.outbox[0]["params"]["REASON"] == "OFFERER_CLOSED"
+
+    def test_close_offerer_with_external_ticket(self, requests_mock):
+        offerer = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        requests_mock.get(
+            "https://cgr-cinema-0.example.com/web_service?wsdl", text=soap_definitions.WEB_SERVICE_DEFINITION
+        )
+        requests_mock.post(
+            "https://cgr-cinema-0.example.com/web_service",
+            text=cgr_fixtures.cgr_annulation_response_template(
+                message_error="L'annulation n'a pas pu être prise en compte : Code barre non reconnu / annulation impossible",
+            ),
+        )
+        cgr_provider = providers_repository.get_provider_by_local_class("CGRStocks")
+        venue_provider = providers_factories.VenueProviderFactory(venue=venue, provider=cgr_provider)
+        cinema_provider_pivot = providers_factories.CGRCinemaProviderPivotFactory(
+            venue=venue, idAtProvider=venue_provider.venueIdAtOfferProvider
+        )
+        providers_factories.CGRCinemaDetailsFactory(
+            cinemaProviderPivot=cinema_provider_pivot, cinemaUrl="https://cgr-cinema-0.example.com/web_service"
+        )
+
+        booking = bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                offer__venue=venue,
+                offer__subcategoryId=subcategories.SEANCE_CINE.id,
+                offer__lastProvider=cgr_provider,
+                offer__idAtProvider="123%12354114%CGR",
+                lastProvider=cgr_provider,
+                idAtProviders="123%12354114%CGR#111",
+                beginningDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=5),
+            )
+        )
+        external_bookings_factories.ExternalBookingFactory(booking=booking)
+
+        offerers_api.close_offerer(offerer)
+
+        assert offerer.isClosed
+        assert booking.status == bookings_models.BookingStatus.CANCELLED
+        assert booking.cancellationReason == bookings_models.BookingCancellationReasons.OFFERER_CLOSED
+        assert len(mails_testing.outbox) == 1
+
+    def test_close_offerer_with_inactive_provider(self, requests_mock):
+        offerer = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        cgr_provider = providers_repository.get_provider_by_local_class("CGRStocks")
+        venue_provider = providers_factories.VenueProviderFactory(venue=venue, provider=cgr_provider, isActive=False)
+        cinema_provider_pivot = providers_factories.CGRCinemaProviderPivotFactory(
+            venue=venue, idAtProvider=venue_provider.venueIdAtOfferProvider
+        )
+        providers_factories.CGRCinemaDetailsFactory(
+            cinemaProviderPivot=cinema_provider_pivot, cinemaUrl="https://cgr-cinema-0.example.com/web_service"
+        )
+
+        booking = bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                offer__venue=venue,
+                offer__subcategoryId=subcategories.SEANCE_CINE.id,
+                offer__lastProvider=cgr_provider,
+                offer__idAtProvider="123%12354114%CGR",
+                lastProvider=cgr_provider,
+                idAtProviders="123%12354114%CGR#111",
+                beginningDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=5),
+            )
+        )
+        external_bookings_factories.ExternalBookingFactory(booking=booking)
+
+        offerers_api.close_offerer(offerer)
+
+        assert offerer.isClosed
+        assert booking.status == bookings_models.BookingStatus.CANCELLED
+        assert booking.cancellationReason == bookings_models.BookingCancellationReasons.OFFERER_CLOSED
+        assert len(mails_testing.outbox) == 1
+
+    def test_close_offerer_with_collective_bookings(self):
+        offerer = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        pending_booking = educational_factories.PendingCollectiveBookingFactory(
+            collectiveStock__collectiveOffer__venue=venue,
+            collectiveStock__startDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=1),
+            collectiveStock__endDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(hours=1),
+        )
+        confirmed_booking_ends_2_days_ago = educational_factories.ConfirmedCollectiveBookingFactory(
+            collectiveStock__collectiveOffer__venue=venue,
+            collectiveStock__startDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=2),
+            collectiveStock__endDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=2),
+        )
+        confirmed_booking_started_which_ends_in_2_days = educational_factories.ConfirmedCollectiveBookingFactory(
+            collectiveStock__collectiveOffer__venue=venue,
+            collectiveStock__startDatetime=date_utils.get_naive_utc_now() - datetime.timedelta(days=1),
+            collectiveStock__endDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=2),
+        )
+        confirmed_booking_starts_in_4_days = educational_factories.ConfirmedCollectiveBookingFactory(
+            collectiveStock__collectiveOffer__venue=venue,
+            collectiveStock__startDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=4),
+            collectiveStock__endDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=6),
+        )
+        used_booking = educational_factories.UsedCollectiveBookingFactory(collectiveStock__collectiveOffer__venue=venue)
+        pending_reimbursement_booking = educational_factories.PendingReimbursementCollectiveBookingFactory(
+            collectiveStock__collectiveOffer__venue=venue
+        )
+        reimbursed_booking = educational_factories.ReimbursedCollectiveBookingFactory(
+            collectiveStock__collectiveOffer__venue=venue
+        )
+        canceled_booking = educational_factories.CancelledCollectiveBookingFactory(
+            collectiveStock__collectiveOffer__venue=venue,
+            cancellationReason=educational_models.CollectiveBookingCancellationReasons.REFUSED_BY_HEADMASTER,
+        )
+        other_booking = educational_factories.PendingCollectiveBookingFactory()
+
+        offerers_api.close_offerer(offerer, closure_date=datetime.date(2025, 3, 20))
+
+        assert offerer.isClosed
+
+        # canceled:
+        for booking in (
+            pending_booking,
+            confirmed_booking_started_which_ends_in_2_days,
+            confirmed_booking_starts_in_4_days,
+        ):
+            assert booking.status == educational_models.CollectiveBookingStatus.CANCELLED
+            assert booking.cancellationReason == educational_models.CollectiveBookingCancellationReasons.OFFERER_CLOSED
+
+        # unchanged:
+        assert confirmed_booking_ends_2_days_ago.status == educational_models.CollectiveBookingStatus.CONFIRMED
+        assert used_booking.status == educational_models.CollectiveBookingStatus.USED
+        assert canceled_booking.status == educational_models.CollectiveBookingStatus.CANCELLED
+        assert (
+            canceled_booking.cancellationReason
+            == educational_models.CollectiveBookingCancellationReasons.REFUSED_BY_HEADMASTER
+        )
+        assert pending_reimbursement_booking.status == educational_models.CollectiveBookingStatus.PENDING_REIMBURSEMENT
+        assert reimbursed_booking.status == educational_models.CollectiveBookingStatus.REIMBURSED
+        assert other_booking.status == educational_models.CollectiveBookingStatus.PENDING
+
+        # no user_offerer in this test, no transactional email for EAC
+        assert len(mails_testing.outbox) == 0
+
+    def test_draft_offers_from_all_managed_venues_are_deleted(self):
+        offerer = offerers_factories.OffererFactory()
+        venues = offerers_factories.VenueFactory.create_batch(2, managingOfferer=offerer)
+
+        for venue in venues:
+            offers_factories.DraftOfferFactory.create_batch(2, venue=venue)
+
+        offerers_api.close_offerer(offerer)
+
+        assert not db.session.query(offers_models.Offer).all()
+        for venue in venues:
+            db.session.refresh(venue)
+            assert not venue.offers
+
+    def test_pivots_and_venue_providers_are_deleted(self):
+        offerer = offerers_factories.OffererFactory()
+        pivot = providers_factories.CinemaProviderPivotFactory(venue__managingOfferer=offerer)
+        venue_provider = providers_factories.VenueProviderFactory(venue=pivot.venue, provider=pivot.provider)
+        sync_details = providers_factories.CDSCinemaDetailsFactory(cinemaProviderPivot=pivot)
+
+        offerers_api.close_offerer(offerer)
+
+        assert not db.session.query(providers_models.CDSCinemaDetails).filter_by(id=sync_details.id).all()
+        assert not db.session.query(providers_models.VenueProvider).filter_by(venueId=venue_provider.venueId).all()
+        assert not db.session.query(providers_models.CinemaProviderPivot).filter_by(id=pivot.id).all()
+
+
+class AutoDeleteAttachmentsOnClosedOfferersTest:
+    @pytest.mark.parametrize(
+        "validation_status_before,validation_status_after,action_type",
+        [
+            (ValidationStatus.NEW, ValidationStatus.REJECTED, history_models.ActionType.USER_OFFERER_REJECTED),
+            (ValidationStatus.PENDING, ValidationStatus.REJECTED, history_models.ActionType.USER_OFFERER_REJECTED),
+            (ValidationStatus.VALIDATED, ValidationStatus.DELETED, history_models.ActionType.USER_OFFERER_DELETED),
+            (ValidationStatus.REJECTED, ValidationStatus.REJECTED, None),
+            (ValidationStatus.DELETED, ValidationStatus.DELETED, None),
+        ],
+    )
+    def test_depending_on_user_offerer_validation(self, validation_status_before, validation_status_after, action_type):
+        offerer = offerers_factories.ClosedOffererFactory()
+        user_offerer = offerers_factories.UserOffererFactory(offerer=offerer, validationStatus=validation_status_before)
+        history_factories.ActionHistoryFactory(
+            actionDate=datetime.datetime(2025, 1, 21),
+            actionType=history_models.ActionType.OFFERER_CLOSED,
+            offerer=offerer,
+        )
+
+        offerers_api.auto_delete_attachments_on_closed_offerers()
+
+        assert user_offerer.validationStatus == validation_status_after
+        if action_type is None:
+            assert len(user_offerer.user.action_history) == 0
+        else:
+            assert len(user_offerer.user.action_history) == 1
+            action = user_offerer.user.action_history[0]
+            assert action.actionType == action_type
+            assert action.user == user_offerer.user
+            assert (
+                action.comment
+                == "Délai de 90 jours expiré après fermeture de l'entité juridique sur la plateforme le 21/01/2025"
+            )
+
+    def test_less_than_deletion_delay(self):
+        offerer = offerers_factories.ClosedOffererFactory()
+        user_offerer = offerers_factories.UserOffererFactory(offerer=offerer)
+        history_factories.ActionHistoryFactory(
+            actionDate=date_utils.get_naive_utc_now() - datetime.timedelta(days=88),
+            actionType=history_models.ActionType.OFFERER_CLOSED,
+            offerer=offerer,
+        )
+
+        with assert_num_queries(1):
+            offerers_api.auto_delete_attachments_on_closed_offerers()
+
+        assert user_offerer.isValidated
+        assert len(user_offerer.user.action_history) == 0
+
+    def test_offerer_no_longer_closed(self):
+        offerer = offerers_factories.OffererFactory()
+        user_offerer = offerers_factories.UserOffererFactory(offerer=offerer)
+        history_factories.ActionHistoryFactory(
+            actionDate=date_utils.get_naive_utc_now() - datetime.timedelta(days=95),
+            actionType=history_models.ActionType.OFFERER_CLOSED,
+            offerer=offerer,
+        )
+        history_factories.ActionHistoryFactory(
+            actionDate=date_utils.get_naive_utc_now() - datetime.timedelta(days=85),
+            actionType=history_models.ActionType.OFFERER_VALIDATED,
+            offerer=offerer,
+        )
+
+        with assert_num_queries(1):
+            offerers_api.auto_delete_attachments_on_closed_offerers()
+
+        assert user_offerer.isValidated
+        assert len(user_offerer.user.action_history) == 0
+
+    @pytest.mark.parametrize(
+        "days,expected_validation_status", [(95, ValidationStatus.DELETED), (85, ValidationStatus.VALIDATED)]
+    )
+    def test_offerer_closed_twice(self, days, expected_validation_status):
+        offerer = offerers_factories.ClosedOffererFactory()
+        user_offerer = offerers_factories.UserOffererFactory(offerer=offerer)
+        history_factories.ActionHistoryFactory(
+            actionDate=date_utils.get_naive_utc_now() - datetime.timedelta(days=100),
+            actionType=history_models.ActionType.OFFERER_CLOSED,
+            offerer=offerer,
+        )
+        history_factories.ActionHistoryFactory(
+            actionDate=date_utils.get_naive_utc_now() - datetime.timedelta(days=98),
+            actionType=history_models.ActionType.OFFERER_VALIDATED,
+            offerer=offerer,
+        )
+        history_factories.ActionHistoryFactory(
+            actionDate=date_utils.get_naive_utc_now() - datetime.timedelta(days=days),
+            actionType=history_models.ActionType.OFFERER_CLOSED,
+            offerer=offerer,
+        )
+
+        offerers_api.auto_delete_attachments_on_closed_offerers()
+
+        assert user_offerer.validationStatus == expected_validation_status
+
+    def test_mutiple_users_on_the_same_offerer(self):
+        offerer = offerers_factories.ClosedOffererFactory()
+        user_offerer_list = offerers_factories.UserOffererFactory.create_batch(3, offerer=offerer)
+        pending_user_offerer = offerers_factories.NewUserOffererFactory(offerer=offerer)
+        history_factories.ActionHistoryFactory(
+            actionDate=date_utils.get_naive_utc_now() - datetime.timedelta(days=91),
+            actionType=history_models.ActionType.OFFERER_CLOSED,
+            offerer=offerer,
+        )
+
+        offerers_api.auto_delete_attachments_on_closed_offerers()
+
+        for user_offerer in user_offerer_list:
+            assert user_offerer.isDeleted
+        assert pending_user_offerer.isRejected
+
+    def test_without_action_history(self):
+        offerer = offerers_factories.ClosedOffererFactory()
+        user_offerer = offerers_factories.UserOffererFactory(offerer=offerer)
+
+        offerers_api.auto_delete_attachments_on_closed_offerers()
+
+        assert user_offerer.isDeleted
+        assert len(user_offerer.user.action_history) == 1
+
+
+def test_grant_user_offerer_access():
+    offerer = offerers_factories.OffererFactory.build()
+    user = users_factories.UserFactory.build()
+
+    user_offerer = offerers_api.grant_user_offerer_access(offerer, user)
+
+    assert user_offerer.user == user
+    assert user_offerer.offerer == offerer
+    assert user_offerer.validationStatus == ValidationStatus.VALIDATED
+    assert not user.has_pro_role
+
+
+class HandleclosedOffererTest:
+    @pytest.fixture(name="siren_caduc_tag")
+    def siren_caduc_tag_fixture(self):
+        return offerers_factories.OffererTagFactory(name="siren-caduc", label="SIREN caduc")
+
+    pytest.mark.features(ENABLE_AUTO_CLOSE_CLOSED_OFFERERS=False)
+
+    @patch("pcapi.core.offerers.api.close_offerer")
+    @time_machine.travel("2025-01-21 12:00:00")
+    def test_tag_offerer_no_delete(
+        self,
+        mock_close_offerer,
+        client,
+        siren_caduc_tag,
+    ):
+        # SIREN makes offerer inactive (because of 99), late for taxes (third digit is 9), SARL (fourth digit is 5)
+        offerer = offerers_factories.OffererFactory(siren="109599001")
+
+        offerers_api.handle_closed_offerer(offerer, closure_date=datetime.date(2025, 1, 16))
+
+        assert offerer.tags == [siren_caduc_tag]
+        mock_close_offerer.assert_not_called()
+
+    @pytest.mark.features(ENABLE_AUTO_CLOSE_CLOSED_OFFERERS=True)
+    @patch("pcapi.core.offerers.api.close_offerer")
+    def test_inactive_offerer_already_tagged(
+        self,
+        mock_close_offerer,
+        client,
+        siren_caduc_tag,
+    ):
+        # SIREN makes offerer inactive (because of 99), late for taxes (third digit is 9), SARL (fourth digit is 5)
+        offerer = offerers_factories.OffererFactory(siren="109599001", tags=[siren_caduc_tag])
+
+        offerers_api.handle_closed_offerer(offerer, closure_date=datetime.date(2025, 1, 16))
+
+        assert offerer.tags == [siren_caduc_tag]
+        assert db.session.query(history_models.ActionHistory).count() == 0  # tag already set, no change made
+        mock_close_offerer.assert_called_once()
+
+    @pytest.mark.features(ENABLE_AUTO_CLOSE_CLOSED_OFFERERS=True)
+    @patch("pcapi.core.offerers.api.close_offerer")
+    @time_machine.travel("2025-03-10 12:00:00")
+    def test_close_inactive_offerer_already_tagged(self, mock_close_offerer, client, siren_caduc_tag):
+        # SIREN makes offerer inactive (because of 99), late for taxes (third digit is 9), SARL (fourth digit is 5)
+        offerer = offerers_factories.OffererFactory(siren="109599001", tags=[siren_caduc_tag])
+
+        offerers_api.handle_closed_offerer(offerer, closure_date=datetime.date(2025, 1, 16))
+        assert offerer.tags == [siren_caduc_tag]
+        mock_close_offerer.assert_called_once_with(
+            offerer,
+            closure_date=datetime.date(2025, 1, 16),
+            author_user=None,
+            comment="L'entité juridique est détectée comme fermée le 16/01/2025 au répertoire Sirene (INSEE)",
+        )
+
+    @pytest.mark.features(ENABLE_AUTO_CLOSE_CLOSED_OFFERERS=True)
+    def test_reject_inactive_offerer_waiting_for_validation(
+        self,
+        client,
+        siren_caduc_tag,
+    ):
+        offerer = offerers_factories.PendingOffererFactory(siren="100099001")
+        user_offerer = offerers_factories.UserNotValidatedOffererFactory(offerer=offerer)
+
+        offerers_api.handle_closed_offerer(offerer, closure_date=datetime.date(2025, 1, 16))
+
+        assert offerer.isRejected
+        assert offerer.tags == [siren_caduc_tag]
+
+        offerer_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter_by(actionType=history_models.ActionType.OFFERER_REJECTED)
+            .one()
+        )
+        assert offerer_action.actionDate is not None
+        assert offerer_action.authorUserId is None
+        assert offerer_action.userId == user_offerer.user.id
+        assert offerer_action.offererId == offerer.id
+        assert offerer_action.extraData == {
+            "modified_info": {"tags": {"new_info": siren_caduc_tag.label}},
+            "rejection_reason": offerers_models.OffererRejectionReason.CLOSED_BUSINESS.name,
+        }
+
+        user_offerer_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter_by(actionType=history_models.ActionType.USER_OFFERER_REJECTED)
+            .one()
+        )
+        assert user_offerer_action.actionDate is not None
+        assert user_offerer_action.authorUserId is None
+        assert user_offerer_action.userId == user_offerer.user.id
+        assert user_offerer_action.offererId == offerer.id
+
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["To"] == user_offerer.user.email
+        assert mails_testing.outbox[0]["template"] == dataclasses.asdict(TransactionalEmail.NEW_OFFERER_REJECTION.value)
+        assert mails_testing.outbox[0]["params"] == {
+            "OFFERER_NAME": offerer.name,
+            "REJECTION_REASON": offerers_models.OffererRejectionReason.CLOSED_BUSINESS.name,
+        }
+
+
+class VenueBannerTest:
+    IMAGES_DIR = pathlib.Path(tests.__path__[0]) / "files"
+
+    @time_machine.travel("2020-10-15 00:00:00", tick=False)
+    @patch("pcapi.core.search.async_index_venue_ids")
+    def test_save_venue_banner_when_no_default_available(self, mock_search_async_index_venue_ids, tmpdir, settings):
+        user = users_factories.UserFactory()
+        venue = offerers_factories.VenueFactory()
+        image_content = (VenueBannerTest.IMAGES_DIR / "mouette_landscape.jpg").read_bytes()
+        directory = pathlib.Path(tmpdir.dirname) / "thumbs" / "venues"
+
+        settings.OBJECT_STORAGE_URL = tmpdir.dirname
+        settings.LOCAL_STORAGE_DIR = pathlib.Path(tmpdir.dirname)
+        offerers_api.save_venue_banner(user, venue, image_content, image_credit="none")
+
+        updated_venue = db.session.get(Venue, venue.id)
+        with open(updated_venue.bannerUrl, mode="rb") as f:
+            # test that image size has been reduced
+            assert len(f.read()) < len(image_content)
+
+        assert updated_venue.bannerMeta == {
+            "author_id": user.id,
+            "image_credit": "none",
+            "image_alternative_text": None,
+            "original_image_url": str(directory / f"{humanize(venue.id)}_1602720001"),
+            "updated_at": "2020-10-15T00:00:00",
+        }
+
+        mock_search_async_index_venue_ids.assert_called_once_with(
+            [venue.id],
+            reason=IndexationReason.VENUE_BANNER_UPDATE,
+        )
+
+    @time_machine.travel("2020-10-15 00:00:00", tick=False)
+    @patch("pcapi.core.search.async_index_venue_ids")
+    def test_save_venue_banner_when_default_available(self, mock_search_async_index_venue_ids, tmpdir, settings):
+        user = users_factories.UserFactory()
+        venue = offerers_factories.VenueFactory(venueTypeCode=offerers_models.VenueTypeCode.MOVIE)
+        image_content = (VenueBannerTest.IMAGES_DIR / "mouette_landscape.jpg").read_bytes()
+        directory = pathlib.Path(tmpdir.dirname) / "thumbs" / "venues"
+
+        settings.OBJECT_STORAGE_URL = tmpdir.dirname
+        settings.LOCAL_STORAGE_DIR = pathlib.Path(tmpdir.dirname)
+        offerers_api.save_venue_banner(user, venue, image_content, image_credit="none")
+
+        updated_venue = db.session.get(Venue, venue.id)
+        with open(updated_venue.bannerUrl, mode="rb") as f:
+            # test that image size has been reduced
+            assert len(f.read()) < len(image_content)
+
+        assert updated_venue.bannerMeta == {
+            "author_id": user.id,
+            "image_credit": "none",
+            "image_alternative_text": None,
+            "original_image_url": str(directory / f"{humanize(venue.id)}_1602720001"),
+            "updated_at": "2020-10-15T00:00:00",
+        }
+
+        mock_search_async_index_venue_ids.assert_called_once_with(
+            [venue.id],
+            reason=IndexationReason.VENUE_BANNER_UPDATE,
+        )
+
+    @patch("pcapi.core.search.async_index_venue_ids")
+    def test_replace_venue_banner(self, mock_search_async_index_venue_ids, tmpdir, settings):
+        user = users_factories.UserFactory()
+        venue = offerers_factories.VenueFactory()
+        first_image_content = (VenueBannerTest.IMAGES_DIR / "mouette_landscape.jpg").read_bytes()
+        second_image_content = (VenueBannerTest.IMAGES_DIR / "mouette_landscape_bigger.jpg").read_bytes()
+        directory = pathlib.Path(tmpdir.dirname) / "thumbs" / "venues"
+
+        settings.OBJECT_STORAGE_URL = tmpdir.dirname
+        settings.LOCAL_STORAGE_DIR = pathlib.Path(tmpdir.dirname)
+        with time_machine.travel("2020-10-15 00:00:00"):
+            offerers_api.save_venue_banner(user, venue, first_image_content, image_credit="first_image")
+
+        with time_machine.travel("2020-10-15 00:00:05"):
+            offerers_api.save_venue_banner(user, venue, second_image_content, image_credit="second_image")
+
+        files = set(os.listdir(directory))
+
+        # old banner and its original image
+        assert f"{humanize(venue.id)}_1602720000" not in files
+        assert f"{humanize(venue.id)}_1602720001" not in files
+
+        # new banner and its original image
+        assert f"{humanize(venue.id)}_1602720005" in files
+        assert f"{humanize(venue.id)}_1602720006" in files
+
+    @patch("pcapi.core.search.async_index_venue_ids")
+    def test_replace_venue_legacy_banner(self, mock_search_async_index_venue_ids, tmpdir, settings):
+        user = users_factories.UserFactory()
+        venue = offerers_factories.VenueFactory()
+        first_image_content = (VenueBannerTest.IMAGES_DIR / "mouette_landscape.jpg").read_bytes()
+        second_image_content = (VenueBannerTest.IMAGES_DIR / "mouette_landscape_bigger.jpg").read_bytes()
+        directory = pathlib.Path(tmpdir.dirname) / "thumbs" / "venues"
+
+        settings.OBJECT_STORAGE_URL = tmpdir.dirname
+        settings.LOCAL_STORAGE_DIR = pathlib.Path(tmpdir.dirname)
+        with time_machine.travel("2020-10-15 00:00:00"):
+            offerers_api.save_venue_banner(user, venue, first_image_content, image_credit="first_image")
+            move_venue_banner_to_legacy_location(venue, directory, "1602720000")
+        with time_machine.travel("2020-10-15 00:00:01"):
+            offerers_api.save_venue_banner(user, venue, second_image_content, image_credit="second_image")
+
+        files = set(os.listdir(directory))
+        assert f"{humanize(venue.id)}" not in files
+        assert f"{humanize(venue.id)}_1602720001" in files
+
+
+def move_venue_banner_to_legacy_location(venue, directory, timestamp):
+    venue.bannerUrl = venue.bannerUrl.split("_")[0]
+    os.rename(directory / f"{humanize(venue.id)}_{timestamp}", directory / f"{humanize(venue.id)}")
+    os.rename(directory / f"{humanize(venue.id)}_{timestamp}.type", directory / f"{humanize(venue.id)}.type")
+
+
+class GetEligibleForSearchVenuesTest:
+    def test_get_all_eligibles_venues_by_default(self) -> None:
+        eligible_venues = offerers_factories.VenueFactory.create_batch(3, isPermanent=True)
+
+        with assert_num_queries(1):
+            venues = list(offerers_api.get_venues_by_batch())
+
+        assert {venue.id for venue in venues} == {venue.id for venue in eligible_venues}
+
+    def test_max_limit_number_of_venues(self) -> None:
+        eligible_venues = offerers_factories.VenueFactory.create_batch(3, isPermanent=True)
+
+        with assert_num_queries(1):
+            venues = list(offerers_api.get_venues_by_batch(max_venues=1))
+
+        assert venues[0].id in {venue.id for venue in eligible_venues}
+
+
+class LinkVenueToPricingPointTest:
+    def test_no_pre_existing_link(self):
+        venue = offerers_factories.VenueWithoutSiretFactory()
+        pricing_point = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+        assert db.session.query(offerers_models.VenuePricingPointLink).count() == 0
+
+        offerers_api.link_venue_to_pricing_point(venue, pricing_point.id)
+
+        db.session.rollback()  # ensure that commit() was called before assertions
+
+        new_link = db.session.query(offerers_models.VenuePricingPointLink).one()
+        assert new_link.venue == venue
+        assert new_link.pricingPoint == pricing_point
+        assert new_link.timespan.upper is None
+
+    def test_populate_finance_event_pricing_point_id(self):
+        venue = offerers_factories.VenueWithoutSiretFactory()
+        booking = bookings_factories.UsedBookingFactory(stock__offer__venue=venue)
+        pricing_point = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+        event = finance_factories.UsedBookingFinanceEventFactory(booking=booking)
+        assert event.pricingPointId is None
+
+        offerers_api.link_venue_to_pricing_point(venue, pricing_point.id)
+        assert event.pricingPoint == pricing_point
+        assert event.status == finance_models.FinanceEventStatus.READY
+
+    def test_behaviour_if_pre_existing_link(self):
+        venue = offerers_factories.VenueWithoutSiretFactory()
+        pricing_point_1 = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+        offerers_factories.VenuePricingPointLinkFactory(venue=venue, pricingPoint=pricing_point_1)
+        pre_existing_link = db.session.query(offerers_models.VenuePricingPointLink).one()
+        pricing_point_2 = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+
+        with pytest.raises(offerers_exceptions.CannotLinkVenueToPricingPoint):
+            offerers_api.link_venue_to_pricing_point(venue, pricing_point_2.id)
+        assert db.session.query(offerers_models.VenuePricingPointLink).one() == pre_existing_link
+
+        # Now force the link.
+        offerers_api.link_venue_to_pricing_point(venue, pricing_point_2.id, force_link=True)
+        link = (
+            db.session.query(offerers_models.VenuePricingPointLink)
+            .order_by(offerers_models.VenuePricingPointLink.id.desc())
+            .first()
+        )
+        assert link.venue == venue
+        assert link.pricingPoint == pricing_point_2
+
+    def test_fails_if_venue_has_siret(self):
+        pricing_point = offerers_factories.VenueFactory()
+        offerer = pricing_point.managingOfferer
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer, siret="1234")
+
+        with pytest.raises(api_errors.ApiErrors) as error:
+            offerers_api.link_venue_to_pricing_point(venue, pricing_point.id)
+        msg = "Ce partenaire culturel a un SIRET, vous ne pouvez donc pas choisir un autre partenaire culturel pour le calcul du barème de remboursement."
+        assert error.value.errors == {"pricingPointId": [msg]}
+
+
+class HasVenueAtLeastOneBookableOfferTest:
+    @pytest.mark.features(ENABLE_VENUE_STRICT_SEARCH=True)
+    def test_eligible(self):
+        venue = offerers_factories.VenueFactory(isPermanent=True)
+        offers_factories.EventStockFactory(offer__venue=venue)
+
+        assert offerers_api.has_venue_at_least_one_bookable_offer(venue)
+
+    @pytest.mark.features(ENABLE_VENUE_STRICT_SEARCH=True)
+    def test_no_offers(self):
+        venue = offerers_factories.VenueFactory(isPermanent=True)
+        assert not offerers_api.has_venue_at_least_one_bookable_offer(venue)
+
+    @pytest.mark.features(ENABLE_VENUE_STRICT_SEARCH=True)
+    def test_managing_offerer_not_validated(self):
+        venue = offerers_factories.VenueFactory(
+            isPermanent=True, managingOfferer=offerers_factories.NewOffererFactory()
+        )
+        offers_factories.EventStockFactory(offer__venue=venue)
+
+        assert not offerers_api.has_venue_at_least_one_bookable_offer(venue)
+
+    @pytest.mark.features(ENABLE_VENUE_STRICT_SEARCH=True)
+    def test_offer_without_stock(self):
+        venue = offerers_factories.VenueFactory(isPermanent=True)
+        offers_factories.OfferFactory(venue=venue)
+
+        assert not offerers_api.has_venue_at_least_one_bookable_offer(venue)
+
+    @pytest.mark.features(ENABLE_VENUE_STRICT_SEARCH=True)
+    def test_expired_event(self):
+        venue = offerers_factories.VenueFactory(isPermanent=True)
+
+        one_week_ago = date_utils.get_naive_utc_now() - datetime.timedelta(days=7)
+        offers_factories.EventStockFactory(beginningDatetime=one_week_ago, offer__venue=venue)
+
+        assert not offerers_api.has_venue_at_least_one_bookable_offer(venue)
+
+    @pytest.mark.features(ENABLE_VENUE_STRICT_SEARCH=True)
+    def test_only_one_bookable_offer(self):
+        venue = offerers_factories.VenueFactory(isPermanent=True)
+
+        # offer with bookable stock: venue is eligible
+        offers_factories.EventStockFactory(offer__venue=venue)
+
+        # without the previous offer, the venue would not be eligible
+        one_week_ago = date_utils.get_naive_utc_now() - datetime.timedelta(days=7)
+        offers_factories.EventStockFactory(beginningDatetime=one_week_ago, offer__venue=venue)
+
+        assert offerers_api.has_venue_at_least_one_bookable_offer(venue)
+
+
+class CountOfferersByValidationStatusTest:
+    def test_get_offerer_stats(self, client):
+        # given
+        offerers_factories.UserOffererFactory(offerer__validationStatus=ValidationStatus.NEW)
+        offerers_factories.UserOffererFactory.create_batch(2, offerer__validationStatus=ValidationStatus.PENDING)
+        offerers_factories.UserOffererFactory.create_batch(3, offerer__validationStatus=ValidationStatus.VALIDATED)
+        offerers_factories.UserOffererFactory.create_batch(4, offerer__validationStatus=ValidationStatus.REJECTED)
+
+        # when
+        with assert_num_queries(1):
+            stats = offerers_api.count_offerers_by_validation_status()
+
+        # then
+        assert stats == {"DELETED": 0, "NEW": 1, "PENDING": 2, "VALIDATED": 3, "REJECTED": 4, "CLOSED": 0}
+
+    def test_get_offerer_stats_zero(self, client):
+        # when
+        with assert_num_queries(1):
+            stats = offerers_api.count_offerers_by_validation_status()
+
+        # then
+        assert stats == {"DELETED": 0, "NEW": 0, "PENDING": 0, "VALIDATED": 0, "REJECTED": 0, "CLOSED": 0}
+
+
+class UpdateOffererTagTest:
+    def test_update_offerer_tag(self):
+        offerer_tag = offerers_factories.OffererTagFactory(name="serious-tag-name", label="Serious Tag")
+
+        offerers_api.update_offerer_tag(
+            offerer_tag, name="not-so-serious-tag-name", label="Taggy McTagface", description="Why so serious ?"
+        )
+        offerer_tag = db.session.query(offerers_models.OffererTag).one()
+        assert offerer_tag.name == "not-so-serious-tag-name"
+        assert offerer_tag.label == "Taggy McTagface"
+        assert offerer_tag.description == "Why so serious ?"
+
+
+class CreateFromOnboardingDataTest:
+    def assert_common_venue_attrs(self, venue: offerers_models.Venue) -> None:
+        assert venue.offererAddress.address.street == "3 RUE DE VALOIS"
+        assert venue.offererAddress.address.banId == "75101_9575_00003"
+        assert venue.bookingEmail == "pro@example.com"
+        assert venue.offererAddress.address.city == "Paris"
+        assert venue.dmsToken
+        assert venue.offererAddress.address.latitude == decimal.Decimal("2.30829")
+        assert venue.offererAddress.address.longitude == decimal.Decimal("48.87171")
+        assert venue.name == "MINISTERE DE LA CULTURE"
+        assert venue.offererAddress.address.postalCode == "75001"
+        assert venue.publicName == "Nom public de mon lieu"
+        assert venue.activity == offerers_models.Activity.CINEMA
+        assert venue.audioDisabilityCompliant is None
+        assert venue.mentalDisabilityCompliant is None
+        assert venue.motorDisabilityCompliant is None
+        assert venue.visualDisabilityCompliant is None
+
+    def assert_common_action_history_extra_data(self, action: history_models.ActionHistory) -> None:
+        assert action.extraData["target"] == offerers_models.Target.INDIVIDUAL.name
+        assert action.extraData["activity"] == offerers_models.Activity.CINEMA.name
+        assert (
+            action.extraData["web_presence"]
+            == "https://www.example.com, https://instagram.com/example, https://mastodon.social/@example"
+        )
+
+    def assert_venue_registration_attrs(self, venue: Venue) -> None:
+        assert db.session.query(offerers_models.VenueRegistration).all() == [venue.registration]
+        assert venue.registration.target == offerers_models.Target.INDIVIDUAL
+        assert (
+            venue.registration.webPresence
+            == "https://www.example.com, https://instagram.com/example, https://mastodon.social/@example"
+        )
+
+    def assert_only_welcome_email_to_pro_was_sent(self) -> None:
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["template"]["id_not_prod"] == TransactionalEmail.WELCOME_TO_PRO.value.id
+
+    def get_onboarding_data(
+        self, create_venue_without_siret: bool
+    ) -> offerers_serialize.SaveNewOnboardingDataQueryModel:
+        return offerers_serialize.SaveNewOnboardingDataQueryModel(
+            address=address_serialize.LocationBodyModelV2(
+                label="",
+                banId="75101_9575_00003",
+                city="Paris",
+                latitude=2.30829,
+                longitude=48.87171,
+                postalCode="75001",
+                inseeCode="75101",
+                street="3 RUE DE VALOIS",
+            ),
+            is_open_to_public=True,
+            siret="85331845900031",
+            public_name="Nom public de mon lieu",
+            create_venue_without_siret=create_venue_without_siret,
+            target=offerers_models.Target.INDIVIDUAL,
+            activity=offerers_models.Activity.CINEMA.name,
+            web_presence="https://www.example.com, https://instagram.com/example, https://mastodon.social/@example",
+            token="token",
+            cultural_domains=None,
+            phone_number="0102030405",
+        )
+
+    @pytest.mark.settings(ADRESSE_BACKEND="pcapi.connectors.api_adresse.ApiAdresseBackend")
+    def test_new_siren_new_siret(self, requests_mock):
+        api_adresse_response = {
+            "type": "FeatureCollection",
+            "version": "draft",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [2.337933, 48.863666]},
+                    "properties": {
+                        "label": "3 Rue de Valois 75001 Paris",
+                        "score": 0.9652045454545454,
+                        "housenumber": "3",
+                        "id": "75101_9575_00003",
+                        "name": "3 Rue de Valois",
+                        "postcode": "75001",
+                        "citycode": "75101",
+                        "x": 651428.82,
+                        "y": 6862829.62,
+                        "city": "Paris",
+                        "district": "Paris 1er Arrondissement",
+                        "context": "75, Paris, Île-de-France",
+                        "type": "housenumber",
+                        "importance": 0.61725,
+                        "street": "Rue de Valois",
+                    },
+                }
+            ],
+            "attribution": "BAN",
+            "licence": "ETALAB-2.0",
+            "query": "3 Rue de valois, 75001 Paris",
+            "filters": {"postcode": "75001"},
+            "limit": 1,
+        }
+        requests_mock.get(
+            "https://data.geopf.fr/geocodage/search?q=3 RUE DE VALOIS&postcode=75001&autocomplete=0&limit=1",
+            json=api_adresse_response,
+        )
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+
+        educational_domains = educational_factories.EducationalDomainFactory.create_batch(3)
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        onboarding_data.cultural_domains = [domain.name for domain in educational_domains]
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        address = db.session.query(geography_models.Address).one()
+        offerer_address = db.session.query(offerers_models.OffererAddress).one()
+
+        # Offerer has been created
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.name == "MINISTERE DE LA CULTURE"
+        assert created_offerer.siren == "853318459"
+        assert created_offerer.validationStatus == ValidationStatus.NEW
+        # User is attached to offerer
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.validationStatus == ValidationStatus.VALIDATED
+        # but does not have PRO role yet, because the Offerer is not validated
+        assert created_user_offerer.user.has_non_attached_pro_role
+        # 1 Venue with siret have been created
+        assert len(created_user_offerer.offerer.managedVenues) == 1
+        created_venue = created_user_offerer.offerer.managedVenues[0]
+
+        self.assert_common_venue_attrs(created_venue)
+        assert created_venue.isOpenToPublic is True
+        assert created_venue.comment is None
+        assert created_venue.siret == "85331845900031"
+        assert created_venue.current_pricing_point_id == created_venue.id
+        assert address.street == "3 RUE DE VALOIS"
+        assert address.city == "Paris"
+        assert address.postalCode == "75001"
+        assert address.inseeCode.startswith(address.departmentCode)
+        assert address.departmentCode == "75"
+        assert address.timezone == "Europe/Paris"
+        assert created_venue.offererAddress == offerer_address
+        assert offerer_address.addressId == address.id
+
+        # Action logs
+        assert db.session.query(history_models.ActionHistory).count() == 2
+        offerer_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.OFFERER_NEW)
+            .one()
+        )
+        assert offerer_action.offerer == created_offerer
+        assert offerer_action.authorUser == user
+        assert offerer_action.user == user
+        self.assert_common_action_history_extra_data(offerer_action)
+        venue_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.VENUE_CREATED)
+            .one()
+        )
+        assert venue_action.venue == created_venue
+        assert venue_action.authorUser == user
+
+        self.assert_only_welcome_email_to_pro_was_sent()
+        # Venue Registration
+        self.assert_venue_registration_attrs(created_venue)
+
+        assert set(created_venue.collectiveDomains) == set(educational_domains)
+
+    @pytest.mark.settings(ADRESSE_BACKEND="pcapi.connectors.api_adresse.ApiAdresseBackend")
+    def test_new_siren_new_siret_legacy(self, requests_mock):
+        api_adresse_response = {
+            "type": "FeatureCollection",
+            "version": "draft",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [2.337933, 48.863666]},
+                    "properties": {
+                        "label": "3 Rue de Valois 75001 Paris",
+                        "score": 0.9652045454545454,
+                        "housenumber": "3",
+                        "id": "75101_9575_00003",
+                        "name": "3 Rue de Valois",
+                        "postcode": "75001",
+                        "citycode": "75101",
+                        "x": 651428.82,
+                        "y": 6862829.62,
+                        "city": "Paris",
+                        "district": "Paris 1er Arrondissement",
+                        "context": "75, Paris, Île-de-France",
+                        "type": "housenumber",
+                        "importance": 0.61725,
+                        "street": "Rue de Valois",
+                    },
+                }
+            ],
+            "attribution": "BAN",
+            "licence": "ETALAB-2.0",
+            "query": "3 Rue de valois, 75001 Paris",
+            "filters": {"postcode": "75001"},
+            "limit": 1,
+        }
+        requests_mock.get(
+            "https://data.geopf.fr/geocodage/search?q=3 RUE DE VALOIS&postcode=75001&autocomplete=0&limit=1",
+            json=api_adresse_response,
+        )
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        address = db.session.query(geography_models.Address).one()
+        offerer_address = db.session.query(offerers_models.OffererAddress).one()
+
+        # Offerer has been created
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.name == "MINISTERE DE LA CULTURE"
+        assert created_offerer.siren == "853318459"
+        assert created_offerer.validationStatus == ValidationStatus.NEW
+        # User is attached to offerer
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.validationStatus == ValidationStatus.VALIDATED
+        # but does not have PRO role yet, because the Offerer is not validated
+        assert created_user_offerer.user.has_non_attached_pro_role
+        # 1 Venue with siret have been created
+        assert len(created_user_offerer.offerer.managedVenues) == 1
+        created_venue = created_user_offerer.offerer.managedVenues[0]
+
+        self.assert_common_venue_attrs(created_venue)
+        assert created_venue.isOpenToPublic is True
+        assert created_venue.comment is None
+        assert created_venue.siret == "85331845900031"
+        assert created_venue.current_pricing_point_id == created_venue.id
+        assert address.street == "3 RUE DE VALOIS"
+        assert address.city == "Paris"
+        assert address.postalCode == "75001"
+        assert address.inseeCode.startswith(address.departmentCode)
+        assert address.departmentCode == "75"
+        assert address.timezone == "Europe/Paris"
+        assert created_venue.offererAddress == offerer_address
+        assert offerer_address.addressId == address.id
+
+        # Action logs
+        assert db.session.query(history_models.ActionHistory).count() == 2
+        offerer_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.OFFERER_NEW)
+            .one()
+        )
+        assert offerer_action.offerer == created_offerer
+        assert offerer_action.authorUser == user
+        assert offerer_action.user == user
+        self.assert_common_action_history_extra_data(offerer_action)
+        venue_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.VENUE_CREATED)
+            .one()
+        )
+        assert venue_action.venue == created_venue
+        assert venue_action.authorUser == user
+
+        self.assert_only_welcome_email_to_pro_was_sent()
+        # Venue Registration
+        self.assert_venue_registration_attrs(created_venue)
+
+    @pytest.mark.settings(ADRESSE_BACKEND="pcapi.connectors.api_adresse.ApiAdresseBackend")
+    @pytest.mark.parametrize("isOpenToPublic", [True, False])
+    def test_new_offerer_and_isOpenToPublic(self, isOpenToPublic, requests_mock):
+        api_adresse_response = {
+            "type": "FeatureCollection",
+            "version": "draft",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": [2.337933, 48.863666]},
+                    "properties": {
+                        "label": "3 Rue de Valois 75001 Paris",
+                        "score": 0.9652045454545454,
+                        "housenumber": "3",
+                        "id": "75101_9575_00003",
+                        "name": "3 Rue de Valois",
+                        "postcode": "75001",
+                        "citycode": "75101",
+                        "x": 651428.82,
+                        "y": 6862829.62,
+                        "city": "Paris",
+                        "district": "Paris 1er Arrondissement",
+                        "context": "75, Paris, Île-de-France",
+                        "type": "housenumber",
+                        "importance": 0.61725,
+                        "street": "Rue de Valois",
+                    },
+                }
+            ],
+            "attribution": "BAN",
+            "licence": "ETALAB-2.0",
+            "query": "3 Rue de valois, 75001 Paris",
+            "filters": {"postcode": "75001"},
+            "limit": 1,
+        }
+        requests_mock.get(
+            "https://data.geopf.fr/geocodage/search?q=3 RUE DE VALOIS&postcode=75001&autocomplete=0&limit=1",
+            json=api_adresse_response,
+        )
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        onboarding_data.is_open_to_public = isOpenToPublic
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        # Offerer has been created
+        created_venue = created_user_offerer.offerer.managedVenues[0]
+        assert created_venue.isOpenToPublic is isOpenToPublic
+
+    def test_existing_siren_new_siret(self):
+        offerer = offerers_factories.OffererFactory(siren="853318459")
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        # Offerer has not been created
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert created_user_offerer.offerer == offerer
+        # User is not attached to offerer yet
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.validationStatus == ValidationStatus.NEW
+        assert created_user_offerer.user.has_non_attached_pro_role
+        # 1 venue with siret has been created
+        assert len(offerer.managedVenues) == 1
+        created_venue = offerer.managedVenues[0]
+        self.assert_common_venue_attrs(created_venue)
+        assert created_venue.comment is None
+        assert created_venue.siret == "85331845900031"
+        assert created_venue.current_pricing_point_id == created_venue.id
+        # Action logs
+        assert db.session.query(history_models.ActionHistory).count() == 2
+        offerer_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.USER_OFFERER_NEW)
+            .one()
+        )
+        assert offerer_action.offerer == offerer
+        assert offerer_action.authorUser == user
+        assert offerer_action.user == user
+        self.assert_common_action_history_extra_data(offerer_action)
+        venue_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.VENUE_CREATED)
+            .one()
+        )
+        assert venue_action.venue == created_venue
+        assert venue_action.authorUser == user
+
+        assert len(mails_testing.outbox) == 0
+        # Venue Registration
+        self.assert_venue_registration_attrs(created_venue)
+
+    def test_existing_siren_new_venue_without_siret(self):
+        offerer = offerers_factories.OffererFactory(siren="853318459")
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=True)
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        # Offerer has not been created
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert created_user_offerer.offerer == offerer
+        # User is not attached to offerer yet
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.user.has_non_attached_pro_role
+        assert created_user_offerer.validationStatus == ValidationStatus.NEW
+        # 1 venue without siret has been created
+        assert len(offerer.managedVenues) == 1
+        created_venue = offerer.managedVenues[0]
+        self.assert_common_venue_attrs(created_venue)
+        assert created_venue.comment == "Structure sans SIRET car dépend du SIRET d'une autre structure"
+        assert created_venue.siret is None
+        # No pricing point yet
+        assert not created_venue.current_pricing_point_id
+        # Action logs
+        assert db.session.query(history_models.ActionHistory).count() == 2
+        offerer_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.USER_OFFERER_NEW)
+            .one()
+        )
+        assert offerer_action.offerer == offerer
+        assert offerer_action.authorUser == user
+        assert offerer_action.user == user
+        self.assert_common_action_history_extra_data(offerer_action)
+        offerer_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.VENUE_CREATED)
+            .one()
+        )
+        assert offerer_action.venue == created_venue
+        assert offerer_action.authorUser == user
+
+        assert len(mails_testing.outbox) == 0
+        # Venue Registration
+        self.assert_venue_registration_attrs(created_venue)
+
+    def test_existing_siren_existing_siret_is_not_a_collectivity(self):
+        offerer = offerers_factories.OffererFactory(siren="853318459")
+        offerers_factories.VenueFactory(managingOfferer=offerer, siret="85331845900031")
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=True)
+
+        with pytest.raises(offerers_exceptions.NotACollectivity):
+            offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+    def test_existing_siren_existing_siret_is_a_collectivity(self):
+        offerer = offerers_factories.OffererFactory(siren="777084112")
+        offerers_factories.VenueFactory(managingOfferer=offerer, siret="77708411200031")
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=True)
+        onboarding_data.siret = "77708411200031"
+        offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        created_venue = next(venue for venue in offerer.managedVenues if venue.siret is None)
+        pricing_point_link = (
+            db.session.query(offerers_models.VenuePricingPointLink).filter_by(venue=created_venue).one()
+        )
+        assert pricing_point_link.pricingPoint.siret == "77708411200031"
+
+    def test_existing_siren_existing_siret(self):
+        offerer = offerers_factories.OffererFactory(siren="853318459")
+        _venue_with_siret = offerers_factories.VenueFactory(managingOfferer=offerer, siret="85331845900031")
+        user = users_factories.UserFactory()
+        user.add_non_attached_pro_role()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        # Offerer has not been created
+        assert db.session.query(offerers_models.Offerer).count() == 1
+        assert created_user_offerer.offerer == offerer
+        # User is not attached to offerer yet
+        assert created_user_offerer.userId == user.id
+        assert created_user_offerer.user.has_non_attached_pro_role
+        assert created_user_offerer.validationStatus == ValidationStatus.NEW
+        # Venue has not been created
+        assert db.session.query(offerers_models.Venue).count() == 1
+        # Action logs
+        assert db.session.query(history_models.ActionHistory).count() == 1
+        offerer_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter(history_models.ActionHistory.actionType == history_models.ActionType.USER_OFFERER_NEW)
+            .one()
+        )
+        assert offerer_action.offerer == offerer
+        assert offerer_action.authorUser == user
+        assert offerer_action.user == user
+        self.assert_common_action_history_extra_data(offerer_action)
+        assert len(mails_testing.outbox) == 0
+        # Venue Registration
+        assert db.session.query(offerers_models.VenueRegistration).count() == 0
+
+    def test_previously_rejected_siren_same_user(self):
+        offerer = offerers_factories.RejectedOffererFactory(siren="853318459")
+        rejected_venue = offerers_factories.VenueFactory(
+            managingOfferer=offerer, siret="85331845900031", pricing_point="self"
+        )
+        rejected_venue_id = rejected_venue.id
+        rejected_venue_id_without_siret = offerers_factories.VenueWithoutSiretFactory(
+            managingOfferer=offerer, pricing_point=rejected_venue
+        ).id
+        user = users_factories.NonAttachedProFactory()
+        rejected_user_offerer = offerers_factories.RejectedUserOffererFactory(user=user, offerer=offerer)
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        assert db.session.query(offerers_models.Offerer).one() == offerer
+        assert offerer.isNew
+
+        assert created_user_offerer == rejected_user_offerer
+        assert created_user_offerer.offerer == offerer
+        assert created_user_offerer.user == user
+        assert created_user_offerer.isValidated
+        assert user.has_non_attached_pro_role
+
+        assert len(offerer.managedVenues) == 1
+        venue = offerer.managedVenues[0]
+        assert venue.id not in (rejected_venue_id, rejected_venue_id_without_siret)
+        assert venue.publicName == onboarding_data.public_name
+
+        actions = db.session.query(history_models.ActionHistory).order_by(history_models.ActionHistory.id).all()
+        assert len(actions) == 3
+
+        assert actions[0].actionType == history_models.ActionType.INFO_MODIFIED
+        assert actions[0].offerer == offerer
+        assert actions[0].authorUser == user
+        assert set(actions[0].extraData["modified_info"].keys()) == {"name"}
+
+        assert actions[1].actionType == history_models.ActionType.OFFERER_NEW
+        assert actions[1].offerer == offerer
+        assert actions[1].user == user
+        assert actions[1].authorUser == user
+        self.assert_common_action_history_extra_data(actions[1])
+
+        assert actions[2].actionType == history_models.ActionType.VENUE_CREATED
+        assert actions[2].venue == venue
+        assert actions[2].authorUser == user
+
+    def test_previously_rejected_siren_other_user(self):
+        offerer = offerers_factories.RejectedOffererFactory(siren="853318459")
+        rejected_venue_id = offerers_factories.VenueFactory(managingOfferer=offerer, siret="85331845900031").id
+        rejected_user = users_factories.NonAttachedProFactory()
+        rejected_user_offerer = offerers_factories.RejectedUserOffererFactory(user=rejected_user, offerer=offerer)
+        new_user = users_factories.NonAttachedProFactory()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        created_user_offerer = offerers_api.create_from_onboarding_data(new_user, onboarding_data)
+
+        assert db.session.query(offerers_models.Offerer).one() == offerer
+        assert offerer.isNew
+
+        assert created_user_offerer != rejected_user_offerer
+        assert created_user_offerer.offerer == offerer
+        assert created_user_offerer.user == new_user
+        assert created_user_offerer.isValidated
+        assert new_user.has_non_attached_pro_role
+        assert rejected_user_offerer.isRejected
+
+        assert len(offerer.managedVenues) == 1
+        venue = offerer.managedVenues[0]
+        assert venue.id != rejected_venue_id
+        assert venue.publicName == onboarding_data.public_name
+
+        actions = db.session.query(history_models.ActionHistory).order_by(history_models.ActionHistory.id).all()
+        assert len(actions) == 3
+
+        assert actions[0].actionType == history_models.ActionType.INFO_MODIFIED
+        assert actions[0].offerer == offerer
+        assert actions[0].authorUser == new_user
+        assert set(actions[0].extraData["modified_info"].keys()) == {"name"}
+
+        assert actions[1].actionType == history_models.ActionType.OFFERER_NEW
+        assert actions[1].offerer == offerer
+        assert actions[1].user == new_user
+        assert actions[1].authorUser == new_user
+        self.assert_common_action_history_extra_data(actions[1])
+
+        assert actions[2].actionType == history_models.ActionType.VENUE_CREATED
+        assert actions[2].venue == venue
+        assert actions[2].authorUser == new_user
+
+    def test_missing_address(self):
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        onboarding_data.address.street = ""
+
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        # Offerer has been created
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.name == "MINISTERE DE LA CULTURE"
+        assert created_offerer.siren == "853318459"
+        # 1 Venue with siret have been created
+        assert len(created_user_offerer.offerer.managedVenues) == 1
+        created_venue = created_user_offerer.offerer.managedVenues[0]
+        address = created_venue.offererAddress.address
+        assert address.street == "n/d"
+        assert address.city == "Paris"
+        assert address.latitude == decimal.Decimal("2.30829")
+        assert address.longitude == decimal.Decimal("48.87171")
+        assert address.postalCode == "75001"
+
+    def test_missing_ban_id(self):
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        onboarding_data.address.banId = None
+
+        created_user_offerer = offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        # Offerer has been created
+        created_offerer = created_user_offerer.offerer
+        assert created_offerer.name == "MINISTERE DE LA CULTURE"
+        assert created_offerer.siren == "853318459"
+        # 1 Venue with siret have been created
+        assert len(created_user_offerer.offerer.managedVenues) == 1
+        created_venue = created_user_offerer.offerer.managedVenues[0]
+        address = created_venue.offererAddress.address
+        assert address.street == "3 RUE DE VALOIS"
+        assert address.banId is None
+        assert address.city == "Paris"
+        assert address.latitude == decimal.Decimal("2.30829")
+        assert address.longitude == decimal.Decimal("48.87171")
+        assert address.postalCode == "75001"
+
+    @patch("pcapi.connectors.virustotal.request_url_scan")
+    def test_web_presence_url_scanned(self, mock_request_url_scan):
+        user = users_factories.UserFactory(email="pro@example.com")
+        user.add_non_attached_pro_role()
+
+        onboarding_data = self.get_onboarding_data(create_venue_without_siret=False)
+        offerers_api.create_from_onboarding_data(user, onboarding_data)
+
+        mock_request_url_scan.assert_called()
+        assert mock_request_url_scan.call_count == 3
+        assert {item[0][0] for item in mock_request_url_scan.call_args_list} == {
+            "https://www.example.com",
+            "https://instagram.com/example",
+            "https://mastodon.social/@example",
+        }
+
+
+class InviteMembersTest:
+    def test_offerer_invitation_created_when_invite_new_user(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+
+        offerers_api.invite_member(offerer=offerer, email="new.user@example.com", current_user=pro_user)
+
+        offerer_invitation = db.session.query(offerers_models.OffererInvitation).one()
+        assert offerer_invitation.email == "new.user@example.com"
+        assert offerer_invitation.userId == pro_user.id
+        assert offerer_invitation.offererId == offerer.id
+        assert offerer_invitation.status == offerers_models.InvitationStatus.PENDING
+        assert len(mails_testing.outbox) == 1
+        assert (
+            mails_testing.outbox[0]["template"]["id_not_prod"]
+            == TransactionalEmail.OFFERER_ATTACHMENT_INVITATION_NEW_USER.value.id
+        )
+
+        assert db.session.query(history_models.ActionHistory).count() == 0
+
+    def test_offerer_invitation_created_when_user_exists_and_email_not_validated(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        users_factories.UserFactory(email="new.user@example.com", isEmailValidated=False)
+
+        offerers_api.invite_member(offerer=offerer, email="new.user@example.com", current_user=pro_user)
+
+        offerer_invitation = db.session.query(offerers_models.OffererInvitation).one()
+        assert offerer_invitation.email == "new.user@example.com"
+        assert offerer_invitation.userId == pro_user.id
+        assert offerer_invitation.offererId == offerer.id
+        assert offerer_invitation.status == offerers_models.InvitationStatus.PENDING
+        assert len(mails_testing.outbox) == 1
+        assert (
+            mails_testing.outbox[0]["template"]["id_not_prod"]
+            == TransactionalEmail.OFFERER_ATTACHMENT_INVITATION_EXISTING_NOT_VALIDATED_USER_EMAIL.value.id
+        )
+
+        assert db.session.query(history_models.ActionHistory).count() == 0
+
+    def test_raise_and_not_create_offerer_invitation_when_invitation_already_exists(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        offerers_factories.OffererInvitationFactory(user=pro_user, offerer=offerer, email="new.user@example.com")
+
+        with pytest.raises(offerers_exceptions.EmailAlreadyInvitedException) as exception:
+            offerers_api.invite_member(offerer=offerer, email="new.user@example.com", current_user=pro_user)
+
+        assert exception.value.errors["EmailAlreadyInvitedException"] == [
+            "Une invitation a déjà été envoyée à ce collaborateur"
+        ]
+        offerer_invitations = db.session.query(offerers_models.OffererInvitation).all()
+        assert len(offerer_invitations) == 1
+        assert len(mails_testing.outbox) == 0
+
+        assert db.session.query(history_models.ActionHistory).count() == 0
+
+    def test_raise_error_not_create_offerer_invitation_when_user_already_attached_to_offerer(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        attached_user = users_factories.ProFactory(email="attached.user@example.com")
+        offerers_factories.UserOffererFactory(user=attached_user, offerer=offerer)
+
+        with pytest.raises(offerers_exceptions.UserAlreadyAttachedToOffererException) as exception:
+            offerers_api.invite_member(offerer=offerer, email="attached.user@example.com", current_user=pro_user)
+
+        assert exception.value.errors["UserAlreadyAttachedToOffererException"] == [
+            "Ce collaborateur est déjà membre de votre structure"
+        ]
+        offerer_invitations = db.session.query(offerers_models.OffererInvitation).all()
+        assert len(offerer_invitations) == 0
+        assert len(mails_testing.outbox) == 0
+
+        assert db.session.query(history_models.ActionHistory).count() == 0
+
+    def test_user_offerer_created_when_user_exists_and_attached_to_another_offerer(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        attached_to_other_offerer_user = users_factories.ProFactory(email="attached.user@example.com")
+        offerers_factories.UserOffererFactory(user=attached_to_other_offerer_user)
+
+        offerers_api.invite_member(offerer=offerer, email="attached.user@example.com", current_user=pro_user)
+
+        offerer_invitation = db.session.query(offerers_models.OffererInvitation).one()
+        assert len(mails_testing.outbox) == 1
+        assert (
+            mails_testing.outbox[0]["template"]["id_not_prod"]
+            == TransactionalEmail.OFFERER_ATTACHMENT_INVITATION_EXISTING_VALIDATED_USER_EMAIL.value.id
+        )
+        user_offerer = (
+            db.session.query(offerers_models.UserOfferer)
+            .filter_by(userId=attached_to_other_offerer_user.id, offererId=offerer.id)
+            .one()
+        )
+        assert user_offerer.validationStatus == ValidationStatus.NEW
+        assert offerer_invitation.email == "attached.user@example.com"
+        assert offerer_invitation.userId == pro_user.id
+        assert offerer_invitation.offererId == offerer.id
+        assert offerer_invitation.status == offerers_models.InvitationStatus.ACCEPTED
+
+        actions_list = db.session.query(history_models.ActionHistory).all()
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.USER_OFFERER_NEW
+        assert actions_list[0].authorUser == pro_user
+        assert actions_list[0].user == attached_to_other_offerer_user
+        assert actions_list[0].comment == "Rattachement créé par invitation"
+        assert actions_list[0].offerer == offerer
+        assert actions_list[0].extraData == {
+            "inviter_user_id": pro_user.id,
+            "offerer_invitation_id": offerer_invitation.id,
+        }
+
+
+class InviteMembersAgainTest:
+    def test_offerer_invitation_send_when_invite_again(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        offerers_factories.OffererInvitationFactory(user=pro_user, offerer=offerer, email="new.user@example.com")
+
+        offerers_api.invite_member_again(offerer=offerer, email="new.user@example.com")
+
+        assert len(mails_testing.outbox) == 1
+        assert (
+            mails_testing.outbox[0]["template"]["id_not_prod"]
+            == TransactionalEmail.OFFERER_ATTACHMENT_INVITATION_NEW_USER.value.id
+        )
+
+    def test_raise_error_when_invitation_does_not_already_exist(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+
+        with pytest.raises(offerers_exceptions.InviteAgainImpossibleException) as exception:
+            offerers_api.invite_member_again(offerer=offerer, email="new.user@example.com")
+
+        assert exception.value.errors["InviteAgainImpossibleException"] == [
+            "Impossible de renvoyer une invitation pour ce collaborateur"
+        ]
+        offerer_invitations = db.session.query(offerers_models.OffererInvitation).all()
+        assert len(offerer_invitations) == 0
+        assert len(mails_testing.outbox) == 0
+
+
+class AcceptOffererInvitationTest:
+    def test_accept_offerer_invitation_when_invitation_exist(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        offerers_factories.OffererInvitationFactory(offerer=offerer, user=pro_user, email="new.user@example.com")
+        user = users_factories.UserFactory(email="new.user@example.com")
+
+        offerers_api.accept_offerer_invitation_if_exists(user)
+
+        new_user_offerer = (
+            db.session.query(offerers_models.UserOfferer).filter_by(validationStatus=ValidationStatus.NEW).one()
+        )
+        offerer_invitation = db.session.query(offerers_models.OffererInvitation).one()
+
+        assert new_user_offerer.offererId == offerer.id
+        assert new_user_offerer.userId == user.id
+        assert offerer_invitation.status == offerers_models.InvitationStatus.ACCEPTED
+
+        actions_list = db.session.query(history_models.ActionHistory).all()
+        assert len(actions_list) == 1
+        assert actions_list[0].actionType == history_models.ActionType.USER_OFFERER_NEW
+        assert actions_list[0].authorUser == user
+        assert actions_list[0].user == user
+        assert actions_list[0].comment == "Rattachement créé par invitation"
+        assert actions_list[0].offerer == offerer
+        assert actions_list[0].extraData == {
+            "inviter_user_id": pro_user.id,
+            "offerer_invitation_id": offerer_invitation.id,
+        }
+
+    def test_do_not_recreate_new_user_offerer_if_invitation_already_accepted(self):
+        pro_user = users_factories.ProFactory(email="pro.user@example.com")
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro_user, offerer=offerer)
+        offerers_factories.OffererInvitationFactory(
+            offerer=offerer,
+            user=pro_user,
+            email="new.user@example.com",
+            status=offerers_models.InvitationStatus.ACCEPTED,
+        )
+        user = users_factories.UserFactory(email="new.user@example.com")
+        offerers_factories.UserOffererFactory(user=user, offerer=offerer)
+
+        offerers_api.accept_offerer_invitation_if_exists(user)
+
+        user_offerers = db.session.query(offerers_models.UserOfferer).all()
+
+        assert len(user_offerers) == 2
+        assert db.session.query(history_models.ActionHistory).count() == 0
+
+
+class DeleteExpiredOffererInvitationsTest:
+    def test_delete_expired_offerer_invitations(self):
+        not_expired_pending_invitation_id = offerers_factories.OffererInvitationFactory(
+            dateCreated=date_utils.get_naive_utc_now() - datetime.timedelta(days=29, hours=23)
+        ).id
+        _expired_pending_invitation_id = offerers_factories.OffererInvitationFactory(
+            dateCreated=date_utils.get_naive_utc_now() - datetime.timedelta(days=31)
+        ).id
+        accepted_invitation_id = offerers_factories.OffererInvitationFactory(
+            status=offerers_models.InvitationStatus.ACCEPTED,
+            dateCreated=date_utils.get_naive_utc_now() - datetime.timedelta(days=100),
+        ).id
+
+        offerers_api.delete_expired_offerer_invitations()
+
+        remaining_invitation_ids = {id_ for (id_,) in db.session.query(offerers_models.OffererInvitation.id).all()}
+        assert remaining_invitation_ids == {not_expired_pending_invitation_id, accepted_invitation_id}
+
+
+class AccessibilityProviderTest:
+    def test_synchronize_accessibility_with_acceslibre_num_queries(self):
+        address = geography_factories.AddressFactory()
+        for _ in range(3):
+            venue = offerers_factories.VenueFactory(
+                isOpenToPublic=True,
+                accessibilityProvider=offerers_factories.AccessibilityProviderFactory(),
+                offererAddress__address=address,
+            )
+            assert venue.offererAddress.address
+
+        # 1. COUNT (=3 venues)
+        # 2. SELECT batch 1
+        # 3. SELECT batch 2
+        expected_queries_sync = 3
+
+        with assert_num_queries(expected_queries_sync):
+            offerers_api.synchronize_accessibility_with_acceslibre(
+                apply=True,
+                force_sync=False,
+                batch_size=2,
+            )
+
+    @patch("pcapi.connectors.acceslibre.get_accessibility_infos")
+    def test_batch_count_call_for_synchronize_accessibility_with_acceslibre(
+        self,
+        mock_get_accessibility_infos,
+    ):
+        now = datetime.datetime.now()
+        mock_get_accessibility_infos.return_value = (now, None)
+        address = geography_factories.AddressFactory()
+        for _ in range(5):
+            venue = offerers_factories.VenueFactory(
+                isOpenToPublic=True,
+                accessibilityProvider=offerers_factories.AccessibilityProviderFactory(),
+                offererAddress__address=address,
+            )
+            assert venue.offererAddress.address
+
+        for _ in range(3):
+            venue = offerers_factories.VenueFactory(
+                isOpenToPublic=True, accessibilityProvider=None, offererAddress__address=address
+            )
+            assert venue.offererAddress.address
+
+        # batch_size = 2 to force 3 batches
+        offerers_api.synchronize_accessibility_with_acceslibre(
+            apply=True,
+            force_sync=False,
+            batch_size=2,
+        )
+
+        # We have 5 synchronized venues and "last_update" is not None, we should call 5 times get_accessibility_infos
+        assert mock_get_accessibility_infos.call_count == 5
+
+    @patch("pcapi.connectors.acceslibre.get_accessibility_infos")
+    @patch("pcapi.connectors.acceslibre.find_new_entries_by_activity")
+    def test_acceslibre_matching_num_queries(
+        self,
+        mock_find_new_entries,
+        mock_get_accessibility_infos,
+    ):
+        mock_get_accessibility_infos.return_value = (None, None)
+        mock_find_new_entries.return_value = []
+
+        address = geography_factories.AddressFactory()
+        for _ in range(5):  # 5 venues without acceslibre synchronization
+            venue = offerers_factories.VenueFactory(
+                isOpenToPublic=True,
+                accessibilityProvider=offerers_factories.AccessibilityProviderFactory(),
+                offererAddress__address=address,
+            )
+            assert venue.offererAddress.address
+
+        for _ in range(3):  # 3 venues without acceslibre synchronization
+            venue = offerers_factories.VenueFactory(
+                isOpenToPublic=True, accessibilityProvider=None, offererAddress__address=address
+            )
+            assert venue.offererAddress.address
+
+        # 1. SELECT venues ids with accessibility_provider
+        # 2. SELECT venues ids without accessibility_provider
+        # 3. SELECT batch 1 venues + joinedload offererAddress + joinedload address
+        # 4. SELECT batch 2 venues + joinedload offererAddress + joinedload address
+
+        expected_queries_matching = 4
+
+        with assert_num_queries(expected_queries_matching):
+            offerers_api.acceslibre_matching(
+                batch_size=2,
+                apply=True,
+                n_days_to_fetch=7,
+            )
+
+    @patch("pcapi.connectors.acceslibre.match_venue_with_acceslibre")
+    def test_batch_count_call_for_acceslibre_matching(
+        self,
+        mock_match_venue_with_acceslibre,
+    ):
+        address = geography_factories.AddressFactory()
+        for _ in range(5):
+            venue = offerers_factories.VenueFactory(
+                isOpenToPublic=True,
+                accessibilityProvider=offerers_factories.AccessibilityProviderFactory(),
+                offererAddress__address=address,
+            )
+            assert venue.offererAddress.address
+
+        for _ in range(3):
+            venue = offerers_factories.VenueFactory(
+                isOpenToPublic=True, accessibilityProvider=None, offererAddress__address=address
+            )
+            assert venue.offererAddress.address
+
+        # batch_size = 2 to force 2 batches
+        offerers_api.acceslibre_matching(
+            batch_size=2,
+            apply=True,
+            n_days_to_fetch=7,
+        )
+
+        # We have 3 unsynchronized venues, we should call 3 times match_venue_with_acceslibre
+        assert mock_match_venue_with_acceslibre.call_count == 3
+
+    def test_set_accessibility_provider_id(self):
+        venue = offerers_factories.VenueFactory(name="Une librairie de test", accessibilityProvider=None)
+        offerers_api.set_accessibility_provider_id(venue)
+        assert venue.accessibilityProvider.externalAccessibilityId == "mon-lieu-chez-acceslibre"
+
+    def test_set_accessibility_last_update_at_provider_id(self):
+        venue = offerers_factories.VenueFactory(name="Une librairie de test")
+        offerers_factories.AccessibilityProviderFactory(venue=venue)
+        offerers_api.set_accessibility_infos_from_provider_id(venue)
+        assert venue.accessibilityProvider.lastUpdateAtProvider == datetime.datetime(2024, 3, 1, 0, 0)
+
+    def test_set_accessibility_infos_from_provider_id(self):
+        venue = offerers_factories.VenueFactory(name="Une librairie de test")
+        offerers_factories.AccessibilityProviderFactory(venue=venue)
+        offerers_api.set_accessibility_infos_from_provider_id(venue)
+        assert venue.accessibilityProvider.externalAccessibilityData["access_modality"] == [
+            acceslibre_connector.ExpectedFieldsEnum.EXTERIOR_ONE_LEVEL,
+            acceslibre_connector.ExpectedFieldsEnum.ENTRANCE_ONE_LEVEL,
+        ]
+
+    @patch("pcapi.connectors.acceslibre.get_accessibility_infos")
+    def test_do_not_set_accessibility_infos_from_provider_id_when_data_is_none(self, mock_get_accessibility_infos):
+        venue = offerers_factories.VenueFactory(
+            name="Une librairie de test",
+            offererAddress__address__postalCode="75001",
+            offererAddress__address__city="Paris",
+        )
+        offerers_factories.AccessibilityProviderFactory(
+            venue=venue,
+            externalAccessibilityId="mock-slug",
+            externalAccessibilityUrl="https://example.com/mock-slug",
+            lastUpdateAtProvider=datetime.datetime(2024, 3, 2, 1, 0),
+        )
+
+        mock_get_accessibility_infos.side_effect = [(datetime.datetime(2025, 4, 3, 2, 1), None)]
+
+        offerers_api.set_accessibility_infos_from_provider_id(venue)
+
+        assert venue.accessibilityProvider.lastUpdateAtProvider == datetime.datetime(2024, 3, 2, 1, 0)
+        assert venue.accessibilityProvider.externalAccessibilityId == "mock-slug"
+        assert venue.accessibilityProvider.externalAccessibilityUrl == "https://example.com/mock-slug"
+
+    @patch("pcapi.connectors.acceslibre.get_accessibility_infos")
+    def test_do_not_set_accessibility_infos_from_provider_id_when_last_update_is_none(
+        self, mock_get_accessibility_infos
+    ):
+        venue = offerers_factories.VenueFactory(
+            name="Une librairie de test",
+            offererAddress__address__postalCode="75001",
+            offererAddress__address__city="Paris",
+        )
+        offerers_factories.AccessibilityProviderFactory(
+            venue=venue,
+            externalAccessibilityId="mock-slug",
+            externalAccessibilityUrl="https://example.com/mock-slug",
+            lastUpdateAtProvider=datetime.datetime(2024, 3, 2, 1, 0),
+        )
+
+        mock_get_accessibility_infos.side_effect = [
+            (None, acceslibre_connector.AcceslibreInfos(slug="another-slug", url="https://example.com/another-slug"))
+        ]
+
+        offerers_api.set_accessibility_infos_from_provider_id(venue)
+
+        assert venue.accessibilityProvider.lastUpdateAtProvider == datetime.datetime(2024, 3, 2, 1, 0)
+        assert venue.accessibilityProvider.externalAccessibilityId == "mock-slug"
+        assert venue.accessibilityProvider.externalAccessibilityUrl == "https://example.com/mock-slug"
+
+    def test_synchronize_accessibility_provider_no_data(self):
+        venue = offerers_factories.VenueFactory(name="Une librairie de test", isOpenToPublic=True)
+        accessibility_provider = offerers_factories.AccessibilityProviderFactory(
+            venue=venue, externalAccessibilityData=None
+        )
+        accessibility_provider_id = accessibility_provider.id
+
+        offerers_api.synchronize_accessibility_with_acceslibre(apply=True)
+
+        accessibility_provider = db.session.get(offerers_models.AccessibilityProvider, accessibility_provider_id)
+        assert accessibility_provider.externalAccessibilityData is not None
+
+    def test_synchronize_accessibility_provider_with_new_update(self):
+        venue = offerers_factories.VenueFactory(name="Une librairie de test", isOpenToPublic=True)
+        accessibility_provider = offerers_factories.AccessibilityProviderFactory(
+            venue=venue, lastUpdateAtProvider=datetime.datetime(2023, 2, 1)
+        )
+        # TestingBackend for acceslibre get_id_at_accessibility_provider returns datetime(2024, 3, 1, 0, 0)
+        accessibility_provider.externalAccessibilityData["audio_description"] = (
+            acceslibre_connector.ExpectedFieldsEnum.AUDIODESCRIPTION_NO_DEVICE
+        )
+        accessibility_provider_id = accessibility_provider.id
+
+        # Synchronize should happen as provider last update is more recent than accessibility_provider.lastUpdateAtProvider
+        offerers_api.synchronize_accessibility_with_acceslibre(apply=True)
+
+        accessibility_provider = db.session.get(offerers_models.AccessibilityProvider, accessibility_provider_id)
+        assert accessibility_provider.externalAccessibilityData["audio_description"] == [
+            acceslibre_connector.ExpectedFieldsEnum.AUDIODESCRIPTION_OCCASIONAL.value
+        ]
+
+    @patch("pcapi.connectors.acceslibre.get_accessibility_infos")
+    @patch("pcapi.connectors.acceslibre.get_id_at_accessibility_provider")
+    def test_synchronize_accessibility_provider_with_new_slug(
+        self, mock_get_id_at_accessibility_provider, mock_get_accessibility_infos
+    ):
+        venue = offerers_factories.VenueFactory(name="Une librairie de test", isOpenToPublic=True)
+        mock_get_id_at_accessibility_provider.side_effect = [
+            acceslibre_connector.AcceslibreInfos(slug="nouveau-slug", url="https://nouvelle.adresse/nouveau-slug")
+        ]
+        # While trying to synchronize venue with acceslibre, we receive None when fetching widget data
+        # This means the entry with this slug (ie. externalAccessibilityId) has been removed
+        # from acceslibre database (usualy because of deduplication);
+        # In that case, we try a new match and look for the new slug
+        mock_get_accessibility_infos.side_effect = [
+            (None, None),
+            (datetime.datetime(2024, 3, 1, 0, 0), acceslibre_connector.AccessibilityInfo()),
+        ]
+
+        accessibility_provider = offerers_factories.AccessibilityProviderFactory(
+            venue=venue, externalAccessibilityId="slug-qui-n-existe-plus"
+        )
+        accessibility_provider_id = accessibility_provider.id
+
+        offerers_api.synchronize_accessibility_with_acceslibre(apply=True, force_sync=True)
+        accessibility_provider = db.session.get(offerers_models.AccessibilityProvider, accessibility_provider_id)
+
+        assert accessibility_provider.externalAccessibilityId == "nouveau-slug"
+        assert accessibility_provider.externalAccessibilityUrl == "https://nouvelle.adresse/nouveau-slug"
+
+    def test_get_open_to_public_venues_with_accessibility_provider(self):
+        offerers_factories.VenueFactory.create_batch(3, isOpenToPublic=True)
+        venue = offerers_factories.VenueFactory(isOpenToPublic=True)
+        venue_id = venue.id
+        offerers_factories.AccessibilityProviderFactory(venue=venue)
+
+        venues_list = offerers_repository.get_open_to_public_venue_ids(with_accessibility_provider=True)
+        assert len(venues_list) == 1
+        assert venues_list[0] == venue_id
+
+    def test_get_open_to_public_venues_without_accessibility_provider(self):
+        offerers_factories.VenueFactory.create_batch(3, isOpenToPublic=True)
+        venue = offerers_factories.VenueFactory(isOpenToPublic=True)
+        venue_id = venue.id
+        offerers_factories.AccessibilityProviderFactory(venue=venue)
+
+        venues_list = offerers_repository.get_open_to_public_venue_ids(with_accessibility_provider=False)
+        assert len(venues_list) == 3
+        assert venue_id not in venues_list
+
+    @patch("pcapi.connectors.acceslibre.find_new_entries_by_activity")
+    def test_match_venue_with_new_entries(self, mock_find_new_entries_by_activity):
+        # returns mock results from acceslibre TestingBackend connector
+        mock_find_new_entries_by_activity.side_effect = [
+            [
+                acceslibre_connector.AcceslibreResult(
+                    slug="mon-lieu-chez-acceslibre",
+                    web_url="https://une-fausse-url.com",
+                    nom="Un lieu",
+                    adresse="3 Rue de Valois 75001 Paris",
+                    code_postal="75001",
+                    commune="Paris",
+                    ban_id="75001_1234_abcde",
+                    activite={"nom": "Bibliothèque Médiathèque", "slug": "bibliotheque-mediatheque"},
+                    siret="",
+                ),
+                acceslibre_connector.AcceslibreResult(
+                    slug="mon-autre-lieu-chez-acceslibre",
+                    web_url="https://une-autre-fausse-url.com",
+                    nom="Un autre lieu",
+                    adresse="5 rue ailleurs 75013 Paris",
+                    code_postal="75001",
+                    commune="Paris",
+                    ban_id="75001_1234_abcdf",
+                    activite={"nom": "Bibliothèque Médiathèque", "slug": "bibliotheque-mediatheque"},
+                    siret="",
+                ),
+            ],
+        ]
+
+        results_by_activity = acceslibre_connector.find_new_entries_by_activity(
+            activity=acceslibre_connector.AcceslibreActivity.BIBLIOTHEQUE,
+        )
+
+        venues_list = [offerers_factories.VenueFactory(isOpenToPublic=True)]
+        venue = offerers_factories.VenueFactory(
+            isOpenToPublic=True,
+            name="Un lieu",
+            offererAddress__address__postalCode="75001",
+            offererAddress__address__city="Paris",
+            offererAddress__address__street="3 Rue de Valois",
+        )
+        venues_list.append(venue)
+
+        offerers_api.match_venue_with_new_entries(venues_list, results_by_activity)
+        assert venue.external_accessibility_url == "https://une-fausse-url.com"
+        assert venue.external_accessibility_id == "mon-lieu-chez-acceslibre"
+
+    def test_acceslibre_matching(self):
+        venues_list = [offerers_factories.VenueFactory(isOpenToPublic=True)]
+        venue = offerers_factories.VenueFactory(
+            isOpenToPublic=True,
+            name="Un lieu",
+            offererAddress__address__postalCode="75001",
+            offererAddress__address__city="Paris",
+            offererAddress__address__street="3 Rue de Valois",
+        )
+        venues_list.append(venue)
+
+        # match result is given by find_new_entries_by_activity in TestingBackend class in acceslibre connector
+        offerers_api.acceslibre_matching(batch_size=1000, apply=True)
+
+        assert (
+            venue.external_accessibility_url == "https://acceslibre.beta.gouv.fr/app/activite/mon-lieu-chez-acceslibre/"
+        )
+        assert venue.external_accessibility_id == "mon-lieu-chez-acceslibre"
+
+
+class MatchAcceslibreTest:
+    @patch("pcapi.connectors.acceslibre.get_id_at_accessibility_provider")
+    def test_match_acceslibre(self, mock_get_id_at_accessibility_provider):
+        venue = offerers_factories.VenueFactory(name="Une librairie de test")
+        slug = "mon-slug"
+        mock_get_id_at_accessibility_provider.side_effect = [
+            acceslibre_connector.AcceslibreInfos(slug=slug, url=f"https://acceslibre.beta.gouv.fr/app/erps/{slug}/")
+        ]
+        offerers_api.match_acceslibre(venue)
+        assert venue.accessibilityProvider.externalAccessibilityId == slug
+        assert (
+            venue.accessibilityProvider.externalAccessibilityUrl == f"https://acceslibre.beta.gouv.fr/app/erps/{slug}/"
+        )
+        assert venue.action_history[0].extraData == {
+            "modified_info": {
+                "accessibilityProvider.externalAccessibilityId": {
+                    "new_info": slug,
+                    "old_info": None,
+                },
+                "accessibilityProvider.externalAccessibilityUrl": {
+                    "new_info": f"https://acceslibre.beta.gouv.fr/app/erps/{slug}/",
+                    "old_info": None,
+                },
+            }
+        }
+
+
+class GetOffererConfidenceLevelTest:
+    def test_no_rule(self):
+        venue = offerers_factories.VenueFactory()
+        offerers_factories.ManualReviewOffererConfidenceRuleFactory()
+        offerers_factories.WhitelistedVenueConfidenceRuleFactory()
+
+        confidence_level = offerers_api.get_offer_confidence_level(venue)
+
+        assert confidence_level is None
+
+    def test_offerer_manual_review(self):
+        venue = offerers_factories.VenueFactory()
+        offerers_factories.ManualReviewOffererConfidenceRuleFactory(offerer=venue.managingOfferer)
+        offerers_factories.WhitelistedVenueConfidenceRuleFactory()
+
+        confidence_level = offerers_api.get_offer_confidence_level(venue)
+
+        assert confidence_level == offerers_models.OffererConfidenceLevel.MANUAL_REVIEW
+
+    def test_offerer_whitelist(self):
+        venue = offerers_factories.VenueFactory()
+        offerers_factories.WhitelistedOffererConfidenceRuleFactory(offerer=venue.managingOfferer)
+        offerers_factories.ManualReviewVenueConfidenceRuleFactory()
+
+        confidence_level = offerers_api.get_offer_confidence_level(venue)
+
+        assert confidence_level == offerers_models.OffererConfidenceLevel.WHITELIST
+
+    def test_venue_manual_review(self):
+        venue = offerers_factories.VenueFactory()
+        offerers_factories.ManualReviewVenueConfidenceRuleFactory(venue=venue)
+        offerers_factories.WhitelistedOffererConfidenceRuleFactory()
+
+        confidence_level = offerers_api.get_offer_confidence_level(venue)
+
+        assert confidence_level == offerers_models.OffererConfidenceLevel.MANUAL_REVIEW
+
+    def test_venue_whitelist(self):
+        venue = offerers_factories.VenueFactory()
+        offerers_factories.WhitelistedVenueConfidenceRuleFactory(venue=venue)
+        offerers_factories.ManualReviewOffererConfidenceRuleFactory()
+
+        confidence_level = offerers_api.get_offer_confidence_level(venue)
+
+        assert confidence_level == offerers_models.OffererConfidenceLevel.WHITELIST
+
+    def test_conflict(self, caplog):
+        venue = offerers_factories.VenueFactory()
+        offerers_factories.WhitelistedOffererConfidenceRuleFactory(offerer=venue.managingOfferer)
+        offerers_factories.ManualReviewVenueConfidenceRuleFactory(venue=venue)
+
+        with caplog.at_level(logging.ERROR):
+            confidence_level = offerers_api.get_offer_confidence_level(venue)
+
+        assert confidence_level == offerers_models.OffererConfidenceLevel.WHITELIST  # offerer first
+
+        assert caplog.records[0].message == "Incompatible offerer rule detected"
+        assert caplog.records[0].extra == {"offerer_id": venue.managingOffererId, "venue_id": venue.id}
+
+
+class OffererAddressTest:
+    @pytest.mark.parametrize("existant_address", [True, False])
+    def test_get_or_create_address(self, existant_address):
+        if existant_address:
+            old_address = geography_factories.AddressFactory(
+                street="1 rue de la paix",
+                city="Paris",
+                postalCode="75103",
+                latitude=40.8566,
+                longitude=1.3522,
+                banId="75103_7560_00001",
+            )
+        location_data = offerers_api.LocationData(
+            street="1 rue de la paix",
+            city="Paris",
+            postal_code="75103",
+            latitude=40.8566,
+            longitude=1.3522,
+            insee_code="75103",
+            ban_id="75103_7560_00001",
+        )
+        address = offerers_api.get_or_create_address(location_data=location_data, is_manual_edition=False)
+        assert len(db.session.query(geography_models.Address).all()) == 1
+        if existant_address:
+            assert address == old_address
+        else:
+            assert address.street == "1 rue de la paix"
+            assert address.city == "Paris"
+            assert address.postalCode == "75103"
+            assert address.latitude == decimal.Decimal("40.85660")
+            assert address.longitude == decimal.Decimal("1.35220")
+
+    def test_create_offerer_address(self):
+        offerer = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        address = geography_factories.AddressFactory()
+        oa = offerers_factories.OfferLocationFactory(offerer=offerer, venue=venue, address=address, label="label")
+        assert oa.offerer == offerer
+        assert oa.id
+        assert oa.label == "label"
+        assert oa.venue == venue
+        assert oa.address == address
+
+    @pytest.mark.parametrize("label", ["label", None])
+    def test_should_not_create_multiple_oa_with_same_label(self, label):
+        venue = offerers_factories.VenueFactory()
+        address = geography_factories.AddressFactory()
+        offerers_factories.OfferLocationFactory(venue=venue, address=address, label=label)
+        with pytest.raises(sa.exc.IntegrityError):
+            offerers_factories.OfferLocationFactory(venue=venue, address=address, label=label)
+
+
+class GetOrCreateOfferLocationTest:
+    LABEL = "Salle Jean Vilar"
+
+    def create_offer_location(self, venue, **overrides):
+        defaults = {
+            "offerer": venue.managingOfferer,
+            "venue": venue,
+            "address": venue.offererAddress.address,
+            "label": self.LABEL,
+        }
+        return offerers_factories.OfferLocationFactory(**{**defaults, **overrides})
+
+    def test_should_reuse_the_location_matching_the_venue_the_address_and_the_label(self):
+        venue = offerers_factories.VenueFactory()
+        offer_location = self.create_offer_location(venue)
+
+        offerer_address = offerers_api.get_or_create_offer_location(
+            offerer_id=venue.managingOffererId,
+            venue_id=venue.id,
+            address_id=offer_location.addressId,
+            label=self.LABEL,
+        )
+
+        assert offerer_address == offer_location
+
+    def test_should_reuse_the_location_that_has_no_label(self):
+        venue = offerers_factories.VenueFactory()
+        offer_location = self.create_offer_location(venue, label=None)
+
+        offerer_address = offerers_api.get_or_create_offer_location(
+            offerer_id=venue.managingOffererId,
+            venue_id=venue.id,
+            address_id=offer_location.addressId,
+            label=None,
+        )
+
+        assert offerer_address == offer_location
+
+    def test_should_never_reuse_the_location_of_the_venue_itself(self):
+        venue = offerers_factories.VenueFactory()
+        assert venue.offererAddress.label is None
+
+        offerer_address = offerers_api.get_or_create_offer_location(
+            offerer_id=venue.managingOffererId,
+            venue_id=venue.id,
+            address_id=venue.offererAddress.addressId,
+            label=None,
+        )
+
+        assert offerer_address != venue.offererAddress
+        assert offerer_address.type == offerers_models.LocationType.OFFER_LOCATION
+
+    @pytest.mark.parametrize("differing_field", ["label", "address", "venue"])
+    def test_should_create_a_location_when_one_field_differs(self, differing_field):
+        venue = offerers_factories.VenueFactory()
+        offer_location = self.create_offer_location(venue)
+        kwargs = {
+            "offerer_id": venue.managingOffererId,
+            "venue_id": venue.id,
+            "address_id": offer_location.addressId,
+            "label": self.LABEL,
+        }
+
+        if differing_field == "label":
+            kwargs["label"] = "Petite salle"
+            expected_attr, expected_value = "label", "Petite salle"
+        elif differing_field == "address":
+            other_address = geography_factories.AddressFactory()
+            kwargs["address_id"] = other_address.id
+            expected_attr, expected_value = "addressId", other_address.id
+        else:
+            other_venue = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+            kwargs["venue_id"] = other_venue.id
+            expected_attr, expected_value = "venueId", other_venue.id
+
+        offerer_address = offerers_api.get_or_create_offer_location(**kwargs)
+
+        assert offerer_address != offer_location
+        assert getattr(offerer_address, expected_attr) == expected_value
+
+    def test_should_create_the_location_with_the_requested_attributes(self):
+        venue = offerers_factories.VenueFactory()
+        address = geography_factories.AddressFactory()
+
+        offerer_address = offerers_api.get_or_create_offer_location(
+            offerer_id=venue.managingOffererId, venue_id=venue.id, address_id=address.id, label=self.LABEL
+        )
+
+        assert offerer_address.id
+        assert offerer_address.offererId == venue.managingOffererId
+        assert offerer_address.venueId == venue.id
+        assert offerer_address.addressId == address.id
+        assert offerer_address.label == self.LABEL
+        assert offerer_address.type == offerers_models.LocationType.OFFER_LOCATION
+
+
+class CreateOffererAddressFromAddressApiTest:
+    def build_address_body(self, **overrides):
+        defaults = {
+            "street": "1 rue de la Paix",
+            "city": "Paris",
+            "postalCode": "75002",
+            "inseeCode": "75102",
+            "banId": "75102_7560_00001",
+            "latitude": "48.8691",
+            "longitude": "2.3316",
+        }
+        return offerers_schemas.LocationModel(**{**defaults, **overrides})
+
+    @patch("pcapi.core.offerers.api.get_or_create_address")
+    def test_should_build_the_location_data_from_the_body(self, get_or_create_address):
+        address = offerers_api.create_offerer_address_from_address_api(self.build_address_body())
+
+        get_or_create_address.assert_called_once_with(
+            {
+                "city": "Paris",
+                "postal_code": "75002",
+                # the body carries them as strings, the address stores them as floats
+                "latitude": 48.8691,
+                "longitude": 2.3316,
+                "street": "1 rue de la Paix",
+                "insee_code": "75102",
+                "ban_id": "75102_7560_00001",
+            },
+            is_manual_edition=False,
+        )
+        assert address == get_or_create_address.return_value
+
+    @patch("pcapi.connectors.api_adresse.get_municipality_centroid")
+    @patch("pcapi.core.offerers.api.get_or_create_address")
+    def test_should_look_the_insee_code_up_when_the_address_is_manually_edited(
+        self, get_or_create_address, get_municipality_centroid
+    ):
+        get_municipality_centroid.return_value = Mock(citycode="75102")
+
+        offerers_api.create_offerer_address_from_address_api(
+            self.build_address_body(isManualEdition=True, inseeCode=None)
+        )
+
+        get_municipality_centroid.assert_called_once_with(city="Paris", postcode="75002")
+        assert get_or_create_address.call_args.args[0]["insee_code"] == "75102"
+
+    @patch("pcapi.core.offerers.api.get_or_create_address")
+    def test_should_drop_the_ban_id_when_the_address_is_manually_edited(self, get_or_create_address):
+        offerers_api.create_offerer_address_from_address_api(self.build_address_body(isManualEdition=True))
+
+        assert get_or_create_address.call_args.args[0]["ban_id"] is None
+        assert get_or_create_address.call_args.kwargs["is_manual_edition"] is True
+
+    @patch("pcapi.connectors.api_adresse.get_municipality_centroid")
+    @patch("pcapi.core.offerers.api.get_or_create_address")
+    def test_should_leave_the_insee_code_empty_when_the_municipality_cannot_be_found(
+        self, get_or_create_address, get_municipality_centroid
+    ):
+        get_municipality_centroid.side_effect = api_adresse.NoResultException()
+
+        offerers_api.create_offerer_address_from_address_api(self.build_address_body(isManualEdition=True))
+
+        assert get_or_create_address.call_args.args[0]["insee_code"] is None
+
+
+class GetOfferLocationFromAddressTest:
+    def build_address_body(self, **overrides):
+        defaults = {
+            "street": "1 rue de la Paix",
+            "city": "Paris",
+            "postalCode": "75002",
+            "latitude": 48.8691,
+            "longitude": 2.3316,
+            "label": "Salle Jean Vilar",
+        }
+
+        return offerers_schemas.LocationModel(**{**defaults, **overrides})
+
+    @patch("pcapi.core.offerers.api.create_offerer_address_from_address_api")
+    def test_should_create_the_address_from_the_body(self, create_offerer_address_from_address_api):
+        venue = offerers_factories.VenueFactory()
+        address_body = self.build_address_body()
+        create_offerer_address_from_address_api.return_value = geography_factories.AddressFactory()
+
+        offerers_api.get_offer_location_from_address(venue.managingOffererId, address_body, venue_id=venue.id)
+
+        create_offerer_address_from_address_api.assert_called_once_with(address_body)
+
+    @patch("pcapi.core.offerers.api.get_or_create_offer_location")
+    @patch("pcapi.core.offerers.api.create_offerer_address_from_address_api")
+    def test_should_create_an_offer_location_for_the_created_address(
+        self, create_offerer_address_from_address_api, get_or_create_offer_location
+    ):
+        venue = offerers_factories.VenueFactory()
+        address = geography_factories.AddressFactory()
+        create_offerer_address_from_address_api.return_value = address
+
+        offerer_address = offerers_api.get_offer_location_from_address(
+            venue.managingOffererId, self.build_address_body(), venue_id=venue.id
+        )
+
+        get_or_create_offer_location.assert_called_once_with(
+            offerer_id=venue.managingOffererId,
+            venue_id=venue.id,
+            address_id=address.id,
+            label="Salle Jean Vilar",
+        )
+        assert offerer_address == get_or_create_offer_location.return_value
+
+    @patch("pcapi.core.offerers.api.get_or_create_offer_location")
+    def test_should_turn_an_empty_label_into_no_label(self, get_or_create_offer_location):
+        venue = offerers_factories.VenueFactory()
+        address_body = self.build_address_body(label="")
+
+        offerers_api.get_offer_location_from_address(venue.managingOffererId, address_body, venue_id=venue.id)
+
+        assert get_or_create_offer_location.call_args.kwargs["label"] is None
+
+    def test_should_refuse_a_missing_offerer(self):
+        venue = offerers_factories.VenueFactory()
+
+        with pytest.raises(AssertionError):
+            offerers_api.get_offer_location_from_address(0, self.build_address_body(), venue_id=venue.id)
+
+
+class SendReminderEmailToIndividualOfferersTest:
+    @patch("pcapi.core.mails.transactional.send_offerer_individual_subscription_reminder")
+    def test_send_reminder_email_to_individual_offerers(self, mocked_transactional_mail):
+        offerers_factories.IndividualOffererSubscriptionFactory(
+            offerer__validationStatus=ValidationStatus.PENDING, isEmailSent=False
+        )
+        offerers_factories.IndividualOffererSubscriptionFactory(
+            offerer__validationStatus=ValidationStatus.PENDING,
+            dateReminderEmailSent=datetime.date.today() - datetime.timedelta(days=1),
+        )
+        offerers_factories.IndividualOffererSubscriptionFactory(
+            offerer__validationStatus=ValidationStatus.PENDING,
+            isEmailSent=True,
+            dateEmailSent=datetime.date.today() - datetime.timedelta(days=15),
+            isCriminalRecordReceived=False,
+        )
+        offerers_factories.IndividualOffererSubscriptionFactory(offerer__validationStatus=ValidationStatus.VALIDATED)
+        offerers_factories.IndividualOffererSubscriptionFactory(
+            offerer__validationStatus=ValidationStatus.PENDING,
+            isCriminalRecordReceived=True,
+            isCertificateReceived=True,
+            isExperienceReceived=True,
+        )
+        # This one should receive an email
+        offerer = offerers_factories.IndividualOffererSubscriptionFactory(
+            offerer__validationStatus=ValidationStatus.PENDING,
+            isEmailSent=True,
+            dateEmailSent=datetime.date.today() - datetime.timedelta(days=31),
+            isCriminalRecordReceived=False,
+        ).offerer
+        offerers_factories.UserOffererFactory(offerer=offerer)
+
+        # 1 query to get all data
+        # 1 query to update dateReminderEmailSent
+        with assert_num_queries(2):
+            offerers_api.send_reminder_email_to_individual_offerers()
+
+        assert offerer.individualSubscription.isReminderEmailSent is True
+        assert offerer.individualSubscription.dateReminderEmailSent == datetime.date.today()
+        mocked_transactional_mail.assert_called_once_with(offerer.UserOfferers[0].user.email)
+
+
+class CleanUnusedOffererAddressTest:
+    def test_clean_unused_offerer_address(self, caplog):
+        venue = offerers_factories.VenueFactory()
+        oa1 = venue.offererAddress
+        oa2, oa3, oa4, _ = offerers_factories.OfferLocationFactory.create_batch(
+            4, offerer=venue.managingOfferer, venue=venue
+        )
+        unused_oa = offerers_factories.OfferLocationFactory(offerer=venue.managingOfferer, venue=venue)
+        offers_factories.OfferFactory(venue=venue, offererAddress=oa2)
+        educational_factories.CollectiveOfferFactory(
+            venue=venue, locationType=educational_models.CollectiveLocationType.ADDRESS, offererAddress=oa3
+        )
+        educational_factories.CollectiveOfferTemplateFactory(
+            venue=venue, locationType=educational_models.CollectiveLocationType.ADDRESS, offererAddress=oa4
+        )
+
+        with caplog.at_level(logging.INFO):
+            offerers_api.clean_unused_offerer_address()
+
+        remaining_ids = db.session.query(sa.func.array_agg(offerers_models.OffererAddress.id)).scalar()
+        assert set(remaining_ids) == {oa1.id, oa2.id, oa3.id, oa4.id}
+        assert unused_oa not in remaining_ids
+
+        assert caplog.records[0].message == "2 unused rows to delete in offerer_address"
+
+    def test_nothing_to_delete(self, caplog):
+        oa = offerers_factories.VenueFactory().offererAddress
+
+        with caplog.at_level(logging.INFO):
+            offerers_api.clean_unused_offerer_address()
+
+        remaining_ids = db.session.query(sa.func.array_agg(offerers_models.OffererAddress.id)).scalar()
+        assert remaining_ids == [oa.id]
+
+        assert caplog.records[0].message == "0 unused rows to delete in offerer_address"
+
+
+class GetStatsByVenueTest:
+    def test_get_offers_stats_by_venue(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+
+        # 1 bookable public offers
+        offer = offers_factories.OfferFactory(venue=venue, validation=OfferValidationStatus.APPROVED)
+        offers_factories.StockFactory.create_batch(3, offer=offer)
+
+        # 1 published collective offers + 1 published collective offer template = 2 published collective offers
+        educational_factories.create_collective_offer_by_status(
+            educational_models.CollectiveOfferDisplayedStatus.PUBLISHED, venue=venue
+        )
+        educational_factories.create_collective_offer_template_by_status(
+            educational_models.CollectiveOfferDisplayedStatus.PUBLISHED, venue=venue
+        )
+
+        # 1 pending public offers
+        offers_factories.OfferFactory.create_batch(3, venue=venue, validation=OfferValidationStatus.PENDING)
+
+        # 2 pending collective offers + 2 pending collective offer template = 4 pending collective offers
+        # 1 of each rejected to ensure they are not counted
+        educational_factories.create_collective_offer_by_status(
+            educational_models.CollectiveOfferDisplayedStatus.UNDER_REVIEW, venue=venue
+        )
+        educational_factories.create_collective_offer_by_status(
+            educational_models.CollectiveOfferDisplayedStatus.UNDER_REVIEW, venue=venue
+        )
+        educational_factories.create_collective_offer_by_status(
+            educational_models.CollectiveOfferDisplayedStatus.REJECTED, venue=venue
+        )
+        educational_factories.create_collective_offer_template_by_status(
+            educational_models.CollectiveOfferDisplayedStatus.UNDER_REVIEW, venue=venue
+        )
+        educational_factories.create_collective_offer_template_by_status(
+            educational_models.CollectiveOfferDisplayedStatus.UNDER_REVIEW, venue=venue
+        )
+        educational_factories.create_collective_offer_template_by_status(
+            educational_models.CollectiveOfferDisplayedStatus.REJECTED, venue=venue
+        )
+
+        stats = offerers_api.get_offers_stats_by_venue(venue.id)
+
+        assert stats.pending_educational_offers == 4
+        assert stats.published_educational_offers == 2
+        assert stats.pending_public_offers == 3
+        assert stats.published_public_offers == 1
+
+    def test_get_offers_stats_by_venue_no_offers(self):
+        venue = offerers_factories.VenueFactory()
+
+        stats = offerers_api.get_offers_stats_by_venue(venue.id)
+
+        assert stats.pending_educational_offers == 0
+        assert stats.published_educational_offers == 0
+        assert stats.pending_public_offers == 0
+        assert stats.published_public_offers == 0
+
+    def test_get_offers_stats_with_no_public_offers(self):
+        venue = offerers_factories.VenueFactory()
+        educational_factories.PublishedCollectiveOfferFactory.create_batch(2, venue=venue)
+        educational_factories.UnderReviewCollectiveOfferFactory.create_batch(2, venue=venue)
+
+        stats = offerers_api.get_offers_stats_by_venue(venue.id)
+
+        assert stats.pending_educational_offers == 2
+        assert stats.published_educational_offers == 2
+        assert stats.pending_public_offers == 0
+        assert stats.published_public_offers == 0
+
+    def test_get_offers_stats_with_no_collective_offers(self):
+        venue = offerers_factories.VenueFactory()
+        offers_factories.StockFactory.create_batch(
+            2, offer__venue=venue, offer__validation=OfferValidationStatus.APPROVED
+        )
+        offers_factories.OfferFactory.create_batch(3, venue=venue, validation=OfferValidationStatus.PENDING)
+
+        stats = offerers_api.get_offers_stats_by_venue(venue.id)
+
+        assert stats.pending_educational_offers == 0
+        assert stats.published_educational_offers == 0
+        assert stats.pending_public_offers == 3
+        assert stats.published_public_offers == 2
+
+
+class GetUserPendingAndValidatedOffererTest:
+    def test_user_with_no_offerer(self):
+        user = users_factories.UserFactory()
+
+        res = offerers_api.get_user_pending_and_validated_offerers(user)
+        assert res == offerers_api.PendingAndValidatedOfferers(pending=[], validated=[])
+
+    def test_user_with_only_validated_offerers(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        user = user_offerer.user
+
+        res = offerers_api.get_user_pending_and_validated_offerers(user)
+        assert res == offerers_api.PendingAndValidatedOfferers(pending=[], validated=[user_offerer.offerer])
+
+    def test_user_with_only_pending_offerers(self):
+        user_offerer = offerers_factories.PendingUserOffererFactory()
+        user = user_offerer.user
+
+        res = offerers_api.get_user_pending_and_validated_offerers(user)
+        assert res == offerers_api.PendingAndValidatedOfferers(pending=[user_offerer.offerer], validated=[])
+
+    def test_user_with_offerers(self):
+        user_offerer = offerers_factories.PendingUserOffererFactory()
+        user = user_offerer.user
+        pending_offerer = user_offerer.offerer
+        validated_offerer = offerers_factories.UserOffererFactory(user=user).offerer
+
+        res = offerers_api.get_user_pending_and_validated_offerers(user)
+        assert res == offerers_api.PendingAndValidatedOfferers(pending=[pending_offerer], validated=[validated_offerer])
+
+
+class CloseVenueTest:
+    """Test the overall behaviour
+
+    Each step has its own function with its own detailed unit tests.
+    No need to test every details twice.
+    """
+
+    def test_open_venue_becomes_closed(self):
+        # venue bank account link should not be changed
+        venue = offerers_factories.VenueBankAccountLinkFactory(venue__state=None).venue
+        author = users_factories.BaseUserFactory()
+
+        with atomic():
+            offerers_api.close_venue(venue, author)
+
+        db.session.refresh(venue)
+
+        assert venue.current_bank_account_link
+        assert venue.state == offerers_models.VenueState.CLOSED
+
+    def test_close_venue_adds_immediate_close_action_with_comment(self):
+        venue = offerers_factories.VenueFactory()
+        author = users_factories.BaseUserFactory()
+        comment = "hey"
+
+        with atomic():
+            offerers_api.close_venue(venue, author, comment=comment)
+
+        venue_closed_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter_by(venueId=venue.id, actionType=history_models.ActionType.VENUE_CLOSED)
+            .one()
+        )
+        assert venue_closed_action.comment == comment
+
+    def test_closed_venue_stays_closed_and_nothing_is_done(self):
+        venue = offerers_factories.VenueFactory(state=offerers_models.VenueState.CLOSED)
+        author = users_factories.BaseUserFactory()
+
+        with atomic():
+            offerers_api.close_venue(venue, author)
+
+        db.session.refresh(venue)
+        assert venue.state == offerers_models.VenueState.CLOSED
+
+    def test_close_venue_with_external_ticket(self, requests_mock):
+        venue = offerers_factories.VenueFactory()
+
+        requests_mock.get(
+            "https://cgr-cinema-0.example.com/web_service?wsdl", text=soap_definitions.WEB_SERVICE_DEFINITION
+        )
+        requests_mock.post(
+            "https://cgr-cinema-0.example.com/web_service",
+            text=cgr_fixtures.cgr_annulation_response_template(
+                message_error="L'annulation n'a pas pu être prise en compte : Code barre non reconnu / annulation impossible",
+            ),
+        )
+        cgr_provider = providers_repository.get_provider_by_local_class("CGRStocks")
+        venue_provider = providers_factories.VenueProviderFactory(venue=venue, provider=cgr_provider)
+        cinema_provider_pivot = providers_factories.CGRCinemaProviderPivotFactory(
+            venue=venue, idAtProvider=venue_provider.venueIdAtOfferProvider
+        )
+        providers_factories.CGRCinemaDetailsFactory(
+            cinemaProviderPivot=cinema_provider_pivot, cinemaUrl="https://cgr-cinema-0.example.com/web_service"
+        )
+
+        booking = bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                offer__venue=venue,
+                offer__subcategoryId=subcategories.SEANCE_CINE.id,
+                offer__lastProvider=cgr_provider,
+                offer__idAtProvider="123%12354114%CGR",
+                lastProvider=cgr_provider,
+                idAtProviders="123%12354114%CGR#111",
+                beginningDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=5),
+            )
+        )
+        external_bookings_factories.ExternalBookingFactory(booking=booking)
+
+        offerers_api.close_venue(venue, author=users_factories.AdminFactory())
+
+        assert venue.state == offerers_models.VenueState.CLOSED
+        assert booking.status == bookings_models.BookingStatus.CANCELLED
+        assert booking.cancellationReason == bookings_models.BookingCancellationReasons.VENUE_CLOSED
+        assert sorted([m["template"] for m in mails_testing.outbox], key=lambda m: m["id_prod"]) == sorted(
+            [
+                asdict(TransactionalEmail.BOOKING_CANCELLATION_BY_PRO_TO_BENEFICIARY.value),
+                asdict(TransactionalEmail.VENUE_CLOSED_CONFIRMATION.value),
+            ],
+            key=lambda m: m["id_prod"],
+        )
+
+    def test_close_offerer_with_inactive_provider(self, requests_mock):
+        venue = offerers_factories.VenueFactory()
+
+        cgr_provider = providers_repository.get_provider_by_local_class("CGRStocks")
+        venue_provider = providers_factories.VenueProviderFactory(venue=venue, provider=cgr_provider, isActive=False)
+        cinema_provider_pivot = providers_factories.CGRCinemaProviderPivotFactory(
+            venue=venue, idAtProvider=venue_provider.venueIdAtOfferProvider
+        )
+        providers_factories.CGRCinemaDetailsFactory(
+            cinemaProviderPivot=cinema_provider_pivot, cinemaUrl="https://cgr-cinema-0.example.com/web_service"
+        )
+
+        booking = bookings_factories.BookingFactory(
+            stock=offers_factories.EventStockFactory(
+                offer__venue=venue,
+                offer__subcategoryId=subcategories.SEANCE_CINE.id,
+                offer__lastProvider=cgr_provider,
+                offer__idAtProvider="123%12354114%CGR",
+                lastProvider=cgr_provider,
+                idAtProviders="123%12354114%CGR#111",
+                beginningDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=5),
+            )
+        )
+        external_bookings_factories.ExternalBookingFactory(booking=booking)
+
+        offerers_api.close_venue(venue, author=users_factories.AdminFactory())
+
+        assert venue.state == offerers_models.VenueState.CLOSED
+        assert booking.status == bookings_models.BookingStatus.CANCELLED
+        assert booking.cancellationReason == bookings_models.BookingCancellationReasons.VENUE_CLOSED
+
+        assert sorted([m["template"] for m in mails_testing.outbox], key=lambda m: m["id_prod"]) == sorted(
+            [
+                asdict(TransactionalEmail.BOOKING_CANCELLATION_BY_PRO_TO_BENEFICIARY.value),
+                asdict(TransactionalEmail.VENUE_CLOSED_CONFIRMATION.value),
+            ],
+            key=lambda m: m["id_prod"],
+        )
+
+    @patch("pcapi.core.mails.transactional.send_venue_closure_request_email")
+    def test_pricing_point_venue(self, mock_send_venue_closure_request_email):
+        venue = offerers_factories.VenueBankAccountLinkFactory(venue__state=None).venue
+        offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer, pricing_point=venue)
+        author = users_factories.BaseUserFactory()
+
+        assert venue.is_pricing_point
+
+        with atomic():
+            offerers_api.close_venue(venue, author)
+
+        db.session.refresh(venue)
+        tag = criteria_api.get_closure_request_tag()
+
+        assert venue.state is offerers_models.VenueState.CLOSED
+        assert venue.current_bank_account_link
+        mock_send_venue_closure_request_email.assert_called()
+        assert venue.criteria == [tag]
+
+    @pytest.mark.features(WIP_CLOSE_VENUE=True)
+    @patch("pcapi.core.search.async_index_venue_ids")
+    def test_close_venue_reindexes_venue(self, reindex_venue):
+        user_offerer = offerers_factories.UserOffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=user_offerer.offerer)
+
+        offerers_api.close_venue(venue, author=user_offerer.user)
+
+        assert venue.state == offerers_models.VenueState.CLOSED
+        reindex_venue.assert_called_once_with([venue.id], reason=IndexationReason.VENUE_CLOSED)
+
+
+class ReopenVenueTest:
+    """Test the overall behaviour
+
+    Each step has its own function with its own detailed unit tests.
+    No need to test every details twice.
+    """
+
+    @patch("pcapi.core.mails.transactional.send_venue_reopened_email")
+    def test_closed_venue_becomes_reopened(self, mock_send_venue_reopened_email):
+        venue = offerers_factories.VenueFactory(state=offerers_models.VenueState.CLOSED)
+        author = users_factories.BaseUserFactory()
+        history_factories.ActionHistoryFactory(
+            actionType=history_models.ActionType.VENUE_CLOSED,
+            authorUser=author,
+            venue=venue,
+        )
+
+        with atomic():
+            offerers_api.reopen_venue(venue, author)
+
+        db.session.refresh(venue)
+
+        assert venue.state is None
+        mock_send_venue_reopened_email.assert_called()
+
+    def test_reopen_venue_adds_immediate_reopen_action_with_comment(self):
+        venue = offerers_factories.VenueFactory(state=offerers_models.VenueState.CLOSED)
+        author = users_factories.BaseUserFactory()
+        comment = "hey"
+
+        with atomic():
+            offerers_api.reopen_venue(venue, author, comment=comment)
+
+        venue_reopened_action = (
+            db.session.query(history_models.ActionHistory)
+            .filter_by(venueId=venue.id, actionType=history_models.ActionType.VENUE_REOPENED)
+            .one()
+        )
+        assert venue_reopened_action.comment == comment
+
+    def test_open_venue_stays_open_and_nothing_is_done(self):
+        venue = offerers_factories.VenueFactory(state=None)
+        author = users_factories.BaseUserFactory()
+
+        with atomic():
+            offerers_api.reopen_venue(venue, author)
+
+        db.session.refresh(venue)
+        assert venue.state is None
+
+    def test_closed_venue_with_closed_offerer_stays_closed_and_nothing_is_done(self):
+        offerer = offerers_factories.OffererFactory(validationStatus=ValidationStatus.CLOSED)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer, state=offerers_models.VenueState.CLOSED)
+        author = users_factories.BaseUserFactory()
+
+        with atomic():
+            offerers_api.reopen_venue(venue, author)
+
+        db.session.refresh(venue)
+        assert venue.state == offerers_models.VenueState.CLOSED
+
+    @pytest.mark.features(WIP_CLOSE_VENUE=True)
+    @patch("pcapi.core.search.async_index_venue_ids")
+    def test_reopen_venue_reindexes_venue(self, reindex_venue):
+        user_offerer = offerers_factories.UserOffererFactory()
+        venue = offerers_factories.VenueFactory(
+            managingOfferer=user_offerer.offerer, state=offerers_models.VenueState.CLOSED
+        )
+
+        offerers_api.reopen_venue(venue, author=user_offerer.user)
+
+        assert venue.state is None
+        reindex_venue.assert_called_once_with([venue.id], reason=IndexationReason.VENUE_REOPENED)
+
+
+class NullifyVenueEmailsTest:
+    def test_contact_email_and_other_contact_data_are_nullified(self):
+        booking_email = "booking.email@test.com"
+        old_contact_email = "hey@test.com"
+        old_phone_number = "+33112233445"
+        old_website = "https://test.com"
+        old_social_medias = {"instagram": "https://instagram.com/@test.com"}
+
+        venue = offerers_factories.VenueFactory(
+            bookingEmail=booking_email,
+            contact__email=old_contact_email,
+            contact__phone_number=old_phone_number,
+            contact__website=old_website,
+            contact__social_medias=old_social_medias,
+        )
+        user = users_factories.BaseUserFactory()
+
+        with atomic():
+            offerers_api.nullify_venue_emails(venue, user)
+
+        db.session.refresh(venue)
+
+        # check 1. contact email has been nullified
+        assert not venue.contact
+        # but booking email should not
+        assert venue.bookingEmail == booking_email
+
+        # check 2. old email have been saved
+        assert len(venue.action_history) == 1
+
+        modified_info = [item.extraData["modified_info"] for item in venue.action_history]
+        assert modified_info == [
+            {
+                "contact.email": {"new_info": None, "old_info": old_contact_email},
+                "contact.phone_number": {"new_info": None, "old_info": old_phone_number},
+                "contact.website": {"new_info": None, "old_info": old_website},
+                "contact.social_medias": {"new_info": None, "old_info": old_social_medias},
+            },
+        ]
+
+    def test_nothings_changes_when_venue_already_has_no_emails_set(self):
+        booking_email = "booking.emai@test.com"
+        venue = offerers_factories.VenueFactory(bookingEmail=booking_email, contact=None)
+        user = users_factories.BaseUserFactory()
+
+        with atomic():
+            offerers_api.nullify_venue_emails(venue, user)
+
+        db.session.refresh(venue)
+
+        # booking email should never change
+        assert venue.bookingEmail == booking_email
+
+        assert not venue.contact
+
+        # no update to track
+        assert not venue.action_history
+
+
+class VenueHasOngoingBookingsTest:
+    def test_venue_without_any_bookings_is_false(self):
+        venue = offerers_factories.VenueFactory()
+        assert not offerers_api.venue_has_ongoing_bookings(venue)
+
+    def test_venue_with_only_cancelled_and_reimbursed_bookings_is_false(self):
+        venue = offerers_factories.VenueFactory()
+
+        bookings_factories.CancelledBookingFactory(stock__offer__venue=venue)
+        bookings_factories.ReimbursedBookingFactory(stock__offer__venue=venue)
+
+        assert not offerers_api.venue_has_ongoing_bookings(venue)
+
+    def test_venue_with_only_ongoing_bookings_is_true(self):
+        venue = offerers_factories.VenueFactory()
+
+        bookings_factories.UsedBookingFactory(stock__offer__venue=venue)
+        bookings_factories.PendingReimbursementBookingFactory(stock__offer__venue=venue)
+
+        assert offerers_api.venue_has_ongoing_bookings(venue)
+
+    def test_venue_with_mixed_ongoing_and_not_bookings_is_true(self):
+        venue = offerers_factories.VenueFactory()
+
+        bookings_factories.UsedBookingFactory(stock__offer__venue=venue)
+        bookings_factories.PendingReimbursementBookingFactory(stock__offer__venue=venue)
+
+        bookings_factories.CancelledBookingFactory(stock__offer__venue=venue)
+        bookings_factories.ReimbursedBookingFactory(stock__offer__venue=venue)
+
+        assert offerers_api.venue_has_ongoing_bookings(venue)
+
+
+class CancelIndividualBookingsOnVenueClosureTest:
+    @patch("pcapi.core.mails.transactional.send_booking_cancellation_by_pro_to_beneficiary_email")
+    @pytest.mark.parametrize(
+        "offer_factory",
+        [
+            pytest.param(offers_factories.ThingOfferFactory, id="thing_offer"),
+            pytest.param(offers_factories.EventOfferFactory, id="event_offer"),
+        ],
+    )
+    def test_venue_has_bookings_to_cancel(self, mock_send_email, offer_factory):
+        venue = offerers_factories.VenueFactory()
+        author = users_factories.UserFactory()
+
+        offer = offer_factory(venue=venue)
+        bookings = bookings_factories.BookingFactory.create_batch(3, stock__offer=offer)
+
+        with atomic():
+            offerers_api.cancel_individual_bookings_on_venue_closure(venue.id, author.id)
+
+        db.session.refresh(venue)
+        assert all(booking.isCancelled for booking in venue.bookings)
+
+        mock_send_email.assert_has_calls([mock_call(booking) for booking in bookings], any_order=True)
+
+    @patch("pcapi.core.mails.transactional.send_booking_cancellation_by_pro_to_beneficiary_email")
+    def test_uncancellable_bookings_are_filtered_and_others_are_being_cancelled(self, mock_send_email):
+        venue = offerers_factories.VenueFactory()
+        author = users_factories.UserFactory()
+
+        booking = bookings_factories.BookingFactory(stock__offer__venue=venue)
+        bookings_factories.CancelledBookingFactory(stock__offer__venue=venue)
+
+        with atomic():
+            offerers_api.cancel_individual_bookings_on_venue_closure(venue.id, author.id)
+
+        db.session.refresh(venue)
+        assert all(booking.isCancelled for booking in venue.bookings)
+
+        mock_send_email.assert_called_once_with(booking)
+
+    @patch("pcapi.core.mails.transactional.send_booking_cancellation_by_pro_to_beneficiary_email")
+    def test_failed_cancellation_is_logged(self, mock_send_email, caplog):
+        venue = offerers_factories.VenueFactory()
+        author = users_factories.UserFactory()
+
+        bookings_factories.BookingFactory.create_batch(3, stock__offer__venue=venue)
+
+        with caplog.at_level("INFO"):
+            with patch("pcapi.core.bookings.api._cancel_booking") as mock_cancel_booking:
+                mock_cancel_booking.side_effect = [True, Exception(), True]
+
+                with atomic():
+                    offerers_api.cancel_individual_bookings_on_venue_closure(venue.id, author.id)
+
+        log_messages = [record.message for record in caplog.records]
+        assert len([message for message in log_messages if message == "Cancelled booking on VENUE_CLOSED"]) == 2
+        assert (
+            len([message for message in log_messages if message == "Failed to cancel booking when closing venue"]) == 1
+        )
+
+
+class CancelCollectiveBookingsOnVenueClosureTest:
+    def test_venue_has_bookings_to_cancel(self):
+        venue = offerers_factories.VenueFactory()
+        author = users_factories.UserFactory()
+
+        educational_factories.CollectiveBookingFactory.create_batch(3, collectiveStock__collectiveOffer__venue=venue)
+
+        with atomic():
+            offerers_api.cancel_collective_bookings_on_venue_closure(venue.id, author.id)
+
+        db.session.refresh(venue)
+        assert all(booking.isCancelled for booking in venue.collectiveBookings)
+
+    def test_uncancellable_bookings_are_filtered_and_others_are_being_cancelled(self):
+        venue = offerers_factories.VenueFactory()
+        author = users_factories.UserFactory()
+
+        educational_factories.CollectiveBookingFactory(collectiveStock__collectiveOffer__venue=venue)
+        educational_factories.CancelledCollectiveBookingFactory(collectiveStock__collectiveOffer__venue=venue)
+
+        with atomic():
+            offerers_api.cancel_collective_bookings_on_venue_closure(venue.id, author.id)
+
+        db.session.refresh(venue)
+        assert all(booking.isCancelled for booking in venue.collectiveBookings)
+
+
+class TopOfferModelTest:
+    def test_properties_from_headline_offer_with_mediation(self):
+        offer = offers_factories.OfferFactory()
+        offers_factories.HeadlineOfferFactory(offer=offer)
+
+        top_offer = offerers_api.TopOfferModel(offer=offer, views=12, rank=1)
+
+        assert top_offer.offer_id == offer.id
+        assert top_offer.name == offer.name
+        assert top_offer.is_headline_offer is True
+        assert top_offer.image.url == offer.mediations[0].thumbUrl
+
+    def test_properties_from_bare_offer(self):
+        offer = offers_factories.OfferFactory()
+
+        top_offer = offerers_api.TopOfferModel(offer=offer, views=12, rank=1)
+
+        assert top_offer.is_headline_offer is False
+        assert top_offer.image is None
+
+
+class GetViewsByMonthTest:
+    @time_machine.travel("2026-09-15 12:00:00", tick=False)
+    def test_months_with_no_view_are_filled_with_zero(self):
+        rows = [
+            clickhouse_queries.VenueOffersViewsByMonthModel(month=datetime.date(2026, 5, 1), views=12),
+            clickhouse_queries.VenueOffersViewsByMonthModel(month=datetime.date(2026, 8, 1), views=8),
+        ]
+
+        assert offerers_api._get_views_by_month(rows) == [
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, 4, 1), views=0),
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, 5, 1), views=12),
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, 6, 1), views=0),
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, 7, 1), views=0),
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, 8, 1), views=8),
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, 9, 1), views=0),
+        ]
+
+    @time_machine.travel("2026-09-15 12:00:00", tick=False)
+    def test_rows_outside_of_the_last_6_months_are_ignored(self):
+        rows = [
+            clickhouse_queries.VenueOffersViewsByMonthModel(month=datetime.date(2026, 3, 1), views=12),
+            clickhouse_queries.VenueOffersViewsByMonthModel(month=datetime.date(2026, 8, 1), views=8),
+        ]
+
+        assert [(row.month, row.views) for row in offerers_api._get_views_by_month(rows)] == [
+            (datetime.date(2026, 4, 1), 0),
+            (datetime.date(2026, 5, 1), 0),
+            (datetime.date(2026, 6, 1), 0),
+            (datetime.date(2026, 7, 1), 0),
+            (datetime.date(2026, 8, 1), 8),
+            (datetime.date(2026, 9, 1), 0),
+        ]
+
+
+class GetTopOffersViewsTest:
+    @patch("pcapi.connectors.clickhouse.queries.VenueTopOffersByPeriodQuery")
+    def test_query_is_run_for_the_period_and_venue(self, mock_query_class):
+        mock_query_class.return_value.execute.return_value = [
+            clickhouse_queries.VenueTopOfferByPeriodModel(offer_id="11", views=20, rank=1),
+            clickhouse_queries.VenueTopOfferByPeriodModel(offer_id="10", views=10, rank=2),
+            clickhouse_queries.VenueTopOfferByPeriodModel(offer_id="13", views=5, rank=3),
+        ]
+
+        result = offerers_api._get_top_offers_views(venue_id=12, months=3)
+
+        mock_query_class.assert_called_once_with(months=3)
+        mock_query_class.return_value.execute.assert_called_once_with({"venue_id": "12"})
+        assert result == [
+            offerers_api.OfferViewsModel(offer_id="11", views=20, rank=1),
+            offerers_api.OfferViewsModel(offer_id="10", views=10, rank=2),
+            offerers_api.OfferViewsModel(offer_id="13", views=5, rank=3),
+        ]
+
+    @patch("pcapi.connectors.clickhouse.queries.VenueTopOffersByPeriodQuery")
+    def test_no_rows(self, mock_query_class):
+        mock_query_class.return_value.execute.return_value = []
+
+        assert offerers_api._get_top_offers_views(venue_id=12, months=6) == []
+
+
+class BuildPeriodStatisticsTest:
+    def test_top_offers_are_mapped_to_their_offer(self):
+        offers = [Mock(), Mock()]
+        top_offers_views = [
+            offerers_api.OfferViewsModel(offer_id="1", views=20, rank=1),
+            offerers_api.OfferViewsModel(offer_id="2", views=10, rank=2),
+        ]
+        offers_mapping = dict(zip(top_offers_views, offers))
+
+        stats = offerers_api._build_period_statistics(top_offers_views, offers_mapping, [])
+
+        assert stats.top_offers == [
+            offerers_api.TopOfferModel(offer=offers[0], views=20, rank=1),
+            offerers_api.TopOfferModel(offer=offers[1], views=10, rank=2),
+        ]
+
+    def test_top_offer_without_a_known_offer_is_ignored(self):
+        offer = Mock()
+        known = offerers_api.OfferViewsModel(offer_id="1", views=20, rank=1)
+        unknown = offerers_api.OfferViewsModel(offer_id="2", views=10, rank=2)
+
+        stats = offerers_api._build_period_statistics([known, unknown], {known: offer}, [])
+
+        assert stats.top_offers == [offerers_api.TopOfferModel(offer=offer, views=20, rank=1)]
+
+    def test_monthly_views_are_summed(self):
+        views_by_month = [
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, 8, 1), views=12),
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, 9, 1), views=8),
+        ]
+
+        stats = offerers_api._build_period_statistics([], {}, views_by_month)
+
+        assert stats.cumulated_views == 20
+        assert stats.views_by_month == views_by_month
+
+
+class MapTopOffersToExistingOffersTest:
+    @pytest.mark.settings(IS_DEV=False, IS_STAGING=True)
+    @patch("pcapi.core.offers.repository.get_offers_with_headlines_and_mediations", return_value=[])
+    def test_offers_are_filtered_on_venue_on_staging(self, mock_get_offers):
+        top_offer = offerers_api.OfferViewsModel(offer_id="1", views=20, rank=1)
+
+        offerers_api.map_top_offers_to_existing_offers([top_offer], venue_id=12)
+
+        mock_get_offers.assert_called_once_with([1], venue_id=12)
+
+    @pytest.mark.settings(IS_DEV=False, IS_PROD=True)
+    @patch("pcapi.core.offers.repository.get_offers_with_headlines_and_mediations", return_value=[])
+    def test_offers_are_filtered_on_venue_on_production(self, mock_get_offers):
+        top_offer = offerers_api.OfferViewsModel(offer_id="1", views=20, rank=1)
+
+        offerers_api.map_top_offers_to_existing_offers([top_offer], venue_id=12)
+
+        mock_get_offers.assert_called_once_with([1], venue_id=12)
+
+    @pytest.mark.settings(IS_DEV=True)
+    @patch("pcapi.core.offers.repository.get_offers_with_headlines_and_mediations", return_value=[])
+    def test_offers_are_not_filtered_on_venue_on_development(self, mock_get_offers):
+        top_offer = offerers_api.OfferViewsModel(offer_id="1", views=20, rank=1)
+
+        offerers_api.map_top_offers_to_existing_offers([top_offer], venue_id=12)
+
+        mock_get_offers.assert_called_once_with([1], venue_id=None)
+
+    @pytest.mark.settings(IS_DEV=False, IS_TESTING=True)
+    @patch("pcapi.core.offers.repository.get_offers_with_headlines_and_mediations", return_value=[])
+    def test_offers_are_not_filtered_on_venue_on_testing(self, mock_get_offers):
+        top_offer = offerers_api.OfferViewsModel(offer_id="1", views=20, rank=1)
+
+        offerers_api.map_top_offers_to_existing_offers([top_offer], venue_id=12)
+
+        mock_get_offers.assert_called_once_with([1], venue_id=None)
+
+
+class GetVenueOffersStatisticsV2Test:
+    @patch("pcapi.connectors.clickhouse.queries.VenueOffersViewsByMonthQuery.execute", return_value=[])
+    @patch("pcapi.core.offerers.api._get_top_offers_views", return_value=[])
+    def test_top_offers_are_computed_for_each_period(self, mock_get_top_offers_views, _mock_views_by_month_query):
+        offerers_api.get_venue_offers_statistics_v2(venue_id=12)
+
+        assert mock_get_top_offers_views.call_args_list == [
+            mock_call(venue_id=12, months=3),
+            mock_call(venue_id=12, months=6),
+        ]
+
+    @patch("pcapi.core.offerers.api.map_top_offers_to_existing_offers", return_value={})
+    @patch("pcapi.core.offerers.api._get_top_offers_views")
+    def test_offers_of_both_periods_are_fetched_from_postgres(self, mock_get_top_offers_views, mock_map_top_offers):
+        top_offers_3_months = [offerers_api.OfferViewsModel(offer_id="1", views=20, rank=1)]
+        top_offers_6_months = [
+            offerers_api.OfferViewsModel(offer_id="1", views=30, rank=1),
+            offerers_api.OfferViewsModel(offer_id="2", views=10, rank=2),
+        ]
+        mock_get_top_offers_views.side_effect = [top_offers_3_months, top_offers_6_months]
+
+        offerers_api.get_venue_offers_statistics_v2(venue_id=12)
+
+        mock_map_top_offers.assert_called_once_with({*top_offers_3_months, *top_offers_6_months}, 12)
+
+    @patch("pcapi.core.offerers.api._get_views_by_month", return_value=[])
+    @patch("pcapi.connectors.clickhouse.queries.VenueOffersViewsByMonthQuery.execute")
+    @patch("pcapi.core.offerers.api._get_top_offers_views", return_value=[])
+    def test_views_by_month_are_computed_from_clickhouse_rows(
+        self, _mock_get_top_offers_views, mock_views_by_month_query, mock_get_views_by_month
+    ):
+        views_by_month_rows = [Mock(name="views_by_month_row")]
+        mock_views_by_month_query.return_value = views_by_month_rows
+
+        offerers_api.get_venue_offers_statistics_v2(venue_id=12)
+
+        mock_views_by_month_query.assert_called_once_with({"venue_id": "12"})
+        mock_get_views_by_month.assert_called_once_with(views_by_month_rows)
+
+    @patch("pcapi.core.offerers.api._build_period_statistics")
+    @patch("pcapi.core.offerers.api._get_views_by_month")
+    @patch("pcapi.core.offerers.api.map_top_offers_to_existing_offers")
+    @patch("pcapi.core.offerers.api._get_top_offers_views")
+    def test_each_period_is_built_from_its_top_offers_and_views(
+        self,
+        mock_get_top_offers_views,
+        mock_map_top_offers,
+        mock_get_views_by_month,
+        mock_build_period_statistics,
+    ):
+        top_offers_3_months = [offerers_api.OfferViewsModel(offer_id="1", views=20, rank=1)]
+        top_offers_6_months = [
+            offerers_api.OfferViewsModel(offer_id="1", views=30, rank=1),
+            offerers_api.OfferViewsModel(offer_id="2", views=10, rank=2),
+        ]
+        mock_get_top_offers_views.side_effect = [top_offers_3_months, top_offers_6_months]
+        offers_mapping = {top_offer: Mock(name="offer") for top_offer in top_offers_6_months}
+        mock_map_top_offers.return_value = offers_mapping
+        views_by_month_6_months = [
+            offerers_api.MonthlyViewsModel(month=datetime.date(2026, month, 1), views=month) for month in range(4, 10)
+        ]
+        mock_get_views_by_month.return_value = views_by_month_6_months
+
+        offerers_api.get_venue_offers_statistics_v2(venue_id=12)
+
+        assert mock_build_period_statistics.call_args_list == [
+            mock_call(top_offers_3_months, offers_mapping, views_by_month_6_months[-3:]),
+            mock_call(top_offers_6_months, offers_mapping, views_by_month_6_months),
+        ]
+
+    @patch("pcapi.core.offerers.api._build_period_statistics")
+    def test_periods_are_assembled_in_the_result(self, mock_build_period_statistics):
+        period_3_months = Mock(name="period_3_months")
+        period_6_months = Mock(name="period_6_months")
+        mock_build_period_statistics.side_effect = [period_3_months, period_6_months]
+
+        stats = offerers_api.get_venue_offers_statistics_v2(venue_id=12)
+
+        assert stats == offerers_api.VenueOffersStatisticsV2Model(
+            venue_id=12, last_3_months=period_3_months, last_6_months=period_6_months
+        )

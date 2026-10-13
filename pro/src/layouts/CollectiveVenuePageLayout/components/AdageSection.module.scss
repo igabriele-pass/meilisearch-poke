@@ -1,0 +1,20 @@
+.details {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: var(--size-spacing-xxl);
+}
+
+.details-normal {
+  margin-right: var(--size-spacing-s);
+  color: var(--color-text-subtle);
+}
+
+.details-description {
+  margin-top: var(--size-spacing-s);
+}
+
+.tag {
+  display: inline-block;
+  vertical-align: top;
+}

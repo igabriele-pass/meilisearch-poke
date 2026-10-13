@@ -1,0 +1,501 @@
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import React, { forwardRef } from 'react'
+
+import { imageFileFactory } from '@/commons/utils/factories/imageUploadArgsFactories'
+import * as imageUtils from '@/commons/utils/image'
+import { UploaderModeEnum } from '@/commons/utils/imageUploadTypes'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import {
+  ModalImageUpsertOrEdit,
+  type ModalImageUpsertOrEditProps,
+} from './ModalImageUpsertOrEdit'
+
+const onImageUpload = vi.fn()
+const onImageDelete = vi.fn()
+
+vi.mock('@/components/ImageDragAndDrop/getImageDimensions', () => ({
+  getImageDimensions: vi.fn((file) => {
+    return Promise.resolve({
+      width: (file as any).width || 0,
+      height: (file as any).height || 0,
+    })
+  }),
+}))
+
+vi.mock('react-avatar-editor', () => {
+  const MockAvatarEditor = forwardRef((_props, ref) => {
+    if (ref && typeof ref === 'object' && 'current' in ref) {
+      ref.current = {
+        getImage: vi.fn(() => ({ toDataURL: vi.fn(() => 'my img') })),
+        getCroppingRect: vi.fn(() => ({
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 100,
+        })),
+      }
+    }
+    return React.createElement('div', { 'aria-label': "Editeur d'image" })
+  })
+
+  MockAvatarEditor.displayName = 'MockAvatarEditor'
+
+  return {
+    __esModule: true,
+    default: MockAvatarEditor,
+  }
+})
+
+const defaultProps: ModalImageUpsertOrEditProps = {
+  open: true,
+  mode: UploaderModeEnum.OFFER,
+  onImageUpload,
+  onImageDelete,
+  initialValues: {
+    draftImage: imageFileFactory('draftImage.png', 'png'),
+  },
+}
+
+const waitForRender = async () => {
+  await waitFor(() => {
+    expect(
+      screen.getByRole('heading', { name: 'Modifier une image' })
+    ).toBeInTheDocument()
+  })
+}
+
+type ModalImageUpsertOrEditTestProps = Partial<ModalImageUpsertOrEditProps>
+const renderModalImageCrop = (props: ModalImageUpsertOrEditTestProps = {}) => {
+  const finalProps = {
+    ...defaultProps,
+    ...props,
+  }
+
+  return renderWithProviders(<ModalImageUpsertOrEdit {...finalProps} />)
+}
+
+describe('ModalImageUpsertOrEdit', () => {
+  beforeEach(() => {
+    fetchMock.mockResponse((request) => {
+      if (
+        request.url === 'http://example.com/image.jpg' &&
+        request.method === 'GET'
+      ) {
+        return {
+          status: 200,
+          body: 'Mock Image Data',
+          headers: { 'Content-Type': 'image/jpeg' },
+        }
+      }
+
+      return { status: 404 }
+    })
+  })
+
+  it('should render a cancel and a save button', async () => {
+    renderModalImageCrop()
+    await waitForRender()
+
+    expect(screen.getByRole('button', { name: 'Annuler' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Importer' })).toBeInTheDocument()
+  })
+
+  it('should enforce 400x600 minimum dimensions in collective offer mode', async () => {
+    renderModalImageCrop({
+      mode: UploaderModeEnum.OFFER_COLLECTIVE,
+      initialValues: {},
+    })
+
+    await waitForRender()
+
+    const imageFile = Object.assign(imageFileFactory(), {
+      width: 500,
+      height: 500,
+    })
+
+    await userEvent.upload(screen.getByLabelText('Importez une image'), [
+      imageFile,
+    ])
+
+    expect(
+      await screen.findByText('L’image doit faire au moins 600 pixels de haut')
+    ).toBeVisible()
+    expect(
+      screen.queryByText('L’image doit faire au moins 400 pixels de large')
+    ).not.toBeInTheDocument()
+  })
+
+  it('should render a spinner until the image is loaded', async () => {
+    const mockImageUrl = 'http://example.com/image.jpg'
+    renderModalImageCrop({
+      initialValues: {
+        croppedImageUrl: mockImageUrl,
+        originalImageUrl: mockImageUrl,
+      },
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('spinner-img-load')).toBeInTheDocument()
+    })
+  })
+
+  it('should display the image editor with the picked file instead of reloading it from its url', async () => {
+    const mockImageUrl = 'http://example.com/image.jpg'
+    renderModalImageCrop({
+      initialValues: {
+        draftImage: imageFileFactory(),
+        croppedImageUrl: mockImageUrl,
+      },
+    })
+    await waitForRender()
+
+    expect(await screen.findByLabelText("Editeur d'image")).toBeInTheDocument()
+    expect(screen.queryByTestId('spinner-img-load')).not.toBeInTheDocument()
+
+    expect(fetchMock).not.toHaveBeenCalledWith(mockImageUrl)
+  })
+
+  describe('when an image is loaded', () => {
+    it('should render an image editor & a preview with the loaded image', async () => {
+      vi.spyOn(imageUtils, 'getImageBitmap').mockResolvedValue({
+        width: 500,
+        height: 600,
+      } as ImageBitmap)
+
+      const mockImageUrl = 'http://example.com/image.jpg'
+      renderModalImageCrop({
+        initialValues: {
+          croppedImageUrl: mockImageUrl,
+          originalImageUrl: mockImageUrl,
+        },
+      })
+      await waitForRender()
+
+      expect(
+        await screen.findByLabelText("Editeur d'image")
+      ).toBeInTheDocument()
+      expect(screen.getByText('Page d’accueil')).toBeInTheDocument()
+      expect(screen.getByText('Détails de l’offre')).toBeInTheDocument()
+      expect(
+        screen.queryByText(/La qualité de votre image n’est pas optimale./)
+      ).not.toBeInTheDocument()
+    })
+
+    it('should display replace and delete buttons', async () => {
+      const mockImageUrl = 'http://example.com/image.jpg'
+      renderModalImageCrop({
+        initialValues: {
+          croppedImageUrl: mockImageUrl,
+          originalImageUrl: mockImageUrl,
+        },
+      })
+      await waitForRender()
+
+      expect(
+        screen.getByRole('button', { name: 'Remplacer l’image' })
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: 'Supprimer l’image' })
+      ).toBeInTheDocument()
+    })
+
+    it('should control change of the credit input', async () => {
+      const mockImageUrl = 'http://example.com/image.jpg'
+      renderModalImageCrop({
+        initialValues: {
+          croppedImageUrl: mockImageUrl,
+          originalImageUrl: mockImageUrl,
+        },
+      })
+      await waitForRender()
+
+      const creditInput = screen.getByLabelText('Crédit de l’image')
+      expect(creditInput).toBeInTheDocument()
+
+      await userEvent.type(creditInput, 'John Doe')
+
+      expect(creditInput).toHaveValue('John Doe')
+    })
+
+    it('should allow entering alternative text when the image is informative', async () => {
+      const mockImageUrl = 'http://example.com/image.jpg'
+      renderModalImageCrop({
+        initialValues: {
+          croppedImageUrl: mockImageUrl,
+          originalImageUrl: mockImageUrl,
+          alternativeText: '',
+        },
+      })
+      await waitForRender()
+
+      const informativeCheckbox = await screen.findByRole('checkbox', {
+        name: /L’image est porteuse d’informations/,
+      })
+      await userEvent.click(informativeCheckbox)
+
+      const alternativeTextInput = screen.getByLabelText(
+        'Texte alternatif de l’image'
+      )
+      await userEvent.type(alternativeTextInput, 'Le train arrive en gare')
+
+      await userEvent.click(screen.getByRole('button', { name: 'Importer' }))
+
+      expect(onImageUpload).toHaveBeenCalledWith(
+        expect.objectContaining({
+          alternativeText: 'Le train arrive en gare',
+        }),
+        'Vos modifications ont bien été prises en compte'
+      )
+    })
+
+    it('should save a null alternative text when the image is not informative', async () => {
+      const mockImageUrl = 'http://example.com/image.jpg'
+      renderModalImageCrop({
+        initialValues: {
+          croppedImageUrl: mockImageUrl,
+          originalImageUrl: mockImageUrl,
+          alternativeText: 'Ancien texte',
+        },
+      })
+      await waitForRender()
+
+      const informativeCheckbox = await screen.findByRole('checkbox', {
+        name: /L’image est porteuse d’informations/,
+      })
+      expect(informativeCheckbox).toBeChecked()
+
+      await userEvent.click(informativeCheckbox)
+      await userEvent.click(screen.getByRole('button', { name: 'Importer' }))
+
+      expect(onImageUpload).toHaveBeenCalledWith(
+        expect.objectContaining({
+          alternativeText: null,
+        }),
+        'Vos modifications ont bien été prises en compte'
+      )
+    })
+
+    describe('when the image has small dimensions', () => {
+      it('should not display any warning message for venues', async () => {
+        vi.spyOn(imageUtils, 'getImageBitmap').mockResolvedValue({
+          width: 10,
+          height: 10,
+        } as ImageBitmap)
+
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+          mode: UploaderModeEnum.VENUE,
+        })
+        await waitForRender()
+        expect(
+          screen.queryByText(/La qualité de votre image n’est pas optimale./)
+        ).not.toBeInTheDocument()
+      })
+
+      it('should not display any warning message for collective offers', async () => {
+        vi.spyOn(imageUtils, 'getImageBitmap').mockResolvedValue({
+          width: 10,
+          height: 10,
+        } as ImageBitmap)
+
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+          mode: UploaderModeEnum.OFFER_COLLECTIVE,
+        })
+        await waitForRender()
+        expect(
+          screen.queryByText(/La qualité de votre image n’est pas optimale./)
+        ).not.toBeInTheDocument()
+      })
+
+      it('should display a warning message for individual offers', async () => {
+        vi.spyOn(imageUtils, 'getImageBitmap').mockResolvedValue({
+          width: 10,
+          height: 10,
+        } as ImageBitmap)
+
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+          mode: UploaderModeEnum.OFFER,
+        })
+        await waitForRender()
+        expect(
+          await screen.findByText(/Image non conforme aux recommandations/)
+        ).toBeInTheDocument()
+      })
+    })
+
+    describe('when the replace button is clicked', () => {
+      it('should render the image drag and drop component', async () => {
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+        })
+        await waitForRender()
+
+        const replaceButton = screen.getByRole('button', {
+          name: 'Remplacer l’image',
+        })
+        await userEvent.click(replaceButton)
+
+        expect(screen.getByLabelText('Importez une image')).toBeInTheDocument()
+        expect(
+          screen.queryByLabelText("Editeur d'image")
+        ).not.toBeInTheDocument()
+      })
+
+      it('should disable the save button', async () => {
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+        })
+        await waitForRender()
+
+        const replaceButton = screen.getByRole('button', {
+          name: 'Remplacer l’image',
+        })
+        await userEvent.click(replaceButton)
+
+        expect(screen.getByRole('button', { name: 'Importer' })).toBeDisabled()
+      })
+
+      it('should display the image editor again once the image is uploaded', async () => {
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+        })
+        await waitForRender()
+
+        const replaceButton = screen.getByRole('button', {
+          name: 'Remplacer l’image',
+        })
+        await userEvent.click(replaceButton)
+
+        const imageFile = Object.assign(imageFileFactory(), {
+          width: 10,
+          height: 10,
+        })
+        await userEvent.upload(screen.getByLabelText('Importez une image'), [
+          imageFile,
+        ])
+        await waitFor(() => {
+          expect(screen.getByLabelText("Editeur d'image")).toBeInTheDocument()
+        })
+        expect(
+          screen.queryByLabelText('Importez une image')
+        ).not.toBeInTheDocument()
+      })
+    })
+
+    describe('when the delete button is clicked', () => {
+      it('should call onImageDelete', async () => {
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+        })
+        await waitForRender()
+
+        const deleteButton = screen.getByRole('button', {
+          name: 'Supprimer l’image',
+        })
+        await userEvent.click(deleteButton)
+
+        expect(onImageDelete).toHaveBeenCalled()
+      })
+    })
+
+    describe('when saving an image', () => {
+      it('should call onImageUpload with sucess message : Votre image a bien été importée', async () => {
+        renderModalImageCrop()
+
+        await waitForRender()
+
+        const saveButton = screen.getByRole('button', { name: 'Importer' })
+        await userEvent.click(saveButton)
+
+        await waitFor(() => {
+          expect(onImageUpload).toHaveBeenCalled()
+        })
+
+        expect(onImageUpload).toHaveBeenCalledWith(
+          expect.objectContaining({
+            imageFile: expect.any(File),
+            imageCroppedDataUrl: expect.any(String),
+            cropParams: expect.any(Object),
+            credit: expect.any(String),
+          }),
+          'Votre image a bien été importée'
+        )
+      })
+
+      it('should call onImageUpload with success message : Vos modifications ont bien été prises en compte', async () => {
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+        })
+
+        await waitForRender()
+
+        const saveButton = screen.getByRole('button', { name: 'Importer' })
+        await userEvent.click(saveButton)
+
+        expect(onImageUpload).toHaveBeenCalledOnce()
+
+        expect(onImageUpload).toHaveBeenCalledWith(
+          expect.objectContaining({
+            imageFile: expect.any(File),
+            imageCroppedDataUrl: expect.any(String),
+            cropParams: expect.any(Object),
+            credit: expect.any(String),
+          }),
+          'Vos modifications ont bien été prises en compte'
+        )
+      })
+    })
+
+    describe('when it is used in COLLECTIVE OFFER mode', () => {
+      it('should not display the preview', async () => {
+        const mockImageUrl = 'http://example.com/image.jpg'
+        renderModalImageCrop({
+          initialValues: {
+            croppedImageUrl: mockImageUrl,
+            originalImageUrl: mockImageUrl,
+          },
+          mode: UploaderModeEnum.OFFER_COLLECTIVE,
+        })
+        await waitForRender()
+
+        expect(screen.queryByText('Page d’accueil')).not.toBeInTheDocument()
+        expect(screen.queryByText('Détails de l’offre')).not.toBeInTheDocument()
+      })
+    })
+  })
+})

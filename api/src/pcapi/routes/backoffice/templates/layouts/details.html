@@ -1,0 +1,54 @@
+{% extends "layouts/connected.html" %}
+{% import "components/badges.html" as badges with context %}
+{% from "components/details.html" import action_bar_button %}
+{% from "components/details.html" import action_bar_additional_button %}
+{% from "components/details.html" import content_navbar %}
+{% from "components/details.html" import content_navbar_element %}
+{% from "components/details.html" import content_navbar_button %}
+{% from "components/details.html" import details_content_wrapper %}
+{% from "components/details.html" import nav_section %}
+{% block page %}
+  <div class="d-flex container-fluid h-100 p-0 overflow-y-auto">
+    <!-- MAIN COLUMN -->
+    <div class="col-9 px-5 pt-3">
+      {% block main_column_container %}
+        <div class="vstack gap-2">
+          {% block before_title %}
+          {% endblock before_title %}
+          <!-- TITLE + TAGS -->
+          <div class="d-flex hstack gap-12">
+            <!-- OFFER NAME -->
+            <h2>
+              {% block title %}
+              {% endblock title %}
+              <!-- TAGS -->
+              {% block header_extra %}
+              {% endblock header_extra %}
+            </h2>
+          </div>
+          <!-- ACTION BAR -->
+          <div class="btn-group align-self-start"
+               role="group">
+            {% block action_buttons %}
+            {% endblock action_buttons %}
+          </div>
+          {% block extra_title_bar %}
+          {% endblock extra_title_bar %}
+        </div>
+        <!-- DETAILS -->
+        {% block details_container %}
+        {% endblock details_container %}
+      {% endblock main_column_container %}
+    </div>
+    <!-- SIDE COLUMN -->
+    <div class="col-3 shadow-sm">
+      {% block side_column_container %}
+        <div class="vstack gap-4 pt-4 px-3 pc-fill-to-bottom overflow-y-auto">
+          {% block side_column %}
+          {% endblock side_column %}
+        </div>
+      {% endblock side_column_container %}
+    </div>
+  </div>
+  {% block extra_main_content %}{% endblock %}
+{% endblock page %}

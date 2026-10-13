@@ -1,0 +1,33 @@
+import { screen } from '@testing-library/react'
+import { expect } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { SignupConfirmation } from '@/pages/Signup/SignupConfirmation/SignupConfirmation'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getSirenInfo: vi.fn(),
+    getProfile: vi.fn(),
+    listFeatures: vi.fn(),
+    listOfferersNames: vi.fn(),
+  },
+}))
+
+const renderSignup = () => renderWithProviders(<SignupConfirmation />)
+
+describe('SignupConfirmation', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderSignup()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('Should render correctly', () => {
+    renderSignup()
+    expect(
+      screen.getByText('Cliquez sur le lien envoyé par email')
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Email non reçu ?/)).toBeInTheDocument()
+  })
+})

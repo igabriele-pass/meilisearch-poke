@@ -1,0 +1,270 @@
+import {
+  type Dispatch,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
+import { FormProvider, useForm } from 'react-hook-form'
+import { useInstantSearch } from 'react-instantsearch'
+import { useSearchParams } from 'react-router'
+import useSWRMutation from 'swr/mutation'
+
+import { AdageFrontRoles, type TrackingFilterBody } from '@/apiClient/adage'
+import { apiAdage } from '@/apiClient/api'
+import { LOG_TRACKING_FILTER_QUERY_KEY } from '@/commons/config/swrQueryKeys'
+import { GET_DATA_ERROR_MESSAGE } from '@/commons/core/shared/constants'
+import { useEducationalDomains } from '@/commons/hooks/swr/useEducationalDomains'
+import { useActiveFeature } from '@/commons/hooks/useActiveFeature'
+import { useAppDispatch } from '@/commons/hooks/useAppDispatch'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useIsElementVisible } from '@/commons/hooks/useIsElementVisible'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import {
+  setAdageFilter,
+  setAdagePageSaved,
+} from '@/commons/store/adageFilter/reducer'
+import { adageQuerySelector } from '@/commons/store/adageFilter/selectors'
+import { MARSEILLE_EN_GRAND } from '@/pages/AdageIframe/app/constants'
+import { useAdageUser } from '@/pages/AdageIframe/app/hooks/useAdageUser'
+
+import {
+  DEFAULT_GEO_RADIUS,
+  MAIN_INDEX_ID,
+  type SearchFormValues,
+} from '../OffersInstantSearch'
+import { ADAGE_FILTERS_DEFAULT_VALUES, serializeFiltersForData } from '../utils'
+import { Autocomplete } from './Autocomplete/Autocomplete'
+import { FiltersTags } from './FiltersTags/FiltersTags'
+import { OfferFilters } from './OfferFilters/OfferFilters'
+import { Offers } from './Offers/Offers'
+import styles from './OffersSearch.module.scss'
+import { OffersSuggestions } from './OffersSuggestions/OffersSuggestions'
+
+export enum LocalisationFilterStates {
+  DEPARTMENTS = 'departments',
+  ACADEMIES = 'academies',
+  GEOLOCATION = 'geolocation',
+  NONE = 'none',
+}
+
+export interface SearchProps {
+  setFilters: Dispatch<SetStateAction<SearchFormValues>>
+  initialFilters: Partial<SearchFormValues>
+  setGeoRadius: (geoRadius: number) => void
+}
+
+export const OffersSearch = ({
+  setFilters,
+  setGeoRadius,
+  initialFilters,
+}: SearchProps): JSX.Element => {
+  const dispatch = useAppDispatch()
+
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  const { adageUser } = useAdageUser()
+  const isUserAdmin = adageUser.role === AdageFrontRoles.READONLY
+
+  const snackBar = useSnackBar()
+  const adageQueryFromSelector = useAppSelector(adageQuerySelector)
+
+  const { scopedResults } = useInstantSearch()
+
+  const mainOffersSearchResults = scopedResults.find(
+    (res) => res.indexId === MAIN_INDEX_ID
+  )?.results
+  const nbHits = mainOffersSearchResults?.nbHits
+
+  const isMarseilleEnabled = useActiveFeature('ENABLE_MARSEILLE')
+  const isUserInMarseilleProgram = (adageUser.programs ?? []).some(
+    (prog) => prog.name === MARSEILLE_EN_GRAND
+  )
+
+  const form = useForm<SearchFormValues>({
+    defaultValues: { ...ADAGE_FILTERS_DEFAULT_VALUES, ...initialFilters },
+  })
+
+  const { trigger: logTrackingFilter } = useSWRMutation(
+    LOG_TRACKING_FILTER_QUERY_KEY,
+    (
+      _key: string,
+      options: {
+        arg: TrackingFilterBody
+      }
+    ) => apiAdage.logTrackingFilter({ body: options.arg })
+  )
+
+  const { data: educationalDomains, error: educationalDomainsApiError } =
+    useEducationalDomains()
+
+  if (educationalDomainsApiError) {
+    snackBar.error(GET_DATA_ERROR_MESSAGE)
+  }
+
+  const domainsOptions = educationalDomains.map(({ id, name }) => ({
+    value: id,
+    label: name,
+  }))
+
+  const adageUserHasValidGeoloc = useMemo(
+    () =>
+      (adageUser.lat || adageUser.lat === 0) &&
+      (adageUser.lon || adageUser.lon === 0),
+    [adageUser.lat, adageUser.lon]
+  )
+
+  const getActiveLocalisationFilter = () => {
+    if (form.watch('departments').length > 0) {
+      return LocalisationFilterStates.DEPARTMENTS
+    }
+    if (form.watch('academies').length > 0) {
+      return LocalisationFilterStates.ACADEMIES
+    }
+    if (
+      form.watch('geolocRadius') !== ADAGE_FILTERS_DEFAULT_VALUES.geolocRadius
+    ) {
+      return LocalisationFilterStates.GEOLOCATION
+    }
+    return LocalisationFilterStates.NONE
+  }
+  const [localisationFilterState, setlocalisationFilterState] =
+    useState<LocalisationFilterStates>(getActiveLocalisationFilter())
+  const [isUserTriggered, setIsUserTriggered] = useState(false)
+
+  const resetUrlSearchFilterParams = useCallback(() => {
+    searchParams.delete('domain')
+    searchParams.delete('venue')
+    searchParams.delete('siret')
+    searchParams.delete('program')
+    searchParams.delete('all')
+    setSearchParams(searchParams)
+  }, [searchParams, setSearchParams])
+
+  const onSubmit = useCallback(() => {
+    resetUrlSearchFilterParams()
+    dispatch(setAdageFilter(form.watch()))
+    dispatch(setAdagePageSaved(0))
+    setFilters(form.watch())
+
+    if (adageUserHasValidGeoloc) {
+      setGeoRadius(
+        localisationFilterState === LocalisationFilterStates.GEOLOCATION
+          ? form.watch('geolocRadius') * 1000
+          : DEFAULT_GEO_RADIUS
+      )
+    }
+  }, [
+    adageUserHasValidGeoloc,
+    dispatch,
+    form,
+    localisationFilterState,
+    resetUrlSearchFilterParams,
+    setFilters,
+    setGeoRadius,
+  ])
+
+  const resetForm = () => {
+    setIsUserTriggered(true)
+    setlocalisationFilterState(LocalisationFilterStates.NONE)
+    Object.entries(ADAGE_FILTERS_DEFAULT_VALUES).forEach(([key, value]) => {
+      form.setValue(key as keyof SearchFormValues, value)
+    })
+  }
+
+  const lastLoggedFiltersRef = useRef<string | null>(null)
+
+  const logFiltersOnSearch = useCallback(
+    async (nbHits: number, queryId?: string) => {
+      /* istanbul ignore next: TO FIX the current structure make it hard to test, we probably should not mock Offers in OfferSearch tests */
+      if (form.formState.submitCount > 0 || adageQueryFromSelector !== null) {
+        const filterValues = serializeFiltersForData(
+          form.watch(),
+          adageQueryFromSelector,
+          domainsOptions
+        )
+        const serializedFilters = JSON.stringify(filterValues)
+        if (serializedFilters === lastLoggedFiltersRef.current) {
+          return
+        }
+        lastLoggedFiltersRef.current = serializedFilters
+
+        await logTrackingFilter({
+          iframeFrom: location.pathname,
+          resultNumber: nbHits,
+          queryId: queryId ?? undefined,
+          filterValues,
+        })
+      }
+    },
+    [adageQueryFromSelector, domainsOptions, form, logTrackingFilter]
+  )
+
+  useEffect(() => {
+    if (mainOffersSearchResults) {
+      void logFiltersOnSearch(
+        mainOffersSearchResults.nbHits,
+        mainOffersSearchResults.queryID
+      )
+    }
+  }, [logFiltersOnSearch, mainOffersSearchResults])
+
+  // This useEffect ensures onSubmit is called only when localisationFilterState changes to NONE due to user actions.
+  // Ensures onSubmit runs after localisationFilterState updates to NONE, fixing async state issues.
+  useEffect(() => {
+    if (
+      isUserTriggered &&
+      localisationFilterState === LocalisationFilterStates.NONE
+    ) {
+      onSubmit()
+      setIsUserTriggered(false)
+    }
+  }, [isUserTriggered, localisationFilterState, onSubmit])
+
+  const offerFilterRef = useRef<HTMLDivElement>(null)
+  const [isOfferFiltersVisible] = useIsElementVisible(offerFilterRef)
+  return (
+    <>
+      <FormProvider {...form}>
+        <Autocomplete
+          initialQuery={adageQueryFromSelector ?? ''}
+          handleSubmit={onSubmit}
+        />
+        <div className={styles['separator']} />
+        <div ref={offerFilterRef}>
+          <OfferFilters
+            localisationFilterState={localisationFilterState}
+            setLocalisationFilterState={setlocalisationFilterState}
+            domainsOptions={domainsOptions}
+            shouldDisplayMarseilleStudentOptions={
+              isMarseilleEnabled && isUserInMarseilleProgram
+            }
+            onSubmit={onSubmit}
+          />
+        </div>
+
+        <FiltersTags
+          domainsOptions={domainsOptions}
+          localisationFilterState={localisationFilterState}
+          setLocalisationFilterState={setlocalisationFilterState}
+          resetForm={resetForm}
+          onSubmit={onSubmit}
+          setIsUserTriggered={setIsUserTriggered}
+        />
+      </FormProvider>
+      <div className="search-results">
+        <Offers
+          submitCount={form.formState.submitCount}
+          isBackToTopVisibile={!isOfferFiltersVisible}
+          indexId={MAIN_INDEX_ID}
+          venue={form.watch('venue')}
+        />
+        {nbHits === 0 && !isUserAdmin && (
+          <OffersSuggestions formValues={form.watch()} />
+        )}
+      </div>
+    </>
+  )
+}

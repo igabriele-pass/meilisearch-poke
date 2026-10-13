@@ -1,0 +1,95 @@
+{% from "components/dynamic/spinner.html" import build_loading_spinner with context %}
+{% import "components/presentation/details/tabs.html" as tabs %}
+{% extends "layouts/admin.html" %}
+{% block main_content %}
+  <div class="container">
+    <h2>Rôles et permissions</h2>
+    <div class="mt-4">
+      {% call tabs.build_details_tabs_wrapper() %}
+        {{ tabs.build_details_tab('matrix', 'Matrice des droits', active_tab == "matrix") }}
+        {% if has_permission("MANAGE_PERMISSIONS") %}
+          {{ tabs.build_details_tab('management', 'Gestion des droits', active_tab == "management") }}
+        {% endif %}
+        {{ tabs.build_details_tab('history', 'Historique', active_tab == "history") }}
+      {% endcall %}
+      {% call tabs.build_details_tabs_content_wrapper() %}
+        {% call tabs.build_details_tab_content("matrix", active_tab == "matrix") %}
+          <div class="mt-4">
+            <table class="border-1">
+              <thead>
+                <tr style="line-height: 13em;">
+                  <td>&nbsp;</td>
+                  {% for role in roles %}
+                    <td class="border-start text-nowrap pc-rotate-90"
+                        style="min-width: 2em;
+                               max-width: 2em;
+                               position: relative;
+                               top: 5em">{{ role.name }}</td>
+                  {% endfor %}
+                </tr>
+              </thead>
+              <tbody>
+                {% if not get_setting("BACKOFFICE_ROLES_WITHOUT_GOOGLE_GROUPS") %}
+                  <tr>
+                    <td>&nbsp;</td>
+                    {% for role in roles %}
+                      <td class="border-start text-center">
+                        {% set link = "https://groups.google.com/a/passculture.app/g/backoffice-" + get_setting('ENV') + "-" + role.name + "/members" %}
+                        <a href="{{ link }}"
+                           target="_blank"
+                           rel="noreferrer noopener"
+                           class="link-primary"
+                           title="Voir les membres du groupe Google">
+                          <i class="bi bi-google"></i>
+                        </a>
+                      </td>
+                    {% endfor %}
+                  </tr>
+                {% endif %}
+                {% for permission, perm_roles in permissions.items() %}
+                  <tr class="border-top">
+                    <td class="text-nowrap">{{ permission | format_permission_name }}</td>
+                    {% for role in roles %}
+                      <td class="border-start text-center">
+                        {% if role.name in perm_roles %}<span title="{{ role.name }}">x</span>{% endif %}
+                      </td>
+                    {% endfor %}
+                  </tr>
+                {% endfor %}
+              </tbody>
+              <thead>
+                <tr class="border-top"
+                    style="line-height: 13em">
+                  <td>&nbsp;</td>
+                  {% for role in roles %}
+                    <td class="border-start text-nowrap pc-rotate-90"
+                        style="min-width: 2em;
+                               max-width: 2em;
+                               position: relative;
+                               top: 5em">{{ role.name }}</td>
+                  {% endfor %}
+                </tr>
+              </thead>
+            </table>
+          </div>
+        {% endcall %}
+        {% if has_permission("MANAGE_PERMISSIONS") %}
+          {% call tabs.build_details_tab_content("management", active_tab == "management") %}
+            <div class="mt-4">
+              <div id="admin_roles_management_frame"
+                   hx-trigger="intersect once"
+                   hx-get="{{ url_for('backoffice.get_roles_management') }}">{{ build_loading_spinner() }}</div>
+            </div>
+          {% endcall %}
+        {% endif %}
+        {% call tabs.build_details_tab_content("history", active_tab == "history") %}
+          <div class="mt-4">
+            <div id="admin_roles_history_frame"
+                 hx-trigger="intersect once"
+                 hx-get="{{ url_for('backoffice.get_roles_history') }}">{{ build_loading_spinner() }}</div>
+          </div>
+        {% endcall %}
+      {% endcall %}
+    </div>
+  </div>
+{% endblock main_content %}

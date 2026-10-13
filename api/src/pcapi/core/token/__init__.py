@@ -1,0 +1,389 @@
+import abc
+import dataclasses
+import enum
+import hashlib
+import json
+import logging
+import random
+import secrets
+import time
+import typing
+import uuid
+from datetime import datetime
+from datetime import timedelta
+
+import jwt
+
+from pcapi import settings
+from pcapi.core.users import exceptions as users_exceptions
+from pcapi.utils import date as date_utils
+from pcapi.utils import jwt as jwt_utils
+from pcapi.utils.redis import get_redis_client
+
+
+logger = logging.getLogger(__name__)
+
+
+class TokenType(enum.Enum):
+    EMAIL_CHANGE_CONFIRMATION = "update_email_confirmation"
+    EMAIL_CHANGE_NEW_EMAIL_SELECTION = "update_email_new_mail_selection"
+    EMAIL_CHANGE_VALIDATION = "update_email_validation"
+    SIGNUP_EMAIL_CONFIRMATION = "email_validation"
+    PHONE_VALIDATION = "phone_validation"
+    SUSPENSION_SUSPICIOUS_LOGIN = "suspension_suspicious_login"
+    RESET_PASSWORD = "reset_password"
+    RECENTLY_RESET_PASSWORD = "recently_reset_password"
+    ACCOUNT_CREATION = "account_creation"
+    OAUTH_STATE = "oauth_state"
+    DISCORD_OAUTH = "discord_oauth"
+    PASSWORDLESS_LOGIN = "passwordless_login"
+    CONNECT_AS = "connect_as"
+    LOG_SEARCH = "log_search"
+
+
+@dataclasses.dataclass(frozen=True)
+class AbstractToken(abc.ABC):
+    type_: TokenType
+    key_suffix: int | str | None
+    encoded_token: str
+    data: dict
+
+    class _TokenAction(enum.Enum):
+        CHECK_OK = "check_ok"
+        CHECK_KO = "check_ko"
+        EXPIRE = "expire"
+        CREATE = "create"
+
+    @classmethod
+    def load_and_check(cls, encoded_token: str, *args: typing.Any, **kwargs: typing.Any) -> typing.Self:
+        token = cls.load_without_checking(encoded_token, *args, **kwargs)
+        token.check(*args, **kwargs)
+        return token
+
+    @classmethod
+    def get_redis_key(cls, type_: TokenType, key_suffix: int | str | None) -> str:
+        return f"pcapi:token:{type_.value}_{key_suffix}"
+
+    @classmethod
+    def get_token(cls, type_: TokenType, key_suffix: int | str | None) -> typing.Self | None:
+        encoded_token = get_redis_client().get(cls.get_redis_key(type_, key_suffix))
+        if encoded_token is None:
+            return None
+        return cls.load_without_checking(encoded_token)
+
+    @classmethod
+    def token_exists(cls, type_: TokenType, key_suffix: int | str | None) -> bool:
+        return bool(get_redis_client().exists(cls.get_redis_key(type_, key_suffix)))
+
+    @classmethod
+    def get_expiration_date(cls, type_: TokenType, key_suffix: int | str | None) -> datetime | None:
+        key = cls.get_redis_key(type_, key_suffix)
+        ttl = get_redis_client().ttl(key)
+        if ttl < 0:
+            # -2 if doesn't exist, -1 if no expiration
+            return None
+        return date_utils.get_naive_utc_now() + timedelta(seconds=ttl)
+
+    @classmethod
+    def delete(cls, type_: TokenType, key_suffix: int | str | None) -> None:
+        get_redis_client().delete(cls.get_redis_key(type_, key_suffix))
+
+    @classmethod
+    @abc.abstractmethod
+    def load_without_checking(cls, encoded_token: str, *args: typing.Any, **kwargs: typing.Any) -> typing.Self:
+        raise NotImplementedError()
+
+    @classmethod
+    @abc.abstractmethod
+    def create(cls, type_: TokenType, *args: typing.Any, **kwargs: typing.Any) -> typing.Self:
+        raise NotImplementedError()
+
+    def get_expiration_date_from_token(self) -> datetime | None:
+        return self.get_expiration_date(self.type_, self.key_suffix)
+
+    def check(self, type_: TokenType, key_suffix: int | str | None = None) -> None:
+        redis_key = AbstractToken.get_redis_key(self.type_, self.key_suffix)
+        if (
+            self.type_ != type_
+            or (key_suffix is not None and self.key_suffix != key_suffix)
+            or get_redis_client().get(redis_key) != self.encoded_token
+        ):
+            self._log(self._TokenAction.CHECK_KO)
+            raise users_exceptions.InvalidToken()
+        self._log(self._TokenAction.CHECK_OK)
+
+    def expire(self) -> None:
+        get_redis_client().delete(AbstractToken.get_redis_key(self.type_, self.key_suffix))
+        self._log(self._TokenAction.EXPIRE)
+
+    def _log(self, action: _TokenAction) -> None:
+        logger.info("[TOKEN](%s)%s, %s", action.value, self.key_suffix, self.type_.value)
+
+
+class Token(AbstractToken):
+    @property
+    def user_id(self) -> int:
+        assert self.key_suffix
+        return int(self.key_suffix)
+
+    @classmethod
+    def load_and_check(cls, encoded_token: str, type_: TokenType, user_id: int | None = None) -> typing.Self:
+        token = cls.load_without_checking(encoded_token, type_=type_, user_id=user_id)
+        token.check(type_, user_id)
+        return token
+
+    @classmethod
+    def load_without_checking(cls, encoded_token: str, *args: typing.Any, **kwargs: typing.Any) -> typing.Self:
+        try:
+            payload = jwt_utils.decode_jwt_token(encoded_token)
+            type_ = TokenType(payload["token_type"])
+            user_id = payload["user_id"]
+        except jwt.exceptions.ExpiredSignatureError as e:
+            raise users_exceptions.ExpiredToken() from e
+        except (KeyError, ValueError, jwt.PyJWTError) as e:
+            raise users_exceptions.InvalidToken() from e
+
+        data = payload.get("data", {})
+        return cls(type_, user_id, encoded_token, data)
+
+    @classmethod
+    def create(
+        cls,
+        type_: TokenType,
+        ttl: timedelta | None,
+        user_id: int,
+        data: dict | None = None,
+    ) -> "Token":
+        payload: dict[str, typing.Any] = {
+            "token_type": type_.value,
+            "user_id": user_id,
+            "data": data or {},
+        }
+        if ttl:
+            payload["exp"] = (date_utils.get_naive_utc_now() + ttl).timestamp()
+
+        encoded_token = jwt_utils.encode_jwt_payload(payload)
+        if ttl is None or ttl > timedelta(0):
+            get_redis_client().set(cls.get_redis_key(type_, user_id), encoded_token, ex=ttl)
+        token = Token.load_without_checking(encoded_token)
+        token._log(cls._TokenAction.CREATE)
+        return token
+
+
+class UUIDToken(AbstractToken):
+    @classmethod
+    def load_and_check(
+        cls,
+        encoded_token: str,
+        type_: TokenType,
+        key_suffix: int | str | None = None,
+    ) -> "UUIDToken":
+        token = cls.load_without_checking(encoded_token)
+        token.check(type_, token.key_suffix)
+        return token
+
+    @classmethod
+    def load_without_checking(
+        cls,
+        encoded_token: str,
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> "UUIDToken":
+        try:
+            payload = jwt_utils.decode_jwt_token(encoded_token)
+        except jwt.exceptions.ExpiredSignatureError as e:
+            raise users_exceptions.ExpiredToken() from e
+        except (KeyError, ValueError, jwt.PyJWTError) as e:
+            raise users_exceptions.InvalidToken() from e
+
+        data = payload.get("data", {})
+        type_ = TokenType(payload["token_type"])
+        uuid4 = payload["uuid"]
+        return cls(type_, uuid4, encoded_token, data)
+
+    @classmethod
+    def create(cls, type_: TokenType, ttl: timedelta | None, data: dict | None = None) -> "UUIDToken":
+        random_uuid = str(uuid.uuid4())
+        payload: dict[str, typing.Any] = {
+            "token_type": type_.value,
+            "uuid": random_uuid,
+            "data": data or {},
+        }
+        if ttl:
+            payload["exp"] = (date_utils.get_naive_utc_now() + ttl).timestamp()
+        encoded_token = jwt_utils.encode_jwt_payload(payload)
+
+        if ttl is None or ttl > timedelta(0):
+            redis_key = cls.get_redis_key(type_, random_uuid)
+            get_redis_client().set(redis_key, encoded_token, ex=ttl)
+
+        token = UUIDToken.load_without_checking(encoded_token)
+        token._log(cls._TokenAction.CREATE)
+        return token
+
+
+def _get_token_key(token_type: TokenType, token: str) -> str:
+    return f"pcapi:token:{token_type.value}:{token}"
+
+
+def create_token(
+    token_type: TokenType, data: dict | None = None, *, ttl: timedelta | int = 0, at: datetime | int = 0
+) -> str:
+    """
+    Create a single use secure token that emphasis on security over any other concerns
+
+    ttl can be either a timedelta or an int in seconds
+    at can be either a datetime or an timestamp
+
+    exactly one of {ttl, at} must be filled.
+    """
+    if isinstance(ttl, timedelta):
+        ttl = int(ttl.total_seconds())
+
+    if isinstance(at, datetime):
+        at = int(at.timestamp())
+
+    expiration = {}
+
+    if not (ttl or at):
+        raise ValueError("At least one of {ttl, at} must be filled")
+    elif ttl and at:
+        raise ValueError("Only one of {ttl, at} can be filled")
+    elif ttl:
+        if ttl <= 0:
+            raise ValueError("A strictly positive ttl value is mandatory when creating a token")
+        expiration["ex"] = ttl
+    elif at:
+        if at <= time.time():
+            raise ValueError("Cannot create an already expired token")
+        expiration["exat"] = at
+
+    # generate a 512 bits secure token
+    token = secrets.token_urlsafe(64)
+    raw_data = json.dumps(data or {})
+    key = _get_token_key(token_type, token)
+    get_redis_client().set(key, raw_data, **expiration)  # type: ignore [arg-type]
+    return token
+
+
+def load_token(token_type: TokenType, token: str) -> dict:
+    """
+    Retrieve a token's content and delete it
+
+    raises `InvalidToken` if the token is not found in redis
+    """
+    if not token:
+        raise ValueError("Cannot check an empty token")
+
+    key = _get_token_key(token_type, token)
+    raw_data = get_redis_client().getdel(key)
+    if not raw_data:
+        # add robustness against timing attacks
+        time.sleep(random.random())
+        raise users_exceptions.InvalidToken()
+    return json.loads(raw_data)
+
+
+PASSWORDLESS_REDIS_KEY_TEMPLATE = "pcapi:token:%(type_)s:%(key_suffix)s"
+
+
+def create_passwordless_login_token(user_id: int, ttl: timedelta) -> str:
+    """
+    Single use token that allow a user to login without entering any credentials.
+    This token is signed using a RSA private key and verified using the corresponding
+    public key.
+    In exchange of this token, a user should be returned a valid session.
+
+    The payload of this token expects several claims:
+
+        jti: Token unique identifier preventing replay attacks. Ensure each JWT is used only once.
+        sub: The subject of the token. Contains the user id.
+        iat: Issued at.
+        exp: Expiration date.
+
+    Returns:
+        A JWT token (str)
+    """
+    issued_at = date_utils.get_naive_utc_now()
+    expiration_date = issued_at + ttl
+
+    jti = str(uuid.uuid4())
+    exp = int(expiration_date.timestamp())
+    iat = int(issued_at.timestamp())
+    sub = str(user_id)
+
+    # There's virtually none chance two users can have the same
+    # jti within the lifetime of their respective token.
+    # However let's be defensive, hashing together the user_id and the corresponding jti
+    # we ensure this case is covered.
+    value = json.dumps({"user_id": sub, "jti": jti})
+    key_suffix = hashlib.sha256(value.encode()).hexdigest()
+    redis_key = PASSWORDLESS_REDIS_KEY_TEMPLATE % {
+        "type_": TokenType.PASSWORDLESS_LOGIN.value,
+        "key_suffix": key_suffix,
+    }
+    get_redis_client().set(redis_key, value, ex=ttl)
+
+    token = jwt_utils.encode_jwt_payload_rs256(
+        {"sub": sub, "iat": iat, "exp": exp, "jti": jti},
+        private_key=settings.PASSWORDLESS_LOGIN_PRIVATE_KEY,
+        expiration_date=expiration_date,
+    )
+    return token
+
+
+def validate_passwordless_token(token: str) -> dict:
+    """Validate and consume the passwordless login token.
+    If valid, return the content of the payload.
+
+    Returns:
+        payload (dict): The payload of the token containing the JTI, the subject (user_id), the expiration and issued_at dates.
+
+    Raises:
+        InvalidToken (exception): If anything goes wrong while decoding or validating the token, we don’t want to give any additional hints, we raise `InvalidToken` in any cases.
+    """
+    try:
+        payload = jwt_utils.decode_jwt_token_rs256(
+            token, public_key=settings.PASSWORDLESS_LOGIN_PUBLIC_KEY, require=["exp", "iat", "sub", "jti"]
+        )
+    except jwt.ExpiredSignatureError as exc:
+        # Authentic but expired token
+        raise users_exceptions.ExpiredToken() from exc
+    except jwt.InvalidAlgorithmError as exc:
+        # Not a JWT token because wrong algo
+        raise exc
+    except jwt.PyJWTError as exc:
+        # Base exception for all others case we might be interested on
+        logger.warning("%s (reason: %s) raised while decoding passwordless login token", exc.__class__.__name__, exc)
+        raise users_exceptions.InvalidToken from exc
+
+    value = json.dumps({"user_id": payload["sub"], "jti": payload["jti"]})
+    key_suffix = hashlib.sha256(value.encode()).hexdigest()
+    redis_key = PASSWORDLESS_REDIS_KEY_TEMPLATE % {
+        "type_": TokenType.PASSWORDLESS_LOGIN.value,
+        "key_suffix": key_suffix,
+    }
+
+    with get_redis_client().pipeline() as pipeline:
+        pipeline.get(redis_key)
+        pipeline.delete(redis_key)
+        results = pipeline.execute()
+
+    if not results[0]:
+        raise users_exceptions.InvalidToken
+    redis_value = json.loads(results[0])
+    # The below statement are purely defensive code.
+    # We should ALWAYS have a perfect match between
+    # the payload of the token and what has been stored in the redis queue
+    if redis_value["user_id"] != payload["sub"] or redis_value["jti"] != payload["jti"]:
+        # Aborting
+        logger.error(
+            "Mismatch between the payload of an authentic passwordless login token and the corresponding redis value. Token jti: %s ; Redis jti: %s ; Token sub: %s ; Redis sub: %s",
+            payload["jti"],
+            redis_value["jti"],
+            payload["sub"],
+            redis_value["user_id"],
+        )
+        raise users_exceptions.InvalidToken
+
+    return payload

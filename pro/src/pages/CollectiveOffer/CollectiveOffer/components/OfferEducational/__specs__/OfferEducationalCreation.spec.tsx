@@ -1,0 +1,113 @@
+import { screen } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import * as router from 'react-router'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import {
+  CollectiveOfferAllowedAction,
+  type GetCollectiveOfferResponseModel,
+} from '@/apiClient/v1'
+import { getCollectiveOfferFactory } from '@/commons/utils/factories/collectiveApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { defaultCreationProps } from '../__tests-utils__/defaultProps'
+import {
+  OfferEducational,
+  type OfferEducationalProps,
+} from '../OfferEducational'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    editCollectiveOffer: vi.fn(),
+  },
+}))
+
+vi.mock('react-router', async () => ({
+  ...(await vi.importActual('react-router')),
+  useNavigate: vi.fn(),
+}))
+
+Element.prototype.scrollIntoView = vi.fn()
+
+vi.mock('@/commons/utils/windowMatchMedia', () => ({
+  doesUserPreferReducedMotion: vi.fn(() => true),
+}))
+
+function renderComponent(props: OfferEducationalProps, route?: string) {
+  const user = sharedCurrentUserFactory()
+  return renderWithProviders(<OfferEducational {...props} />, {
+    user,
+    storeOverrides: {
+      user: {
+        currentUser: user,
+        selectedPartnerVenue: makeGetVenueResponseModel({
+          id: 1,
+        }),
+      },
+    },
+    initialRouterEntries: route ? [route] : undefined,
+  })
+}
+
+describe('screens | OfferEducational : creation', () => {
+  let props: OfferEducationalProps
+  let offer: GetCollectiveOfferResponseModel
+  const mockNavigate = vi.fn()
+
+  beforeEach(() => {
+    offer = getCollectiveOfferFactory()
+
+    offer.venue.managingOfferer.id = 1
+    offer.allowedActions = [CollectiveOfferAllowedAction.CAN_EDIT_DETAILS]
+
+    props = {
+      ...defaultCreationProps,
+      offer,
+    }
+
+    vi.spyOn(router, 'useNavigate').mockReturnValue(mockNavigate)
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderComponent(props)
+
+    await screen.findByRole('textbox', {
+      name: /Décrivez ici votre projet/,
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should redirect to stock on submit', async () => {
+    vi.spyOn(api, 'editCollectiveOffer').mockResolvedValueOnce(offer)
+    renderComponent(props)
+
+    const descriptionField = await screen.findByRole('textbox', {
+      name: /Décrivez ici votre projet/,
+    })
+    await userEvent.type(descriptionField, 'Test description')
+
+    await userEvent.click(screen.getByText('Enregistrer et continuer'))
+
+    expect(mockNavigate).toHaveBeenCalledWith('/offre/3/collectif/stocks')
+  })
+
+  it('should redirect to right url if requete params exist on submit', async () => {
+    vi.spyOn(api, 'editCollectiveOffer').mockResolvedValueOnce(offer)
+    renderComponent(props, '/offre/collectif/3/creation?requete=1')
+
+    const descriptionField = await screen.findByRole('textbox', {
+      name: /Décrivez ici votre projet/,
+    })
+    await userEvent.type(descriptionField, 'Test description')
+
+    await userEvent.click(screen.getByText('Enregistrer et continuer'))
+
+    expect(mockNavigate).toHaveBeenCalledWith(
+      `/offre/${offer.id}/collectif/stocks?requete=1`
+    )
+  })
+})

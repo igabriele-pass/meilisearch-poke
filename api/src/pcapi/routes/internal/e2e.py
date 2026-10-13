@@ -1,0 +1,64 @@
+import time
+
+from flask import Response
+from flask import jsonify
+
+import pcapi.core.mails.testing as mails_testing
+from pcapi.db_utils import clean_all_database
+from pcapi.models import db
+from pcapi.models.api_errors import ApiErrors
+from pcapi.routes.internal.auth import api_key_required
+from pcapi.routes.internal.blueprint import testing_blueprint
+from pcapi.sandboxes.scripts import getters
+
+
+@testing_blueprint.route("/sandboxes/<module_name>/<getter_name>", methods=["GET"])
+@api_key_required
+def get_sandbox(module_name: str, getter_name: str) -> Response:
+    if not hasattr(getters, module_name):
+        errors = ApiErrors()
+        errors.add_error("module", f'Il n\'existe pas de tel "{module_name}" module de getters pour la sandbox')
+        raise errors
+
+    cypress_module = getattr(getters, module_name)
+
+    if not hasattr(cypress_module, getter_name):
+        errors = ApiErrors()
+        errors.add_error("getter", f'Il n\'existe pas de tel "{module_name} {getter_name}" getter pour la sandbox')
+        raise errors
+
+    getter = getattr(cypress_module, getter_name)
+
+    try:
+        clean_all_database(reset_ids=True)
+        obj = getter()
+        db.session.commit()  # otherwise reverse relation may be unsaved when using factory_related_name (VenueLocation)
+        return jsonify(obj)
+    except Exception as e:
+        errors = ApiErrors()
+        errors.add_error(
+            "query",
+            f'Une erreur s\'est produite lors du calcul de "{module_name} {getter_name}" pour la sandbox : {e}',
+        )
+        raise errors
+
+
+# The next endpoints must only be used with EMAIL_BACKEND set to `pcapi.core.mails.backends.testing.TestingBackend`
+# otherwise the outbox will be empty
+# The next endpoints is only available if ENABLE_TEST_ROUTES is set to 1
+@testing_blueprint.route("/sandboxes/clear_email_list", methods=["GET"])
+@api_key_required
+def clear_email_list() -> str:
+    if len(mails_testing.outbox) != 0:
+        mails_testing.outbox.clear()
+    return "Outbox cleared"
+
+
+@testing_blueprint.route("/sandboxes/get_unique_email", methods=["GET"])
+@api_key_required
+def get_unique_email() -> dict:
+    delay = 0
+    while len(mails_testing.outbox) == 0 and delay <= 60:
+        time.sleep(5)
+        delay += 5
+    return mails_testing.outbox[0]

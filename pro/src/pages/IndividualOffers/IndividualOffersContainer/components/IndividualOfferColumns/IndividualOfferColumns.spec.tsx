@@ -1,0 +1,455 @@
+import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { beforeEach } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import { type HeadLineOfferResponseModel, OfferStatus } from '@/apiClient/v1'
+import { HeadlineOfferContextProvider } from '@/commons/context/HeadlineOfferContext/HeadlineOfferContext'
+import {
+  Events,
+  INDIVIDUAL_OFFERS_NAVIGATION_SOURCE,
+} from '@/commons/core/FirebaseEvents/constants'
+import * as useSnackBar from '@/commons/hooks/useSnackBar'
+import { listOffersOfferFactory } from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import { Table, TableVariant } from '@/ui-kit/Table/Table'
+
+import { api } from 'apiClient/api'
+import { getIndividualOfferColumns } from './IndividualOfferColumns'
+
+const mockLogEvent = vi.fn()
+vi.mock('@/app/App/analytics/firebase', () => ({
+  useAnalytics: () => ({ logEvent: mockLogEvent }),
+}))
+
+const headlineOffer: HeadLineOfferResponseModel = {
+  id: 123,
+  name: 'Headline offer',
+  venueId: 1,
+}
+
+const baseOffer = listOffersOfferFactory({
+  id: 123,
+  name: 'My Offer',
+  status: OfferStatus.ACTIVE,
+  thumbUrl: '/image.png',
+  location: {
+    id: 1,
+    isVenueLocation: false,
+    banId: '35288_7283_00001',
+    inseeCode: '89001',
+    label: 'Bureau',
+    city: 'Paris',
+    street: '3 rue de Valois',
+    postalCode: '75001',
+    departmentCode: '75',
+    isManualEdition: true,
+    latitude: 48.85332,
+    longitude: 2.348979,
+  },
+  stocks: [
+    {
+      remainingQuantity: 2,
+      beginningDatetime: new Date().toISOString(),
+      id: 0,
+    },
+    {
+      remainingQuantity: 3,
+      beginningDatetime: new Date().toISOString(),
+      id: 0,
+    },
+  ],
+})
+
+type RenderOptions = {
+  isRefactoFutureOfferEnabled?: boolean
+  headlineOffer?: HeadLineOfferResponseModel | null
+  isReadOnly?: boolean
+}
+
+const renderTableWithOffer = (
+  offer = baseOffer,
+  options: RenderOptions = {},
+  features: string[] = []
+) => {
+  const { headlineOffer = null, isReadOnly = false } = options
+
+  const columns = getIndividualOfferColumns({
+    headlineOffer,
+    isReadOnly,
+  })
+
+  return renderWithProviders(
+    <HeadlineOfferContextProvider>
+      <Table
+        columns={columns}
+        data={[offer]}
+        isLoading={false}
+        variant={TableVariant.COLLAPSE}
+        noResult={{
+          message: '',
+          onFilterReset: () => {
+            throw new Error('Function not implemented.')
+          },
+        }}
+        noData={{
+          hasNoData: false,
+          message: {
+            icon: '',
+            title: '',
+            subtitle: '',
+          },
+        }}
+      />
+    </HeadlineOfferContextProvider>,
+    {
+      storeOverrides: {
+        user: {
+          currentUser: sharedCurrentUserFactory(),
+          selectedPartnerVenue: makeGetVenueResponseModel({ id: 2 }),
+        },
+      },
+      features,
+    }
+  )
+}
+describe('getIndividualOfferColumns', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderTableWithOffer()
+
+    await screen.findByText(/Bureau - 3 rue de Valois 75001 Paris/i)
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('renders location based on address', async () => {
+    renderTableWithOffer()
+    expect(
+      await screen.findByText(/Bureau - 3 rue de Valois 75001 Paris/i)
+    ).toBeInTheDocument()
+  })
+
+  it('renders total stock quantity', async () => {
+    renderTableWithOffer()
+    expect(await screen.findByText('5')).toBeInTheDocument()
+  })
+
+  it('renders "Illimité" if at least one stock is unlimited', async () => {
+    const offer = {
+      ...baseOffer,
+      stocks: [
+        {
+          id: 1,
+          remainingQuantity: 'unlimited',
+          beginningDatetime: new Date().toISOString(),
+          hasBookingLimitDatetimePassed: false,
+        },
+        {
+          id: 2,
+          remainingQuantity: 2,
+          beginningDatetime: new Date().toISOString(),
+          hasBookingLimitDatetimePassed: false,
+        },
+      ],
+    }
+    renderTableWithOffer(offer)
+    expect(await screen.findByText('Illimité')).toBeInTheDocument()
+  })
+
+  it('renders bookings column if refacto feature is enabled', async () => {
+    renderTableWithOffer(baseOffer, {
+      isRefactoFutureOfferEnabled: true,
+      headlineOffer: null,
+    })
+    expect(await screen.findByText(/Réservations/)).toBeInTheDocument()
+  })
+
+  it('should redirect to stocks edition page when the offer is not isEvent', async () => {
+    renderTableWithOffer({ ...baseOffer, isEvent: false }, {})
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Voir les actions' }))
+
+    expect(screen.getByRole('menuitem', { name: 'Stocks' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('/edition/tarifs')
+    )
+  })
+
+  it('should redirect to timetable edition page when the offer is isEvent', async () => {
+    renderTableWithOffer(
+      {
+        ...baseOffer,
+        isEvent: true,
+      },
+      {}
+    )
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Voir les actions' }))
+
+    expect(
+      screen.getByRole('menuitem', { name: 'Dates et capacités' })
+    ).toHaveAttribute('href', expect.stringContaining('/edition/horaires'))
+  })
+
+  it('should link to the exposure page', async () => {
+    renderTableWithOffer(baseOffer)
+
+    expect(
+      await screen.findByRole('link', { name: 'My Offer 2 dates' })
+    ).toHaveAttribute('href', expect.stringContaining('/visibilite'))
+  })
+
+  it('should keep creation link for draft', async () => {
+    renderTableWithOffer({ ...baseOffer, status: OfferStatus.DRAFT })
+
+    expect(
+      await screen.findByRole('link', { name: 'My Offer 2 dates' })
+    ).toHaveAttribute('href', expect.stringContaining('/creation/description'))
+  })
+
+  it('should include the actions column when isReadOnly is false', () => {
+    const columns = getIndividualOfferColumns({
+      headlineOffer: null,
+      isReadOnly: false,
+    })
+
+    expect(columns.map((column) => column.id)).toContain('actions')
+  })
+
+  it('should log source tracker on offer redirection link', async () => {
+    renderTableWithOffer({ ...baseOffer, isEvent: false }, {})
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Voir les actions' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Voir l’offre' }))
+
+    expect(mockLogEvent).toHaveBeenCalledWith(
+      Events.CLICKED_OFFER_FORM_NAVIGATION,
+      {
+        used: INDIVIDUAL_OFFERS_NAVIGATION_SOURCE.ACTIONS_MENU_VIEW_OFFER,
+        offerId: 123,
+      }
+    )
+  })
+
+  it('should log source tracker on offer edit redirection link', async () => {
+    renderTableWithOffer({ ...baseOffer, isEvent: false }, {})
+
+    const user = userEvent.setup()
+
+    await user.click(screen.getByRole('button', { name: 'Voir les actions' }))
+    await user.click(screen.getByRole('menuitem', { name: 'Stocks' }))
+
+    expect(mockLogEvent).toHaveBeenCalledWith(
+      Events.CLICKED_OFFER_FORM_NAVIGATION,
+      {
+        used: INDIVIDUAL_OFFERS_NAVIGATION_SOURCE.ACTIONS_MENU_EDIT_OFFER_STOCK,
+        offerId: 123,
+      }
+    )
+  })
+
+  it('should omit the actions column when isReadOnly is true', async () => {
+    renderTableWithOffer(baseOffer, { isReadOnly: true })
+
+    expect(await screen.findByText('My Offer')).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: 'Voir les actions' })
+    ).not.toBeInTheDocument()
+
+    const columns = getIndividualOfferColumns({
+      headlineOffer: null,
+      isReadOnly: true,
+    })
+    expect(columns.map((column) => column.id)).not.toContain('actions')
+  })
+
+  describe('Headline and pro advice actions', () => {
+    const snackBarSuccess = vi.fn()
+    const snackBarError = vi.fn()
+
+    beforeEach(() => {
+      vi.spyOn(useSnackBar, 'useSnackBar').mockImplementation(() => ({
+        success: snackBarSuccess,
+        error: snackBarError,
+      }))
+    })
+
+    it('should omit the headline button in the dropdown', async () => {
+      renderTableWithOffer({ ...baseOffer, isEvent: false }, {})
+
+      expect(await screen.findByText('My Offer')).toBeVisible()
+
+      const user = userEvent.setup()
+      await user.click(screen.getByRole('button', { name: 'Voir les actions' }))
+
+      expect(
+        await screen.findByRole('menuitem', { name: 'Stocks' })
+      ).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'Mettre à la une' })
+      ).not.toBeInTheDocument()
+    })
+
+    it('should upsert headline', async () => {
+      const upsertMock = vi.fn()
+      vi.spyOn(api, 'upsertHeadlineOffer').mockImplementation(upsertMock)
+      renderTableWithOffer({ ...baseOffer, isEvent: false }, {})
+
+      expect(await screen.findByText('My Offer')).toBeVisible()
+      await userEvent.click(screen.getByLabelText('Mettre à la une'))
+      expect(upsertMock).toHaveBeenCalled()
+    })
+
+    it('should show the right label for the headline button', async () => {
+      const deleteMock = vi.fn()
+      vi.spyOn(api, 'deleteHeadlineOffer').mockImplementation(deleteMock)
+
+      renderTableWithOffer(
+        { ...baseOffer, isEvent: false, id: headlineOffer.id },
+        { headlineOffer: headlineOffer }
+      )
+
+      expect(await screen.findByText('My Offer')).toBeVisible()
+      const user = userEvent.setup()
+      await user.click(await screen.findByLabelText('Ne plus mettre à la une'))
+
+      expect(deleteMock).toHaveBeenCalled()
+    })
+
+    it('should add a pro advice', async () => {
+      const createMock = vi.fn()
+      vi.spyOn(api, 'createOfferProAdvice').mockImplementation(createMock)
+      renderTableWithOffer(
+        { ...baseOffer, isEvent: false, id: headlineOffer.id },
+        {}
+      )
+
+      expect(await screen.findByText('My Offer')).toBeVisible()
+      const user = userEvent.setup()
+      await user.click(await screen.findByLabelText('Recommander'))
+
+      expect(
+        await screen.findByText('Ajouter votre recommandation')
+      ).toBeVisible()
+
+      await user.type(
+        await screen.findByLabelText(/Recommandation/),
+        'Recommandation 111'
+      )
+      await user.click(
+        await screen.findByRole('button', {
+          name: 'Enregistrer la recommandation',
+        })
+      )
+
+      expect(createMock).toHaveBeenCalled()
+    })
+
+    it('should display error when adding a pro advice for a rejected error', async () => {
+      renderTableWithOffer(
+        {
+          ...baseOffer,
+          isEvent: false,
+          id: headlineOffer.id,
+          status: OfferStatus.REJECTED,
+        },
+        {}
+      )
+
+      expect(await screen.findByText('My Offer')).toBeVisible()
+      const user = userEvent.setup()
+      await user.click(await screen.findByLabelText('Recommander'))
+
+      expect(snackBarError).toHaveBeenCalledWith(
+        "Offre non-conforme : aucune modification n'est possible dans ce cas. Veuillez créer une nouvelle offre."
+      )
+    })
+
+    it('should display error when adding a pro advice for a pending error', async () => {
+      renderTableWithOffer(
+        {
+          ...baseOffer,
+          isEvent: false,
+          id: headlineOffer.id,
+          status: OfferStatus.PENDING,
+        },
+        {}
+      )
+
+      expect(await screen.findByText('My Offer')).toBeVisible()
+      const user = userEvent.setup()
+      await user.click(await screen.findByLabelText('Recommander'))
+
+      expect(snackBarError).toHaveBeenCalledWith(
+        "Offre en cours de vérification : aucune modification n'est possible durant la vérification d’éligibilité."
+      )
+    })
+
+    it('should display error when adding a pro advice for a draft error', async () => {
+      renderTableWithOffer(
+        {
+          ...baseOffer,
+          isEvent: false,
+          id: headlineOffer.id,
+          status: OfferStatus.DRAFT,
+        },
+        {}
+      )
+
+      expect(await screen.findByText('My Offer')).toBeVisible()
+      const user = userEvent.setup()
+      await user.click(await screen.findByLabelText('Recommander'))
+
+      expect(snackBarError).toHaveBeenCalledWith(
+        'Votre offre doit être publiée pour faire cette action.'
+      )
+    })
+
+    it('should update a pro advice', async () => {
+      const updateMock = vi.fn()
+      vi.spyOn(api, 'updateOfferProAdvice').mockImplementation(updateMock)
+      vi.spyOn(api, 'getOfferProAdvice').mockResolvedValueOnce({
+        proAdvice: {
+          author: 'tata',
+          content: 'toto',
+          updatedAt: '',
+        },
+      })
+      renderTableWithOffer(
+        {
+          ...baseOffer,
+          isEvent: false,
+          id: headlineOffer.id,
+          hasProAdvice: true,
+        },
+        {}
+      )
+
+      expect(await screen.findByText('My Offer')).toBeVisible()
+      const user = userEvent.setup()
+      await user.click(
+        await screen.findByLabelText('Modifier la recommandation')
+      )
+
+      expect(
+        await screen.findByText('Ajouter votre recommandation')
+      ).toBeVisible()
+
+      await user.type(
+        await screen.findByLabelText(/Recommandation/),
+        'Recommandation 111'
+      )
+      await userEvent.click(
+        await screen.findByRole('button', {
+          name: 'Enregistrer la recommandation',
+        })
+      )
+      expect(updateMock).toHaveBeenCalled()
+    })
+  })
+})

@@ -1,0 +1,88 @@
+import { screen } from '@testing-library/react'
+import { renderWithProviders } from 'commons/utils/renderWithProviders'
+import { describe, expect, it } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import { SimplifiedBankAccountStatus } from '@/apiClient/v1'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+
+import { ReimbursementWaitingBanner } from './ReimbursementWaitingBanner'
+
+const renderBanner = (bankAccountStatus: SimplifiedBankAccountStatus | null) =>
+  renderWithProviders(<ReimbursementWaitingBanner />, {
+    storeOverrides: {
+      user: {
+        currentUser: sharedCurrentUserFactory(),
+        selectedPartnerVenue: makeGetVenueResponseModel({
+          id: 1,
+          bankAccountStatus,
+        }),
+      },
+    },
+  })
+
+describe('ReimbursementWaitingBanner', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderBanner(SimplifiedBankAccountStatus.VALID)
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show valid bank account message and faq link when the selected partner venue has a valid bank account', () => {
+    renderBanner(SimplifiedBankAccountStatus.VALID)
+    expect(
+      screen.getByText(
+        /Les remboursements sont effectués toutes les 2 à 3 semaines/i
+      )
+    ).toBeInTheDocument()
+    const faqLink = screen.getByRole('link', {
+      name: /Comment fonctionne les remboursements/i,
+    })
+    expect(faqLink).toHaveAttribute(
+      'href',
+      'https://aide.passculture.app/hc/fr/articles/4411992051601--Acteurs-Culturels-Quand-votre-prochain-remboursement-sera-t-il-effectu%C3%A9'
+    )
+  })
+
+  it('should show pending bank account message and internal link when the selected partner venue has a pending bank account', () => {
+    renderBanner(SimplifiedBankAccountStatus.PENDING)
+    expect(
+      screen.getByText(
+        /Vos coordonnées bancaires sont en cours de vérification/i
+      )
+    ).toBeInTheDocument()
+    const link = screen.getByRole('link', {
+      name: /Suivre la validation de vos coordonnées bancaires/i,
+    })
+    expect(link).toHaveAttribute(
+      'href',
+      '/administration/remboursements/informations-bancaires'
+    )
+  })
+
+  it('should show pending bank account message when the selected partner venue has a bank account with pending corrections', () => {
+    renderBanner(SimplifiedBankAccountStatus.PENDING_CORRECTIONS)
+    expect(
+      screen.getByText(
+        /Vos coordonnées bancaires sont en cours de vérification/i
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('should show no bank account message and internal link when the selected partner venue has no registered bank account', () => {
+    renderBanner(null)
+    expect(
+      screen.getByText(
+        /Ajoutez un compte bancaire pour débloquer le remboursement/i
+      )
+    ).toBeInTheDocument()
+    const link = screen.getByRole('link', {
+      name: /Ajouter un compte bancaire/i,
+    })
+    expect(link).toHaveAttribute(
+      'href',
+      '/administration/remboursements/informations-bancaires'
+    )
+  })
+})

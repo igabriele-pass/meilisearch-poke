@@ -1,0 +1,757 @@
+import datetime
+import json
+import re
+import typing
+from typing import Any
+
+import pydantic as pydantic_v2
+import pydantic.v1 as pydantic_v1
+from pydantic.v1 import Field
+from pydantic.v1 import HttpUrl
+from pydantic.v1 import conlist
+from pydantic.v1 import validator
+from pydantic.v1.utils import GetterDict
+
+from pcapi.core.categories.subcategories import SubcategoryIdEnum
+from pcapi.core.offerers.utils import is_venue_address
+from pcapi.core.offers import constants as offers_constants
+from pcapi.core.offers import models as offers_models
+from pcapi.core.offers import repository as offers_repository
+from pcapi.core.offers import validation as offers_validation
+from pcapi.models.offer_mixin import OfferStatus
+from pcapi.routes.serialization import BaseModel
+from pcapi.routes.serialization import ConfiguredBaseModel
+from pcapi.routes.serialization import HttpBodyModel
+from pcapi.routes.serialization import HttpQueryParamsModel
+from pcapi.routes.serialization import address_serialize
+from pcapi.routes.serialization import artist_serialize
+from pcapi.routes.serialization import highlight_serialize
+from pcapi.routes.serialization.address_serialize import LocationResponseModel
+from pcapi.routes.serialization.address_serialize import VenueAddressInfoGetter
+from pcapi.routes.serialization.address_serialize import retrieve_address_info_from_oa
+from pcapi.serialization.exceptions import PydanticError
+from pcapi.serialization.utils import DecimalField
+from pcapi.serialization.utils import HttpUrlStr
+from pcapi.serialization.utils import ValidHttpUrlStr
+from pcapi.serialization.utils import future_tz_aware_datetime_keep_tz
+from pcapi.serialization.utils import future_tz_aware_datetime_or_now_keep_tz
+from pcapi.serialization.utils import to_camel
+from pcapi.serialization.utils import validate_timezoned_datetime
+from pcapi.utils import date as date_utils
+from pcapi.utils.date import format_into_utc_date
+
+
+MAX_EXTRA_DATA_SIZE_BYTES = 64 * 1024
+
+# '<[^>]*>' to match <...> , 'on\w+\s*=' to match classic JS actions (onerror=, onload=...)
+HTML_INJECTION_REGEX = re.compile(r"<[^>]*>|on\w+\s*=", re.IGNORECASE)
+
+
+def validate_extra_data_size(extra_data: offers_models.OfferExtraData | None) -> None:
+    if len(json.dumps(extra_data).encode("utf-8")) > MAX_EXTRA_DATA_SIZE_BYTES:
+        raise PydanticError("extraData field is too big (maximum 64 Ko).")
+
+
+def validate_extra_data_content(extra_data: offers_models.OfferExtraData | None) -> None:
+    if HTML_INJECTION_REGEX.search(json.dumps(extra_data)):
+        raise PydanticError("extraData field includes forbidden caracters or scripts")
+
+
+# /!\ this class should not be migrated to pydantic v2
+# instead list the fields explicitely in the inheriting model
+class AccessibilityComplianceMixin(pydantic_v1.BaseModel):
+    audioDisabilityCompliant: bool | None
+    mentalDisabilityCompliant: bool | None
+    motorDisabilityCompliant: bool | None
+    visualDisabilityCompliant: bool | None
+
+
+class SubcategoryGetterDict(GetterDict):
+    def get(self, key: str, default: Any | None = None) -> Any:
+        if key == "conditional_fields":
+            return list(self._obj.conditional_fields.keys())
+        return super().get(key, default)
+
+
+class SubcategoryResponseModel(BaseModel):
+    id: str
+    category_id: str
+    pro_label: str
+    app_label: str
+    is_event: bool
+    conditional_fields: list[str]
+    can_expire: bool
+    can_be_duo: bool
+    online_offline_platform: str
+    is_digital_deposit: bool
+    is_physical_deposit: bool
+    reimbursement_rule: str
+    is_selectable: bool
+    can_be_withdrawable: bool
+    can_have_opening_hours: bool
+
+    class Config:
+        alias_generator = to_camel
+        allow_population_by_field_name = True
+        getter_dict = SubcategoryGetterDict
+        orm_mode = True
+
+
+class CategoryResponseModel(BaseModel):
+    id: str
+    pro_label: str
+    is_selectable: bool
+
+    class Config:
+        alias_generator = to_camel
+        allow_population_by_field_name = True
+        orm_mode = True
+
+
+# escape the inherited alias_generator=to_camel sets by HttpBodyModel
+@pydantic_v2.with_config(pydantic_v2.ConfigDict(extra="forbid"))
+class OfferExtraDataV2(offers_models.OfferExtraData):
+    pass
+
+
+class PatchOfferBodyModel(HttpBodyModel):
+    artist_offer_links: list[artist_serialize.ArtistOfferLinkBodyModelV2] | None = None
+    location: address_serialize.LocationBodyModelV2 | address_serialize.LocationOnlyOnVenueBodyModelV2 | None = (
+        pydantic_v2.Field(default=None, discriminator="isVenueLocation")
+    )
+    bookingContact: pydantic_v2.EmailStr | None = None
+    bookingEmail: pydantic_v2.EmailStr | None = None
+    hasCulturalOutreachClaim: bool | None = None
+    description: str | None = None
+    isNational: bool | None = None
+    name: str | None = pydantic_v2.Field(default=None, max_length=offers_constants.MAX_OFFER_NAME_LENGTH)
+    extraData: OfferExtraDataV2 | None = None
+    externalTicketOfficeUrl: ValidHttpUrlStr | None = None
+    url: ValidHttpUrlStr | None = None
+    withdrawalDetails: str | None = None
+    withdrawalType: offers_models.WithdrawalTypeEnum | None = None
+    withdrawalDelay: int | None = None
+    isDuo: bool | None = None
+    durationMinutes: int | None = None
+    shouldSendMail: bool | None = None
+    publicationDatetime: future_tz_aware_datetime_or_now_keep_tz | None = None
+    bookingAllowedDatetime: future_tz_aware_datetime_keep_tz | None = None
+    subcategory_id: str | None = None
+    audio_disability_compliant: bool | None = None
+    mental_disability_compliant: bool | None = None
+    motor_disability_compliant: bool | None = None
+    visual_disability_compliant: bool | None = None
+
+    @pydantic_v2.field_validator("subcategory_id")
+    @classmethod
+    def validate_subcategory_id(cls, subcategory_id: str | None) -> str | None:
+        offers_validation.check_offer_subcategory_is_valid(subcategory_id)
+        return subcategory_id
+
+    @pydantic_v2.field_validator("extraData")
+    @classmethod
+    def validate_extra_data(cls, extra_data: OfferExtraDataV2 | None) -> OfferExtraDataV2 | None:
+        if extra_data is None:
+            return None
+
+        validate_extra_data_size(extra_data)
+        validate_extra_data_content(extra_data)
+        return extra_data
+
+
+class UpdateOfferVideoBodyModel(HttpBodyModel):
+    video_url: HttpUrlStr | None
+    video_description: str | None = pydantic_v2.Field(
+        default=None, max_length=offers_constants.MAX_OFFER_VIDEO_DESCRIPTION_LENGTH
+    )
+
+    @pydantic_v2.field_validator("video_url", mode="before")
+    @classmethod
+    def clean_video_url(cls, value: typing.Any) -> HttpUrl | None:
+        if value == "":
+            return None
+        return value
+
+    @pydantic_v2.field_validator("video_url")
+    @classmethod
+    def validate_video_url(cls, video_url: HttpUrl | None) -> HttpUrl | None:
+        offers_validation.check_video_url(video_url)
+        return video_url
+
+
+class PatchOfferPublishBodyModel(BaseModel):
+    id: int
+    publicationDatetime: datetime.datetime | None
+    bookingAllowedDatetime: datetime.datetime | None
+
+    _validation_publication_datetime = validate_timezoned_datetime("publicationDatetime")
+    _validation_bookings_allowed_datetime = validate_timezoned_datetime("bookingAllowedDatetime")
+
+
+class PatchOfferActiveStatusBodyModel(BaseModel):
+    is_active: bool
+    ids: list[int]
+
+    class Config:
+        alias_generator = to_camel
+
+
+class PatchAllOffersActiveStatusBodyModel(BaseModel):
+    is_active: bool
+    offerer_id: int | None
+    venue_id: int | None
+    # We should not use an alias nameOrIsbn, but ListOffersQueryModel is used
+    # by the pro front for individual and collective search and most of the logic
+    # is shared on the offer search page
+    name_or_ean: str | None = Field(alias="nameOrIsbn")
+    category_id: str | None
+    creation_mode: str | None
+    status: OfferStatus | None
+    period_beginning_date: datetime.date | None
+    period_ending_date: datetime.date | None
+    offerer_address_id: int | None
+
+    class Config:
+        alias_generator = to_camel
+
+
+class PatchAllOffersActiveStatusResponseModel(BaseModel):
+    pass
+
+
+class ListOffersStockResponseModel(BaseModel):
+    id: int
+    remainingQuantity: int | str
+    beginningDatetime: datetime.datetime | None
+
+    @validator("remainingQuantity", pre=True)
+    def validate_remaining_quantity(cls, remainingQuantity: int | str) -> int | str:
+        if remainingQuantity and remainingQuantity != "0" and not isinstance(remainingQuantity, int):
+            return remainingQuantity.lstrip("0")
+        return remainingQuantity
+
+
+def offer_location_getter_dict_helper(offer: offers_models.Offer) -> LocationResponseModel | None:
+    if not offer.offererAddress:
+        return None
+    label = offer.offererAddress.label
+    is_venue_location = False
+    if is_venue_address(offer.offererAddress, offer.venue):
+        is_venue_location = True
+        label = None
+    return LocationResponseModel(
+        **retrieve_address_info_from_oa(offer.offererAddress),
+        label=label,
+        isVenueLocation=is_venue_location,
+    )
+
+
+class ListOffersOfferResponseModelsGetterDict(GetterDict):
+    def get(self, key: str, default: Any | None = None) -> Any:
+        if key == "stocks":
+            # TODO: front pro doesn't need the soft deleted stocks but maybe this could be handled in the request directly
+            return [_serialize_stock(stock) for stock in self._obj.stocks if not stock.isSoftDeleted]
+        if key == "productIsbn":
+            return self._obj.ean
+        if key == "location":
+            return offer_location_getter_dict_helper(self._obj)
+        if key == "bookingsCount":
+            return sum([stock.dnBookedQuantity for stock in self._obj.stocks])
+        if key == "hasProAdvice":
+            return bool(self._obj.hasProAdvice)
+        if key == "highlightRequests":
+            return [
+                highlight_request.highlight
+                for highlight_request in self._obj.highlight_requests
+                if highlight_request.highlight.highlight_datespan.upper > date_utils.get_naive_utc_now().date()
+            ]
+        return super().get(key, default)
+
+
+class ListOffersOfferResponseModel(BaseModel):
+    id: int
+    isEvent: bool
+    name: str
+    stocks: list[ListOffersStockResponseModel]
+    thumbUrl: str | None
+    productIsbn: str | None
+    subcategoryId: SubcategoryIdEnum
+    status: OfferStatus
+    location: LocationResponseModel | None
+    publicationDatetime: datetime.datetime | None
+    bookingAllowedDatetime: datetime.datetime | None
+    bookingsCount: int | None
+    productId: int | None
+    highlightRequests: list[highlight_serialize.ShortHighlightResponseModel]
+    hasProAdvice: bool
+
+    class Config:
+        json_encoders = {datetime.datetime: format_into_utc_date}
+        orm_mode = True
+        getter_dict = ListOffersOfferResponseModelsGetterDict
+
+
+class ListOffersResponseModel(BaseModel):
+    __root__: list[ListOffersOfferResponseModel]
+
+    class Config:
+        json_encoders = {datetime.datetime: format_into_utc_date}
+
+
+def _serialize_offer_paginated(offer: offers_models.Offer) -> ListOffersOfferResponseModel:
+    return ListOffersOfferResponseModel.from_orm(offer)
+
+
+def _serialize_stock(stock: offers_models.Stock) -> ListOffersStockResponseModel:
+    return ListOffersStockResponseModel(
+        id=stock.id,
+        remainingQuantity=stock.remainingQuantity,
+        beginningDatetime=stock.beginningDatetime,
+    )
+
+
+def serialize_capped_offers(paginated_offers: list[offers_models.Offer]) -> list[ListOffersOfferResponseModel]:
+    return [_serialize_offer_paginated(offer) for offer in paginated_offers]
+
+
+class ListOffersQueryModel(BaseModel):
+    # We should not use an alias nameOrIsbn, but ListOffersQueryModel is used
+    # by the pro front for individual and collective search and most of the logic
+    # is shared on the offer search page
+    name_or_ean: str | None = Field(alias="nameOrIsbn")
+    status: OfferStatus | None
+    venue_id: int | None
+    categoryId: str | None
+    creation_mode: str | None
+    period_beginning_date: datetime.date | None
+    period_ending_date: datetime.date | None
+    offerer_address_id: int | None
+
+    class Config:
+        alias_generator = to_camel
+        extra = "forbid"
+        arbitrary_types_allowed = True
+
+
+class ListOffersHomeQueryModel(HttpQueryParamsModel):
+    venue_id: int
+
+
+class StockHomeResponseModel(HttpBodyModel):
+    beginningDatetime: datetime.datetime | None
+
+
+class OfferHomeResponseModel(HttpBodyModel):
+    id: int
+    name: str
+    status: OfferStatus
+    isEvent: bool
+    thumbUrl: str | None
+    bookingsCount: int
+    publicationDatetime: datetime.datetime | None
+    departmentCode: str | None
+    stocks: list[StockHomeResponseModel]
+
+    @classmethod
+    def build(cls, offer: offers_models.Offer) -> typing.Self:
+        bookings_count = sum(stock.dnBookedQuantity for stock in offer.stocks)
+
+        if offer.offererAddress:
+            department_code = offer.offererAddress.address.departmentCode
+        else:
+            department_code = None
+
+        return cls(
+            id=offer.id,
+            name=offer.name,
+            status=offer.status,
+            isEvent=offer.isEvent,
+            thumbUrl=offer.thumbUrl,
+            bookingsCount=bookings_count,
+            publicationDatetime=offer.publicationDatetime,
+            departmentCode=department_code,
+            stocks=[StockHomeResponseModel.model_validate(stock) for stock in offer.activeStocks],
+        )
+
+
+class ListOffersHomeResponseModel(pydantic_v2.RootModel):
+    root: list[OfferHomeResponseModel]
+
+
+class GetOfferStockResponseModel(BaseModel):
+    activationCodesExpirationDatetime: datetime.datetime | None
+    beginningDatetime: datetime.datetime | None
+    bookingLimitDatetime: datetime.datetime | None
+    dnBookedQuantity: int = Field(alias="bookingsQuantity")
+    hasActivationCode: bool
+    isEventDeletable: bool
+    id: int
+    price: float
+    priceCategoryId: int | None
+    quantity: int | None
+    remainingQuantity: int | str | None
+
+    @classmethod
+    def from_orm(cls, stock: offers_models.Stock) -> "GetOfferStockResponseModel":
+        # here we have N+1 requests (for each stock we query an activation code)
+        # but it should be more efficient than loading all activationCodes of all stocks
+        if stock.canHaveActivationCodes:
+            available_activation_code = offers_repository.get_available_activation_code(stock)
+            stock.hasActivationCode = available_activation_code is not None  # type: ignore [attr-defined]
+            stock.activationCodesExpirationDatetime = (  # type: ignore [attr-defined]
+                available_activation_code.expirationDate if available_activation_code else None
+            )
+        else:
+            stock.hasActivationCode = False  # type: ignore [attr-defined]
+            stock.activationCodesExpirationDatetime = None  # type: ignore [attr-defined]
+        return super().from_orm(stock)
+
+    class Config:
+        allow_population_by_field_name = True
+        orm_mode = True
+        json_encoders = {datetime.datetime: format_into_utc_date}
+
+
+class GetOfferManagingOffererResponseModel(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        orm_mode = True
+
+
+class GetOfferVenueResponseModel(BaseModel, AccessibilityComplianceMixin):
+    street: str | None
+    bookingEmail: str | None
+    city: str | None
+    departementCode: str | None
+    id: int
+    managingOfferer: GetOfferManagingOffererResponseModel
+    name: str
+    postalCode: str | None
+    publicName: str
+
+    class Config:
+        orm_mode = True
+        json_encoders = {datetime.datetime: format_into_utc_date}
+        getter_dict = VenueAddressInfoGetter
+
+
+class GetOfferLastProviderResponseModel(BaseModel):
+    name: str
+
+    class Config:
+        orm_mode = True
+
+
+class GetOfferMediationResponseModel(BaseModel):
+    authorId: str | None
+    credit: str | None
+    thumbUrl: str | None
+    alternativeText: str | None
+
+    class Config:
+        orm_mode = True
+
+
+class PriceCategoryResponseModel(BaseModel):
+    id: int
+    hasStocks: bool
+    label: str
+    price: float
+
+    class Config:
+        orm_mode = True
+
+    @classmethod
+    def build(cls, price_category: offers_models.PriceCategory, has_stocks: bool) -> typing.Self:
+        return cls(
+            id=price_category.id,
+            hasStocks=has_stocks,
+            label=price_category.label,
+            price=float(price_category.price),
+        )
+
+
+def _format_time(time_to_format: datetime.time) -> str:
+    return time_to_format.strftime("%H:%M")
+
+
+class IndividualOfferResponseGetterDict(GetterDict):
+    def get(self, key: str, default: Any | None = None) -> Any:
+        if key == "videoData":
+            meta_data = self._obj.metaData
+            return VideoData.from_orm(meta_data)
+        if key == "extraData" and self._obj.product:
+            self._obj.ean = self._obj.product.ean
+        if key == "extraData" and self._obj.ean:
+            extra_data_copy = self._obj.extraData.copy() if self._obj.extraData else {}
+            extra_data_copy["ean"] = self._obj.ean
+            return extra_data_copy
+        if key == "highlightRequests":
+            return [
+                highlight_request.highlight
+                for highlight_request in self._obj.highlight_requests
+                if highlight_request.highlight.highlight_datespan.upper > datetime.date.today()
+            ]
+        if key == "priceCategories":
+            price_category_ids_with_stocks = {
+                stock.priceCategoryId for stock in self._obj.stocks if stock.priceCategoryId
+            }
+            return [
+                PriceCategoryResponseModel.build(price_category, price_category.id in price_category_ids_with_stocks)
+                for price_category in self._obj.priceCategories
+            ]
+        if key == "location":
+            return offer_location_getter_dict_helper(self._obj)
+        if key == "isHeadlineOffer":
+            return self._obj.is_headline_offer
+        return super().get(key, default)
+
+
+class VideoData(ConfiguredBaseModel):
+    videoDuration: int | None
+    videoExternalId: str | None
+    videoTitle: str | None
+    videoThumbnailUrl: str | None
+    videoUrl: HttpUrl | None
+    videoDescription: str | None
+
+
+class GetIndividualOfferResponseModel(BaseModel, AccessibilityComplianceMixin):
+    activeMediation: GetOfferMediationResponseModel | None
+    artistOfferLinks: list[artist_serialize.ArtistOfferLinkResponseModel]
+    bookingContact: str | None
+    bookingsCount: int | None
+    bookingEmail: str | None
+    dateCreated: datetime.datetime
+    publicationDate: datetime.datetime | None  # TODO: (tcoudray-pass, 16/06/25) Remove in favor of publicationDatetime
+    publicationDatetime: datetime.datetime | None
+    bookingAllowedDatetime: datetime.datetime | None
+    description: str | None
+    durationMinutes: int | None
+    extraData: offers_models.OfferExtraData | None
+    hasBookingLimitDatetimesPassed: bool
+    hasStocks: bool
+    isActive: bool
+    isDigital: bool
+    isDuo: bool
+    isEditable: bool
+    isEvent: bool
+    canBeEvent: bool
+    isNational: bool
+    isThing: bool
+    id: int
+    lastProvider: GetOfferLastProviderResponseModel | None
+    name: str
+    priceCategories: list[PriceCategoryResponseModel] | None
+    subcategoryId: SubcategoryIdEnum
+    productId: int | None
+    thumbUrl: str | None
+    externalTicketOfficeUrl: str | None
+    url: str | None
+    venue: GetOfferVenueResponseModel
+    withdrawalDelay: int | None
+    withdrawalDetails: str | None
+    withdrawalType: offers_models.WithdrawalTypeEnum | None
+    status: OfferStatus
+    isNonFreeOffer: bool | None
+    videoData: VideoData
+    highlightRequests: list[highlight_serialize.ShortHighlightResponseModel]
+    hasCulturalOutreachClaim: bool
+    location: LocationResponseModel | None
+    hasPendingBookings: bool
+    isHeadlineOffer: bool
+
+    class Config:
+        orm_mode = True
+        json_encoders = {datetime.datetime: format_into_utc_date, datetime.time: _format_time}
+        use_enum_values = True
+        getter_dict = IndividualOfferResponseGetterDict
+
+
+class GetActiveEANOfferResponseModel(BaseModel, AccessibilityComplianceMixin):
+    dateCreated: datetime.datetime
+    isActive: bool
+    id: int
+    name: str
+    subcategoryId: SubcategoryIdEnum
+    productId: int | None
+    status: OfferStatus
+
+    class Config:
+        orm_mode = True
+        json_encoders = {datetime.datetime: format_into_utc_date}
+        use_enum_values = True
+
+
+class GetStocksResponseModel(ConfiguredBaseModel):
+    stocks: list[GetOfferStockResponseModel]
+    total_stock_count: int
+    edited_stock_count: int
+
+    class Config:
+        json_encoders = {datetime.datetime: format_into_utc_date}
+
+
+class StockStatsResponseModel(ConfiguredBaseModel):
+    oldest_stock: datetime.datetime | None
+    newest_stock: datetime.datetime | None
+    stock_count: int | None
+    remaining_quantity: int | None
+
+    class Config:
+        json_encoders = {datetime.datetime: format_into_utc_date}
+
+
+class StocksQueryModel(BaseModel):
+    date: datetime.date | None
+    time: datetime.time | None
+    price_category_id: int | None
+    order_by: offers_repository.StocksOrderedBy = offers_repository.StocksOrderedBy.BEGINNING_DATETIME
+    order_by_desc: bool = False
+    page: int = Field(1, ge=1)
+    stocks_limit_per_page: int = offers_repository.LIMIT_STOCKS_PER_PAGE
+    # based on booking_limit_datetime, if True, will only return stocks whose booking limit datetime are after today
+    only_future_stocks: bool = False
+
+
+class DeleteStockListBody(BaseModel):
+    if typing.TYPE_CHECKING:
+        ids_to_delete: list[int]
+    else:
+        ids_to_delete: conlist(int, max_items=offers_repository.STOCK_LIMIT_TO_DELETE)
+
+
+class CategoriesResponseModel(BaseModel):
+    categories: list[CategoryResponseModel]
+    subcategories: list[SubcategoryResponseModel]
+
+
+class DeleteOfferRequestBody(BaseModel):
+    ids: list[int | None]
+
+
+class UpsertPriceCategoryModel(HttpBodyModel):
+    # None -> creation of price category, not None -> updating price category
+    id: int | None
+    label: str = pydantic_v2.Field(min_length=1, max_length=50)
+    price: DecimalField = pydantic_v2.Field(
+        max_digits=12,
+        decimal_places=2,
+        ge=0.00,
+    )
+
+
+class PriceCategoryBody(HttpBodyModel):
+    price_categories: list[UpsertPriceCategoryModel] = pydantic_v2.Field(
+        max_length=offers_models.Offer.MAX_PRICE_CATEGORIES_PER_OFFER
+    )
+
+    @pydantic_v2.field_validator("price_categories")
+    def get_unique_price_categories(
+        cls,
+        price_categories: list[UpsertPriceCategoryModel],
+    ) -> list[UpsertPriceCategoryModel]:
+        unique_price_categories = set()
+        for price_category in price_categories:
+            if (price_category.label, price_category.price) in unique_price_categories:
+                raise PydanticError("Les tarifs doivent être uniques")
+            unique_price_categories.add((price_category.label, price_category.price))
+        return price_categories
+
+
+class MusicTypeResponse(BaseModel):
+    gtl_id: str
+    label: str
+    canBeEvent: bool
+
+
+class GetMusicTypesResponse(BaseModel):
+    __root__: list[MusicTypeResponse]
+
+
+class GetProductInformations(BaseModel):
+    id: int
+    name: str
+    description: str | None
+    subcategoryId: str
+    gtl_id: str
+    author: str
+    performer: str
+    images: dict
+    ean: str | None
+
+    @classmethod
+    def from_orm(cls, product: offers_models.Product) -> "GetProductInformations":
+        product.gtl_id = product.extraData.get("gtl_id", "") if product.extraData else ""  # type: ignore [attr-defined]
+        product.author = product.extraData.get("author", "") if product.extraData else ""  # type: ignore [attr-defined]
+        product.performer = product.extraData.get("performer", "") if product.extraData else ""  # type: ignore [attr-defined]
+        return super().from_orm(product)
+
+    class Config:
+        alias_generator = to_camel
+        allow_population_by_field_name = True
+        orm_mode = True
+
+
+class VideoMetatdataQueryModel(BaseModel):
+    video_url: HttpUrl
+
+    class Config:
+        alias_generator = to_camel
+        extra = "forbid"
+
+
+class OfferVideo(ConfiguredBaseModel):
+    id: str
+    title: str | None
+    thumbnailUrl: str | None
+    duration: int | None
+
+
+class PostOfferBodyModel(HttpBodyModel):
+    name: str = pydantic_v2.Field(max_length=offers_constants.MAX_OFFER_NAME_LENGTH)
+    venue_id: int
+    has_cultural_outreach_claim: bool | None
+    description: str | None
+    subcategory_id: str
+    duration_minutes: int | None
+    extra_data: OfferExtraDataV2 | None
+    artist_offer_links: list[artist_serialize.ArtistOfferLinkBodyModelV2] | None
+    audio_disability_compliant: bool
+    mental_disability_compliant: bool
+    motor_disability_compliant: bool
+    visual_disability_compliant: bool
+    product_id: int | None
+
+    @pydantic_v2.field_validator("extra_data")
+    @classmethod
+    def validate_extra_data(cls, extra_data: OfferExtraDataV2 | None) -> OfferExtraDataV2 | None:
+        if extra_data is None:
+            return None
+
+        validate_extra_data_size(extra_data)
+        validate_extra_data_content(extra_data)
+        return extra_data
+
+
+class ProAdviceModel(HttpBodyModel):
+    content: str
+    author: str | None
+    updated_at: datetime.datetime
+
+
+class GetProAdviceResponseModel(HttpBodyModel):
+    pro_advice: ProAdviceModel | None
+
+
+class PostProAdviceResponseModel(GetProAdviceResponseModel): ...
+
+
+class PatchProAdviceResponseModel(GetProAdviceResponseModel): ...
+
+
+class ProAdviceBodyModel(HttpBodyModel):
+    content: str = pydantic_v2.Field(min_length=1, max_length=800)
+    author: str | None = pydantic_v2.Field(min_length=1, max_length=20, default=None)

@@ -1,0 +1,104 @@
+{% from "components/forms.html" import build_form_fields_group with context %}
+{% extends "layouts/connected.html" %}
+{% macro feature_flag_toggle(feature_flag, feature_flag_checked, enabled) %}
+  <input class="form-check-input"
+         type="checkbox"
+         role="switch"
+         data-bs-toggle="modal"
+         data-bs-target=".pc-toggle-feature-flag-modal-{{ feature_flag.id }}"
+         name="is_feature_flag_active"
+         id="feature-flag-switch-{{ feature_flag.id }}"
+         aria-label="{{ feature_flag_checked | format_bool }}"
+         {{ "checked" if feature_flag_checked else "" }}
+         data-description="{{ feature_flag.description }}"
+         data-name="{{ feature_flag.name }}"
+         data-confirm-modal=".pc-toggle-feature-flag-modal-{{ feature_flag.id }}"
+         {%+ if not enabled %} disabled {% endif %} />
+{% endmacro %}
+{% block page %}
+  <div class="pt-3 px-5 pc-feature-flip">
+    <h1>Feature flipping</h1>
+    <div class="row">
+      <div class="col-12">
+        <form class="input-group my-3 px-1">
+          <span class="input-group-text bg-white"><i class="bi bi-search"></i></span>
+          <input type="text"
+                 class="form-control col-8 border-start-0"
+                 name="q"
+                 value=""
+                 data-filter-dataset
+                 data-normalize="true"
+                 data-ignore-case="true"
+                 data-fields="description,name"
+                 data-on="input[type='checkbox']"
+                 data-filter-context=".pc-feature-flip"
+                 aria-describedby="search-icon"
+                 placeholder="Nom du feature flip ou description..." />
+          <button class="btn btn-outline-dark"
+                  type="reset"
+                  title="supprimer le filtre">
+            <i class="bi bi-x"></i>
+          </button>
+        </form>
+      </div>
+    </div>
+    <div>
+      <table class="table mb-4">
+        <thead>
+          <tr>
+            <th scope="col">Activé</th>
+            <th scope="col">Nom</th>
+            <th scope="col">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for feature_flag in rows %}
+            <tr class="pc-filter-dataset">
+              <td>
+                {% set feature_flag_checked = feature_flag.isActive %}
+                {% if has_permission("FEATURE_FLIPPING") %}
+                  <div class="form-check form-switch">{{ feature_flag_toggle(feature_flag, feature_flag_checked, true) }}</div>
+                  <div class="modal modal-lg fade pc-toggle-feature-flag-modal-{{ feature_flag.id }}"
+                       tabindex="-1"
+                       aria-labelledby="{{ toggle_feature_flag_modal_label_id }}"
+                       aria-hidden="true">
+                    <div class="modal-dialog modal-dialog-centered">
+                      <div class="modal-content">
+                        <form action="{{ url_for('.disable_feature_flag', feature_flag_id=feature_flag.id) if feature_flag.isActive else url_for(".enable_feature_flag", feature_flag_id=feature_flag.id) }}"
+                              name="{{ url_for('.disable_feature_flag', feature_flag_id=feature_flag.id) if feature_flag.isActive else url_for(".enable_feature_flag", feature_flag_id=feature_flag.id) | action_to_name }}"
+                              method="post">
+                          {{ csrf_token }}
+                          <div class="modal-header"
+                               id="{{ toggle_feature_flag_modal_label_id }}">
+                            <h5 class="modal-title">{{ "Désactiver" if feature_flag.isActive else "Activer" }} le feature flag {{ feature_flag.name }}</h5>
+                          </div>
+                          <div class="modal-body row">
+                            <p>
+                              Vous allez {{ "désactiver" if feature_flag.isActive else "activer" }} le feature flag {{ feature_flag.name }} dans l'environnement <strong>{{ env | upper }}</strong>. Veuillez confirmer ce choix.
+                            </p>
+                            {{ build_form_fields_group(toggle_feature_flag_form) }}
+                          </div>
+                          <div class="modal-footer">
+                            <button type="button"
+                                    class="btn btn-outline-primary-subtle-bg"
+                                    data-bs-dismiss="modal">Annuler</button>
+                            <button type="submit"
+                                    class="btn btn-primary">Confirmer</button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
+                {% else %}
+                  <div class="form-check form-switch">{{ feature_flag_toggle(feature_flag, feature_flag_checked, false) }}</div>
+                {% endif %}
+              </td>
+              <td>{{ feature_flag.name }}</td>
+              <td>{{ feature_flag.description }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+{% endblock page %}

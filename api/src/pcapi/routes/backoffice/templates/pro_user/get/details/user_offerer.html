@@ -1,0 +1,28 @@
+{% import "components/links.html" as links with context %}
+<table class="table table-hover my-4">
+  <thead>
+    <tr>
+      <th scope="col"></th>
+      <th scope="col">ID de l'entité juridique</th>
+      <th scope="col">Statut du rattachement</th>
+      <th scope="col">Statut entité juridique</th>
+      <th scope="col">Nom</th>
+      <th scope="col">
+        SIREN
+        {% if user_offerers | map(attribute="offerer") | map(attribute="rid7") | any %}/ RID7{% endif %}
+      </th>
+    </tr>
+  </thead>
+  <tbody class="table-group-divider">
+    {% for user_offerer in user_offerers %}
+      <tr>
+        <th scope="row"></th>
+        <td>{{ user_offerer.offererId }}</td>
+        <td>{{ user_offerer | format_user_offerer_status_badge }}</td>
+        <td>{{ user_offerer.offerer | format_offerer_status_badge }}</td>
+        <td class="text-break">{{ links.build_offerer_name_to_details_link(user_offerer.offerer) }}</td>
+        <td>{{ links.build_siren_to_external_link(user_offerer.offerer) }}</td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>

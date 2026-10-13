@@ -1,0 +1,36 @@
+import { Outlet, useLocation } from 'react-router'
+
+import { FullLayout } from '@/app/App/layouts/FullLayout/FullLayout'
+import { SimulatorContextProvider } from '@/pages/Simulator/SimulatorContext'
+
+import styles from './Simulator.module.scss'
+
+export const Simulator = (): JSX.Element => {
+  const location = useLocation()
+  const stepTitles: Record<string, string> = {
+    '/inscription/preparation/siret':
+      'Préparation de l’inscription - Étape 1 sur 4',
+    '/inscription/preparation/accueil-public':
+      'Préparation de l’inscription - Étape 2 sur 4',
+    '/inscription/preparation/activite':
+      'Préparation de l’inscription - Étape 3 sur 4',
+    '/inscription/preparation/publics':
+      'Préparation de l’inscription - Étape 4 sur 4',
+  }
+  return (
+    <FullLayout>
+      <div className={styles['simulator-container']}>
+        <div className={styles['step-title']}>
+          {stepTitles[location.pathname]}
+        </div>
+        <SimulatorContextProvider>
+          <Outlet />
+        </SimulatorContextProvider>
+      </div>
+    </FullLayout>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = Simulator

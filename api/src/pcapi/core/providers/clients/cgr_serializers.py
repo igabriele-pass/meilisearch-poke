@@ -1,0 +1,80 @@
+import datetime
+import logging
+from decimal import Decimal
+
+from pydantic import BaseModel as BaseModelV2
+from pydantic import field_validator
+
+from pcapi.core.offers import models as offers_models
+
+
+logger = logging.getLogger(__name__)
+
+
+class Seance(BaseModelV2):
+    IDSeance: int
+    Date: datetime.date
+    Heure: datetime.time
+    NbPlacesRestantes: int
+    bAvecPlacement: bool
+    bAvecDuo: bool
+    bICE: bool
+    Relief: str
+    Version: str
+    bAVP: bool
+    PrixUnitaire: Decimal
+    libTarif: str
+
+
+class Film(BaseModelV2):
+    IDFilm: int
+    IDFilmAlloCine: int
+    Titre: str
+    NumVisa: int
+    Duree: int
+    Synopsis: str
+    Affiche: str
+    TypeFilm: str
+    Seances: list[Seance]
+
+    @field_validator("Seances")
+    def skip_showtimes_with_negative_remaining_quantity(cls, seances: list[Seance]) -> list[Seance]:
+        sanitized_showtimes = []
+        for seance in seances:
+            if seance.NbPlacesRestantes < 0:
+                logger.warning(
+                    "Skipping CGR showtime because of negative remaining places",
+                    extra={"showtime_quantity": seance.NbPlacesRestantes, "showtime_id": seance.IDSeance},
+                )
+                continue
+            sanitized_showtimes.append(seance)
+        return sanitized_showtimes
+
+    def to_generic_movie(self) -> offers_models.Movie:
+        return offers_models.Movie(
+            allocine_id=str(self.IDFilmAlloCine),
+            duration=self.Duree,
+            description=self.Synopsis,
+            extra_data=None,
+            poster_url=self.Affiche,
+            title=self.Titre,
+            visa=str(self.NumVisa),
+        )
+
+
+class GetSancesPassCultureResponseBody(BaseModelV2):
+    NumCine: int
+    Films: list[Film]
+
+
+class GetSancesPassCultureResponse(BaseModelV2):
+    CodeErreur: int
+    IntituleErreur: str
+    ObjetRetour: GetSancesPassCultureResponseBody
+
+
+class ReservationPassCultureResponse(BaseModelV2):
+    CodeErreur: int
+    IntituleErreur: str
+    QrCode: str
+    Placement: str

@@ -1,0 +1,263 @@
+import datetime
+import enum
+import typing
+
+import pydantic as pydantic_v2
+import pydantic.v1 as pydantic_v1
+from pydantic import BaseModel as BaseModelV2
+from pydantic import alias_generators
+from pydantic.v1 import validator
+
+from pcapi.routes.serialization import BaseModel
+from pcapi.serialization import common_models
+from pcapi.serialization import utils as serialization_utils
+from pcapi.utils import phone_number as phone_number_utils
+from pcapi.utils.date import format_into_utc_date
+
+
+SocialMedia = typing.Literal["facebook", "instagram", "snapchat", "twitter"]
+
+SocialMedias = dict[SocialMedia, pydantic_v1.HttpUrl]
+SocialMediasV2 = dict[SocialMedia, serialization_utils.ValidHttpUrlStr]
+
+
+class CoreLocationModelV2(BaseModelV2):
+    isManualEdition: bool = False
+    isVenueLocation: bool = False
+    banId: str | None = None
+    city: str = pydantic_v2.Field(min_length=1, max_length=200)
+    inseeCode: str | None = pydantic_v2.Field(min_length=5, max_length=5, default=None)
+    label: str | None = None
+    latitude: common_models.LatitudeDecimal
+    longitude: common_models.LongitudeDecimal
+    postalCode: str = pydantic_v2.Field(min_length=5, max_length=5)
+    street: str = pydantic_v2.Field(min_length=1, max_length=200)
+
+    @pydantic_v2.field_validator("city")
+    @classmethod
+    def title_city_when_manually_edited(cls, city: str, info: pydantic_v2.ValidationInfo) -> str:
+        if info.data.get("isManualEdition") is True:
+            return city.title()
+
+        return city
+
+
+class CoreLocationOnlyOnVenueModelV2(BaseModelV2):
+    isVenueLocation: typing.Literal[True] = True
+
+
+# Legacy (pydantic V1)
+class RequiredStrippedString(pydantic_v1.ConstrainedStr):
+    strip_whitespace = True
+    min_length = 1
+
+
+# NOTE(jbaudet - 02/2026): deprecated -> pydantic v2 migration ongoing
+# check VenueContactModelV2 below.
+# It has not been removed yet because it is used by another model used
+# by others models...
+class VenueContactModel(BaseModel):
+    class Config:
+        alias_generator = serialization_utils.to_camel
+        allow_population_by_field_name = True
+        orm_mode = True
+        anystr_strip_whitespace = True
+        extra = pydantic_v1.Extra.forbid
+
+    email: pydantic_v1.EmailStr | None
+    website: str | None = pydantic_v1.Field(max_length=256)
+    phone_number: str | None
+    social_medias: SocialMedias | None
+
+    @validator("phone_number")
+    def validate_phone_number(cls, phone_number: str) -> str | None:
+        if not phone_number:
+            return None
+
+        try:
+            return phone_number_utils.ParsedPhoneNumber(phone_number).phone_number
+        except Exception:
+            raise ValueError(f"numéro de téléphone invalide: {phone_number}")
+
+    @validator("website")
+    def validate_website_url(cls, website: str) -> str:
+        try:
+            serialization_utils.check_url(website, "v1")
+        except ValueError:
+            raise ValueError(f"url du site web invalide: {website}")
+        return website
+
+
+class VenueContactModelV2(BaseModelV2):
+    email: pydantic_v2.EmailStr | None = None
+    website: str | None = pydantic_v2.Field(default=None, max_length=256)
+    phone_number: str | None = None
+    social_medias: SocialMediasV2 | None = None
+
+    @pydantic_v2.field_validator("phone_number", mode="after")
+    def validate_phone_number(cls, phone_number: str | None) -> str | None:
+        return serialization_utils.validate_phone_number_nullable(phone_number)
+
+    @pydantic_v2.field_validator("website", mode="after")
+    def validate_website_url(cls, website: str | None) -> str | None:
+        serialization_utils.check_url(website, "v2")
+        return website
+
+    model_config = pydantic_v2.ConfigDict(
+        alias_generator=alias_generators.to_camel,
+        from_attributes=True,
+        validate_by_name=True,
+        json_encoders={datetime.datetime: format_into_utc_date},
+        allow_inf_nan=False,
+        str_strip_whitespace=True,
+        url_preserve_empty_path=True,
+        extra="forbid",
+    )
+
+
+VENUE_INSEE_CODE_MAX_LENGTH = 5
+VENUE_INSEE_CODE_MIN_LENGTH = 5
+BOOKING_EMAIL_MAX_LENGTH = 120
+VENUE_ADDRESS_MAX_LENGTH = 200
+VENUE_BAN_ID_MAX_LENGTH = 50
+VENUE_CITY_MAX_LENGTH = 200
+VENUE_COMMENT_MAX_LENGTH = 500
+VENUE_DESCRIPTION_MAX_LENGTH = 1000
+VENUE_IMAGE_CREDIT_MAX_LENGTH = 255
+VENUE_IMAGE_ALTERNATIVE_TEXT_MAX_LENGTH = 150
+VENUE_NAME_MAX_LENGTH = 140
+VENUE_POSTAL_CODE_MAX_LENGTH = 5
+VENUE_POSTAL_CODE_MIN_LENGTH = 5
+VENUE_PUBLIC_NAME_MAX_LENGTH = 255
+VENUE_WITHDRAWAL_DETAILS_MAX_LENGTH = 500
+
+
+# TODO(pydantic_v2): remove after BannerMetaModel and native's VenueResponse are migrated
+class VenueImageCredit(RequiredStrippedString):
+    max_length = 255
+
+
+# TODO(pydantic_v2): remove after native's VenueResponse is migrated
+class VenueDescription(pydantic_v1.ConstrainedStr):
+    strip_whitespace = True
+    # optional, hence no `min_length`
+    max_length = VENUE_DESCRIPTION_MAX_LENGTH
+
+
+# TODO(pydantic_v2): remove once LocationModel in the file is removed
+class VenueAddress(RequiredStrippedString):
+    max_length = 200
+
+
+# TODO(pydantic_v2): remove once LocationModel in the file is removed
+class VenueCity(RequiredStrippedString):
+    max_length = VENUE_CITY_MAX_LENGTH
+
+
+# TODO(pydantic_v2): remove once LocationModel in the file is removed
+class VenueInseeCode(RequiredStrippedString):
+    min_length = VENUE_INSEE_CODE_MIN_LENGTH
+    max_length = VENUE_INSEE_CODE_MAX_LENGTH
+
+
+class VenuePostalCode(RequiredStrippedString):
+    min_length = VENUE_POSTAL_CODE_MIN_LENGTH
+    max_length = VENUE_POSTAL_CODE_MAX_LENGTH
+
+
+class LocationOnlyOnVenueModel(BaseModel):
+    isVenueLocation: bool = True
+
+    @validator("isVenueLocation")
+    def validate_is_venue_location(cls, is_venue_location: bool) -> bool:
+        if is_venue_location is not True:
+            raise ValueError()
+        return is_venue_location
+
+
+# Use CoreLocationModelV2 for pydantic V2.
+class LocationModel(BaseModel):
+    isManualEdition: bool = False
+    isVenueLocation: bool = False
+    banId: str | None
+    city: VenueCity
+    inseeCode: VenueInseeCode | None
+    label: str | None
+    latitude: float | str
+    longitude: float | str
+    postalCode: VenuePostalCode
+    street: VenueAddress
+
+    @validator("isVenueLocation")
+    def validate_is_venue_location(cls, is_venue_location: bool) -> bool:
+        if is_venue_location is not False:
+            raise ValueError()
+        return is_venue_location
+
+    @validator("city")
+    def title_city_when_manually_edited(cls, city: str, values: dict) -> str:
+        if values["isManualEdition"] is True:
+            return city.title()
+        return city
+
+
+class BannerMetaModel(typing.TypedDict, total=False):
+    image_credit: VenueImageCredit | None
+    image_credit_url: str | None
+    image_alternative_text: str | None
+    is_from_google: bool
+
+
+# [DEPRECATION NOTICE - ETA T1 2026]
+# This typology is to be replaced by Activity (Venue's main business activity) and EducationalDomains (Venue's cultural domains)
+# Once activity and domains are implemented and data migrated, this will be deleted
+# Keep this enum ordered and with the OTHER value first
+class VenueTypeCode(enum.Enum):
+    OTHER = "Autre"
+    VISUAL_ARTS = "Arts visuels, arts plastiques et galeries"
+    LIBRARY = "Bibliothèque ou médiathèque"
+    CULTURAL_CENTRE = "Centre culturel"
+    MOVIE = "Cinéma - Salle de projections"
+    TRAVELING_CINEMA = "Cinéma itinérant"
+    ARTISTIC_COURSE = "Cours et pratique artistiques"
+    SCIENTIFIC_CULTURE = "Culture scientifique"
+    FESTIVAL = "Festival"
+    GAMES = "Jeux / Jeux vidéos"
+    BOOKSTORE = "Librairie"
+    CREATIVE_ARTS_STORE = "Magasin arts créatifs"
+    DISTRIBUTION_STORE = "Magasin de distribution de produits culturels"
+    RECORD_STORE = "Musique - Disquaire"
+    MUSICAL_INSTRUMENT_STORE = "Musique - Magasin d’instruments"
+    CONCERT_HALL = "Musique - Salle de concerts"
+    MUSEUM = "Musée"
+    DIGITAL = "Offre numérique"
+    PATRIMONY_TOURISM = "Patrimoine et tourisme"
+    PERFORMING_ARTS = "Spectacle vivant"
+
+    # These methods are used by pydantic in order to return the enum name and validate the value
+    # instead of returning the enum directly.
+    @classmethod
+    def __get_validators__(cls) -> typing.Iterator[typing.Callable]:
+        yield cls.validate
+
+    @classmethod
+    def validate(cls, value: str | enum.Enum) -> str:
+        if isinstance(value, enum.Enum):
+            value = value.name
+
+        if not hasattr(cls, value):
+            raise ValueError(f"{value}: invalide")
+
+        return value
+
+
+VenueTypeCodeKey = enum.Enum(  # type: ignore[misc]
+    "VenueTypeCodeKey",
+    {code.name: code.name for code in VenueTypeCode},
+)
+
+
+class GetOffererAddressesWithOffersOption(enum.Enum):
+    INDIVIDUAL_OFFERS_ONLY = "INDIVIDUAL_OFFERS_ONLY"
+    COLLECTIVE_OFFERS_ONLY = "COLLECTIVE_OFFERS_ONLY"
+    COLLECTIVE_OFFER_TEMPLATES_ONLY = "COLLECTIVE_OFFER_TEMPLATES_ONLY"

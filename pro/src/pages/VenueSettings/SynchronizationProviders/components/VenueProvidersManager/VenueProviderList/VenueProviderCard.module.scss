@@ -1,0 +1,95 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.venue-provider-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-start;
+  border-radius: var(--size-border-radius-m);
+  border: 1px solid var(--color-border-subtle);
+  padding: var(--size-spacing-l) var(--size-spacing-xl) var(--size-spacing-s);
+  width: 100%;
+  gap: rem.torem(20px);
+  max-width: rem.torem(486px);
+
+  @media (min-width: size.$tablet) {
+    width: rem.torem(486px);
+    min-height: rem.torem(150px);
+    gap: 0;
+  }
+}
+
+.provider-info-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+
+  @media (min-width: size.$tablet) {
+    flex-direction: row;
+    align-items: center;
+  }
+}
+
+.provider-logo {
+  height: rem.torem(40px);
+  margin-right: var(--size-spacing-l);
+}
+
+.provider-name {
+  @include fonts.title4;
+
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.venue-provider-info-container {
+  @include fonts.body-accent-xs;
+}
+
+.venue-provider-account-info {
+  margin-bottom: var(--size-spacing-s);
+}
+
+.provider-actions-container {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--size-spacing-m);
+
+  @media (min-width: size.$tablet) {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    gap: 0;
+  }
+}
+
+.provider-actions-delete-and-inactivate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--size-spacing-m);
+
+  @media (min-width: size.$tablet) {
+    flex-direction: row;
+    align-items: center;
+    gap: var(--size-spacing-s);
+  }
+}
+
+.last-synchronisation {
+  &::before {
+    background-color: var(--color-icon-success);
+    border-radius: var(--size-border-radius-pill);
+    content: "";
+    display: inline-block;
+    height: rem.torem(8px);
+    margin-right: var(--size-spacing-s);
+    width: rem.torem(8px);
+  }
+}

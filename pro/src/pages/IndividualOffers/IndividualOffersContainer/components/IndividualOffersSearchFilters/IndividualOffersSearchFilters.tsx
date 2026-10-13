@@ -1,0 +1,148 @@
+import type { ChangeEvent, Dispatch, SetStateAction, SubmitEvent } from 'react'
+
+import { OfferStatus } from '@/apiClient/v1'
+import type { SelectOption } from '@/commons/custom_types/form'
+import { FormLayout } from '@/components/FormLayout/FormLayout'
+import { OffersTableSearch } from '@/components/OffersTableSearch/OffersTableSearch'
+import { TypedSelect } from '@/components/TypedSelect/TypedSelect'
+import type { IndividualOffersFilters } from '@/pages/IndividualOffers/common/types'
+import styles from '@/pages/IndividualOffers/IndividualOffersContainer/IndividualOffersContainer.module.scss'
+import { PeriodSelector } from '@/ui-kit/form/PeriodSelector/PeriodSelector'
+
+interface IndividualOffersSearchFiltersProps {
+  hasFilters: boolean
+  applyFilters: (filters: IndividualOffersFilters) => void
+  selectedFilters: IndividualOffersFilters
+  setSelectedFilters: Dispatch<SetStateAction<IndividualOffersFilters>>
+  disableAllFilters: boolean
+  resetFilters: () => void
+  venueAddresses: SelectOption<number>[]
+  categories?: SelectOption[]
+  searchButtonId?: string
+}
+
+const individualFilterStatus: SelectOption<OfferStatus>[] = [
+  { label: 'Brouillon', value: OfferStatus.DRAFT },
+  { label: 'Publiée', value: OfferStatus.ACTIVE },
+  { label: 'Programmée', value: OfferStatus.SCHEDULED },
+  { label: 'En pause', value: OfferStatus.INACTIVE },
+  { label: 'Épuisée', value: OfferStatus.SOLD_OUT },
+  { label: 'Expirée', value: OfferStatus.EXPIRED },
+  { label: 'En instruction', value: OfferStatus.PENDING },
+  { label: 'Non conforme', value: OfferStatus.REJECTED },
+]
+
+const creationModeOptions: SelectOption[] = [
+  { label: 'Manuel', value: 'manual' },
+  { label: 'Synchronisé', value: 'imported' },
+]
+
+export const IndividualOffersSearchFilters = ({
+  hasFilters,
+  applyFilters,
+  selectedFilters,
+  setSelectedFilters,
+  resetFilters,
+  disableAllFilters,
+  venueAddresses,
+  categories,
+  searchButtonId,
+}: Readonly<IndividualOffersSearchFiltersProps>) => {
+  const updateSearchFilters = (patch: Partial<IndividualOffersFilters>) => {
+    setSelectedFilters((prev) => ({ ...prev, ...patch }))
+  }
+
+  const handleNameChange = (event: ChangeEvent<HTMLInputElement>) => {
+    const value = event.currentTarget.value
+    updateSearchFilters({
+      nameOrIsbn: value === '' ? undefined : value,
+    })
+  }
+
+  const handleDateChange =
+    (key: 'periodBeginningDate' | 'periodEndingDate') => (val: string) => {
+      updateSearchFilters({ [key]: val === '' ? undefined : val })
+    }
+
+  const requestFilteredOffers = (event: SubmitEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    applyFilters(selectedFilters)
+  }
+
+  return (
+    <OffersTableSearch
+      type="individual"
+      hasActiveFilters={hasFilters}
+      onSubmit={requestFilteredOffers}
+      isDisabled={disableAllFilters}
+      nameInputProps={{
+        label: 'Nom de l’offre ou EAN-13 (European Article Numbering)',
+        disabled: disableAllFilters,
+        onChange: handleNameChange,
+        value: selectedFilters.nameOrIsbn ?? '',
+      }}
+      onResetFilters={resetFilters}
+      searchButtonId={searchButtonId}
+    >
+      <FormLayout.Row inline mdSpaceAfter>
+        <TypedSelect
+          label="Statut"
+          name="status"
+          emptyOptionLabel="Tous"
+          options={individualFilterStatus}
+          value={selectedFilters.status}
+          onChange={(status) => updateSearchFilters({ status })}
+          disabled={disableAllFilters}
+          className={styles['select-filter']}
+        />
+
+        <TypedSelect
+          label="Localisation"
+          name="offererAddressId"
+          emptyOptionLabel="Toutes"
+          isNumber
+          options={venueAddresses}
+          value={selectedFilters.offererAddressId}
+          onChange={(value) => updateSearchFilters({ offererAddressId: value })}
+          disabled={venueAddresses.length === 0 || disableAllFilters}
+          className={styles['select-filter']}
+        />
+
+        {categories && (
+          <TypedSelect
+            label="Catégorie"
+            name="categoryId"
+            emptyOptionLabel="Toutes"
+            options={categories}
+            value={selectedFilters.categoryId}
+            onChange={(value) => updateSearchFilters({ categoryId: value })}
+            disabled={disableAllFilters}
+            className={styles['select-filter']}
+          />
+        )}
+
+        <TypedSelect
+          label="Mode de création"
+          name="creationMode"
+          emptyOptionLabel="Tous"
+          options={creationModeOptions}
+          value={selectedFilters.creationMode}
+          onChange={(value) => updateSearchFilters({ creationMode: value })}
+          disabled={disableAllFilters}
+          className={styles['select-filter']}
+        />
+      </FormLayout.Row>
+
+      <FormLayout.Row inline mdSpaceAfter>
+        <PeriodSelector
+          legend="Période de l’évènement"
+          onBeginningDateChange={handleDateChange('periodBeginningDate')}
+          onEndingDateChange={handleDateChange('periodEndingDate')}
+          isDisabled={disableAllFilters}
+          periodBeginningDate={selectedFilters.periodBeginningDate ?? ''}
+          periodEndingDate={selectedFilters.periodEndingDate ?? ''}
+        />
+      </FormLayout.Row>
+    </OffersTableSearch>
+  )
+}

@@ -1,0 +1,199 @@
+from decimal import Decimal
+
+import sqlalchemy as sa
+from flask import flash
+from flask import redirect
+from flask import render_template
+from flask import url_for
+from markupsafe import Markup
+from werkzeug.exceptions import NotFound
+
+from pcapi.core.categories import subcategories
+from pcapi.core.offers import models as offers_models
+from pcapi.core.permissions import models as perm_models
+from pcapi.models import db
+from pcapi.routes.backoffice import blueprint as backoffice_blueprint
+from pcapi.routes.backoffice.filters import format_offer_subcategory
+from pcapi.routes.backoffice.forms import empty as empty_forms
+from pcapi.routes.backoffice.utils import request as request_utils
+from pcapi.routes.backoffice.utils import response as response_utils
+from pcapi.utils.transaction_manager import mark_transaction_as_invalid
+
+from . import forms
+
+
+offer_price_limitation_rules_blueprint = backoffice_blueprint.child_backoffice_blueprint(
+    "offer_price_limitation_rules",
+    __name__,
+    url_prefix="/offer-price-limitation-rules",
+    permission=perm_models.Permissions.PRO_FRAUD_ACTIONS,
+)
+
+
+@offer_price_limitation_rules_blueprint.route("", methods=["GET"])
+def list_rules() -> response_utils.BackofficeResponse:
+    form = forms.SearchRuleForm(formdata=request_utils.get_query_params())
+
+    if not form.validate():
+        return (
+            render_template(
+                "offer_price_limitation_rules/list_rules.html", rows=[], form=form, dst=url_for(".list_rules")
+            ),
+            400,
+        )
+
+    query = db.session.query(offers_models.OfferPriceLimitationRule)
+    if form.subcategory.data:
+        query = query.filter(offers_models.OfferPriceLimitationRule.subcategoryId.in_(form.subcategory.data))
+    if form.category.data:
+        query = query.filter(
+            offers_models.OfferPriceLimitationRule.subcategoryId.in_(
+                subcategory.id
+                for subcategory in subcategories.ALL_SUBCATEGORIES
+                if subcategory.category.id in form.category.data
+            )
+        )
+
+    rules = query.all()
+    rules = sorted(
+        rules,
+        key=(
+            lambda rule: (
+                subcategories.ALL_SUBCATEGORIES_DICT[rule.subcategoryId].category.pro_label,
+                subcategories.ALL_SUBCATEGORIES_DICT[rule.subcategoryId].pro_label,
+            )
+        ),
+    )
+
+    return render_template(
+        "offer_price_limitation_rules/list_rules.html",
+        rows=rules,
+        form=form,
+        dst=url_for(".list_rules"),
+    )
+
+
+@offer_price_limitation_rules_blueprint.route("/create", methods=["GET"])
+def get_create_offer_price_limitation_rule_form() -> response_utils.BackofficeResponse:
+    form = forms.CreateOfferPriceLimitationRuleForm()
+
+    return render_template(
+        "components/dynamic/modal_form.html",
+        form=form,
+        dst=url_for("backoffice.offer_price_limitation_rules.create_rule"),
+        div_id="create-offer-price-limitation-rule",  # must be consistent with parameter passed to build_lazy_modal
+        title="Créer une règle de modification de prix d'offre",
+        button_text="Créer la règle",
+        ajax_submit=False,
+    )
+
+
+@offer_price_limitation_rules_blueprint.route("/create", methods=["POST"])
+def create_rule() -> response_utils.BackofficeResponse:
+    form = forms.CreateOfferPriceLimitationRuleForm()
+
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return redirect(url_for("backoffice.offer_price_limitation_rules.list_rules"), code=303)
+
+    rate = Decimal(form.rate.data / 100).quantize(Decimal("0.0001"))
+    try:
+        new_rule = offers_models.OfferPriceLimitationRule(subcategoryId=form.subcategory.data, rate=rate)
+        db.session.add(new_rule)
+        db.session.flush()
+        flash("La nouvelle règle a été créée", "success")
+
+    except sa.exc.IntegrityError as err:
+        mark_transaction_as_invalid()
+        flash(Markup("Erreur dans la création de la règle : {message}").format(message=str(err)), "warning")
+
+    return redirect(url_for("backoffice.offer_price_limitation_rules.list_rules"), code=303)
+
+
+@offer_price_limitation_rules_blueprint.route("/<int:rule_id>/delete", methods=["GET"])
+def get_delete_offer_price_limitation_rule_form(rule_id: int) -> response_utils.BackofficeResponse:
+    rule_to_delete = db.session.query(offers_models.OfferPriceLimitationRule).filter_by(id=rule_id).one_or_none()
+    if not rule_to_delete:
+        raise NotFound()
+
+    return render_template(
+        "components/dynamic/modal_form.html",
+        form=empty_forms.EmptyForm(),
+        dst=url_for("backoffice.offer_price_limitation_rules.delete_rule", rule_id=rule_id),
+        div_id=f"delete-offer-price-limitation-rule-{rule_id}",  # must be consistent with parameter passed to build_lazy_modal
+        title="Supprimer une règle de modification de prix d'offre",
+        button_text="Supprimer la règle",
+        information=Markup(
+            "La règle sur la sous-catégorie <b>{subcategory}</b> sera définitivement supprimée de la base de données. Veuillez confirmer ce choix."
+        ).format(subcategory=format_offer_subcategory(rule_to_delete.subcategoryId)),
+        ajax_submit=False,
+    )
+
+
+@offer_price_limitation_rules_blueprint.route("/<int:rule_id>/delete", methods=["POST"])
+def delete_rule(rule_id: int) -> response_utils.BackofficeResponse:
+    rule_to_delete = db.session.query(offers_models.OfferPriceLimitationRule).filter_by(id=rule_id).one_or_none()
+    if not rule_to_delete:
+        raise NotFound()
+
+    db.session.delete(rule_to_delete)
+    db.session.flush()
+
+    flash(
+        Markup("La règle sur la sous-catégorie <b>{subcategory}</b> a été supprimée").format(
+            subcategory=format_offer_subcategory(rule_to_delete.subcategoryId)
+        ),
+        "success",
+    )
+
+    return redirect(url_for("backoffice.offer_price_limitation_rules.list_rules"), code=303)
+
+
+@offer_price_limitation_rules_blueprint.route("/<int:rule_id>/edit", methods=["GET"])
+def get_edit_offer_price_limitation_rule_form(rule_id: int) -> response_utils.BackofficeResponse:
+    rule_to_update = db.session.query(offers_models.OfferPriceLimitationRule).filter_by(id=rule_id).one_or_none()
+    if not rule_to_update:
+        raise NotFound()
+
+    rate = Decimal(rule_to_update.rate * 100).quantize(Decimal("0.01"))
+    form = forms.EditOfferPriceLimitationRuleForm(rate=rate)
+
+    return render_template(
+        "components/dynamic/modal_form.html",
+        form=form,
+        dst=url_for("backoffice.offer_price_limitation_rules.edit_rule", rule_id=rule_id),
+        div_id=f"edit-offer-price-limitation-rule-{rule_id}",  # must be consistent with parameter passed to build_lazy_modal
+        title="Modifier une règle de modification de prix d'offre",
+        button_text="Modifier la règle",
+        ajax_submit=False,
+    )
+
+
+@offer_price_limitation_rules_blueprint.route("/<int:rule_id>/edit", methods=["POST"])
+def edit_rule(rule_id: int) -> response_utils.BackofficeResponse:
+    rule_to_update = db.session.query(offers_models.OfferPriceLimitationRule).filter_by(id=rule_id).one_or_none()
+    if not rule_to_update:
+        raise NotFound()
+
+    form = forms.EditOfferPriceLimitationRuleForm()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return redirect(url_for("backoffice.offer_price_limitation_rules.list_rules"), code=303)
+
+    rate = Decimal(form.rate.data / 100).quantize(Decimal("0.0001"))
+    try:
+        rule_to_update.rate = rate
+        db.session.flush()
+
+    except sa.exc.IntegrityError as exc:
+        mark_transaction_as_invalid()
+        flash(Markup("Une erreur s'est produite : {message}").format(message=str(exc)), "warning")
+    else:
+        flash(
+            Markup("La règle sur la sous-catégorie <b>{subcategory}</b> a été modifiée").format(
+                subcategory=format_offer_subcategory(rule_to_update.subcategoryId)
+            ),
+            "success",
+        )
+
+    return redirect(url_for("backoffice.offer_price_limitation_rules.list_rules"), code=303)

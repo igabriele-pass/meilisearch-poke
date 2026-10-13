@@ -1,0 +1,429 @@
+import { useId, useRef, useState } from 'react'
+import { useNavigate } from 'react-router'
+import { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import { getErrorCode, isErrorAPIError } from '@/apiClient/helpers'
+import {
+  CollectiveOfferAllowedAction,
+  CollectiveOfferTemplateAllowedAction,
+  type CollectiveOfferTemplateResponseModel,
+} from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import {
+  type CollectiveOffer,
+  isCollectiveOfferBookable,
+} from '@/commons/core/OfferEducational/types'
+import { computeURLCollectiveOfferId } from '@/commons/core/OfferEducational/utils/computeURLCollectiveOfferId'
+import { createOfferFromTemplate } from '@/commons/core/OfferEducational/utils/createOfferFromTemplate'
+import { duplicateBookableOffer } from '@/commons/core/OfferEducational/utils/duplicateBookableOffer'
+import { getCollectiveOfferLink } from '@/commons/core/OfferEducational/utils/getCollectiveOfferLink'
+import { useCollectiveOffersSwrKeys } from '@/commons/core/Offers/hooks/useCollectiveOffersSwrKeys'
+import { useActiveFeature } from '@/commons/hooks/useActiveFeature'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import {
+  isActionAllowedOnCollectiveOffer,
+  isCollectiveOfferEditable,
+} from '@/commons/utils/isActionAllowedOnCollectiveOffer'
+import { PASS_CULTURE_PREFIX } from '@/commons/utils/localStorageManager'
+import { storageAvailable } from '@/commons/utils/storageAvailable'
+import { ArchiveConfirmationModal } from '@/components/ArchiveConfirmationModal/ArchiveConfirmationModal'
+import { CancelCollectiveBookingModal } from '@/components/CancelCollectiveBookingModal/CancelCollectiveBookingModal'
+import { ShareLinkDrawer } from '@/components/CollectiveOffer/ShareLinkDrawer/ShareLinkDrawer'
+import { Button } from '@/design-system/Button/Button'
+import {
+  ButtonColor,
+  ButtonSize,
+  ButtonVariant,
+} from '@/design-system/Button/types'
+import {
+  DropDownItemVariant,
+  Dropdown,
+} from '@/design-system/Dropdown/Dropdown'
+import fullArchiveIcon from '@/icons/full-archive.svg'
+import fullClearIcon from '@/icons/full-clear.svg'
+import fullCopyIcon from '@/icons/full-duplicate.svg'
+import fullPenIcon from '@/icons/full-edit.svg'
+import fullHideIcon from '@/icons/full-hide.svg'
+import fullPlusIcon from '@/icons/full-plus.svg'
+import fullThreeDotsIcon from '@/icons/full-three-dots.svg'
+import strokeCheckIcon from '@/icons/stroke-check.svg'
+import connectStrokeIcon from '@/icons/stroke-connect.svg'
+
+import { DuplicateOfferDialog } from './DuplicateOfferDialog/DuplicateOfferDialog'
+import styles from './OfferActionsCell.module.scss'
+
+export interface OfferActionsCellProps {
+  offer: CollectiveOffer
+}
+
+const LOCAL_STORAGE_HAS_SEEN_MODAL_KEY = `${PASS_CULTURE_PREFIX}DUPLICATE_OFFER_MODAL_SEEN`
+
+export const OfferActionsCell = ({ offer }: OfferActionsCellProps) => {
+  const isMarseilleActive = useActiveFeature('ENABLE_MARSEILLE')
+
+  const navigate = useNavigate()
+  const snackBar = useSnackBar()
+  const { logEvent } = useAnalytics()
+
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isDropdownOpen, setIsDropdownOpen] = useState(false)
+
+  const [isCancelledBookingModalOpen, setIsCancelledBookingModalOpen] =
+    useState(false)
+  const [isArchivedModalOpen, setIsArchivedModalOpen] = useState(false)
+  const [isShareLinkDrawerOpen, setIsShareLinkDrawerOpen] = useState(false)
+  const isLocalStorageAvailable = storageAvailable('localStorage')
+  const shouldDisplayModal =
+    !isLocalStorageAvailable ||
+    localStorage.getItem(LOCAL_STORAGE_HAS_SEEN_MODAL_KEY) !== 'true'
+
+  const dropdownTriggerRef = useRef<HTMLButtonElement>(null)
+  const isTemplateTable = !isCollectiveOfferBookable(offer)
+
+  const collectiveOffersQueryKeys = useCollectiveOffersSwrKeys({
+    isInTemplateOffersPage: isTemplateTable,
+  })
+
+  const actionButtonId = useId()
+
+  const { mutate } = useSWRConfig()
+
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+
+  const offerId = computeURLCollectiveOfferId(offer.id, isTemplateTable)
+  const editionOfferLink = getCollectiveOfferLink(
+    offerId,
+    offer.displayedStatus,
+    true
+  )
+
+  const onDialogConfirm = async (shouldNotDisplayModalAgain: boolean) => {
+    logEvent(Events.CLICKED_DUPLICATE_TEMPLATE_OFFER, {
+      from: 'OffersListModal',
+      offerId: offer.id,
+      offerType: 'collective',
+      offerStatus: offer.displayedStatus,
+    })
+    if (shouldNotDisplayModalAgain && isLocalStorageAvailable) {
+      localStorage.setItem(LOCAL_STORAGE_HAS_SEEN_MODAL_KEY, 'true')
+    }
+    await createOfferFromTemplate(
+      navigate,
+      snackBar,
+      offer.id,
+      selectedPartnerVenue,
+      undefined,
+      isMarseilleActive
+    )
+  }
+
+  const handleCreateOfferClick = async () => {
+    if (isTemplateTable) {
+      if (!shouldDisplayModal) {
+        logEvent(Events.CLICKED_DUPLICATE_TEMPLATE_OFFER, {
+          offerId: offer.id,
+          offerType: 'collective',
+          offerStatus: offer.displayedStatus,
+        })
+        await createOfferFromTemplate(
+          navigate,
+          snackBar,
+          offer.id,
+          selectedPartnerVenue,
+          undefined,
+          isMarseilleActive
+        )
+      }
+      setIsModalOpen(true)
+    } else {
+      logEvent(Events.CLICKED_DUPLICATE_BOOKABLE_OFFER, {
+        offerId: offer.id,
+        offerStatus: offer.displayedStatus,
+        offerType: 'collective',
+      })
+      await duplicateBookableOffer(
+        navigate,
+        snackBar,
+        offer.id,
+        selectedPartnerVenue
+      )
+    }
+  }
+
+  const cancelBooking = async () => {
+    if (!offer.id) {
+      snackBar.error(
+        'L’identifiant de l’offre n’est pas valide.',
+        actionButtonId
+      )
+      return
+    }
+    try {
+      await api.cancelCollectiveOfferBooking({
+        path: { offer_id: offer.id },
+      })
+      await mutate(collectiveOffersQueryKeys)
+      setIsCancelledBookingModalOpen(false)
+
+      snackBar.success(
+        'Vous avez annulé la réservation de cette offre. Elle n’est donc plus visible sur ADAGE.',
+        actionButtonId
+      )
+    } catch (error) {
+      if (isErrorAPIError(error) && getErrorCode(error) === 'NO_BOOKING') {
+        snackBar.error(
+          'Cette offre n’a aucune réservation en cours. Il est possible que la réservation que vous tentiez d’annuler ait déjà été utilisée.',
+          actionButtonId
+        )
+        return
+      }
+      snackBar.error(
+        'Une erreur est survenue lors de l’annulation de la réservation.',
+        actionButtonId
+      )
+    }
+  }
+
+  const archiveOffer = async () => {
+    if (!offer.id) {
+      snackBar.error(
+        'L’identifiant de l’offre n’est pas valide.',
+        actionButtonId
+      )
+      return
+    }
+    try {
+      if (isTemplateTable) {
+        await api.patchCollectiveOffersTemplateArchive({
+          body: { ids: [offer.id] },
+        })
+      } else {
+        await api.patchCollectiveOffersArchive({ body: { ids: [offer.id] } })
+      }
+      await mutate(collectiveOffersQueryKeys)
+
+      setIsArchivedModalOpen(false)
+      snackBar.success('Une offre a bien été archivée', actionButtonId)
+    } catch {
+      snackBar.error(
+        'Une erreur est survenue lors de l’archivage de l’offre',
+        actionButtonId
+      )
+    }
+  }
+
+  const handleEditOfferClick = (to: string) => {
+    logEvent(Events.CLICKED_EDIT_COLLECTIVE_OFFER, {
+      offerId: offer.id,
+      offerType: 'collective',
+      status: offer.displayedStatus,
+    })
+
+    void navigate(to)
+  }
+
+  const canDuplicateOffer = isActionAllowedOnCollectiveOffer(
+    offer,
+    CollectiveOfferAllowedAction.CAN_DUPLICATE
+  )
+
+  const canCreateBookableOffer = isActionAllowedOnCollectiveOffer(
+    offer,
+    CollectiveOfferTemplateAllowedAction.CAN_CREATE_BOOKABLE_OFFER
+  )
+
+  const canArchiveOffer = isActionAllowedOnCollectiveOffer(
+    offer,
+    isTemplateTable
+      ? CollectiveOfferTemplateAllowedAction.CAN_ARCHIVE
+      : CollectiveOfferAllowedAction.CAN_ARCHIVE
+  )
+
+  const canPublishOffer = isActionAllowedOnCollectiveOffer(
+    offer,
+    CollectiveOfferTemplateAllowedAction.CAN_PUBLISH
+  )
+
+  const canHideOffer = isActionAllowedOnCollectiveOffer(
+    offer,
+    CollectiveOfferTemplateAllowedAction.CAN_HIDE
+  )
+
+  const canShareOffer = isActionAllowedOnCollectiveOffer(
+    offer,
+    CollectiveOfferTemplateAllowedAction.CAN_SHARE
+  )
+
+  const noActionsAllowed = offer.allowedActions.length === 0
+
+  const canEditOffer = isCollectiveOfferEditable(offer)
+
+  const isBookingCancellable = isActionAllowedOnCollectiveOffer(
+    offer,
+    CollectiveOfferAllowedAction.CAN_CANCEL
+  )
+
+  const hideOrPublishOffer = async () => {
+    const { id } = offer as CollectiveOfferTemplateResponseModel
+
+    const isActive = isActionAllowedOnCollectiveOffer(
+      offer,
+      CollectiveOfferTemplateAllowedAction.CAN_PUBLISH
+    )
+
+    try {
+      await api.patchCollectiveOffersTemplateActiveStatus({
+        body: {
+          ids: [id],
+          isActive,
+        },
+      })
+
+      snackBar.success(
+        isActive
+          ? 'Votre offre est maintenant active et visible dans ADAGE'
+          : 'Votre offre est mise en pause et n’est plus visible sur ADAGE',
+        actionButtonId
+      )
+    } catch {
+      return snackBar.error(
+        `Une erreur est survenue lors de ${
+          isActive ? 'l’activation' : 'la désactivation'
+        } de votre offre.`,
+        actionButtonId
+      )
+    }
+
+    await mutate(collectiveOffersQueryKeys)
+  }
+
+  return (
+    <div className={styles['actions-column']}>
+      {!noActionsAllowed && (
+        <Dropdown
+          label="Voir les actions"
+          trigger={
+            <Button
+              ref={dropdownTriggerRef}
+              variant={ButtonVariant.SECONDARY}
+              icon={fullThreeDotsIcon}
+              size={ButtonSize.SMALL}
+              color={ButtonColor.NEUTRAL}
+              tooltip="Voir les actions"
+              id={actionButtonId}
+            />
+          }
+          align="end"
+          open={isDropdownOpen}
+          onOpenChange={setIsDropdownOpen}
+          items={[
+            [
+              ...(canDuplicateOffer
+                ? [
+                    {
+                      text: 'Dupliquer',
+                      icon: fullCopyIcon,
+                      onClick: handleCreateOfferClick,
+                    },
+                  ]
+                : []),
+              ...(canCreateBookableOffer
+                ? [
+                    {
+                      text: 'Créer une offre réservable',
+                      icon: fullPlusIcon,
+                      onClick: handleCreateOfferClick,
+                    },
+                  ]
+                : []),
+              ...(canEditOffer
+                ? [
+                    {
+                      text: 'Modifier',
+                      icon: fullPenIcon,
+                      onClick: () => handleEditOfferClick(editionOfferLink),
+                    },
+                  ]
+                : []),
+              ...(canPublishOffer
+                ? [
+                    {
+                      text: 'Publier',
+                      icon: strokeCheckIcon,
+                      onClick: hideOrPublishOffer,
+                    },
+                  ]
+                : []),
+              ...(!isCollectiveOfferBookable(offer) && canShareOffer
+                ? [
+                    {
+                      text: 'Partager l’offre',
+                      icon: connectStrokeIcon,
+                      onClick: () => setIsShareLinkDrawerOpen(true),
+                    },
+                  ]
+                : []),
+              ...(canHideOffer
+                ? [
+                    {
+                      text: 'Mettre en pause',
+                      icon: fullHideIcon,
+                      onClick: hideOrPublishOffer,
+                    },
+                  ]
+                : []),
+              ...(isBookingCancellable
+                ? [
+                    {
+                      text: 'Annuler la réservation',
+                      variant: DropDownItemVariant.DESTRUCTIVE,
+                      icon: fullClearIcon,
+                      onClick: () => setIsCancelledBookingModalOpen(true),
+                    },
+                  ]
+                : []),
+              ...(canArchiveOffer
+                ? [
+                    {
+                      text: 'Archiver',
+                      variant: DropDownItemVariant.DESTRUCTIVE,
+                      icon: fullArchiveIcon,
+                      onClick: () => setIsArchivedModalOpen(true),
+                    },
+                  ]
+                : []),
+            ],
+          ]}
+        />
+      )}
+      {!isCollectiveOfferBookable(offer) && canShareOffer && (
+        <ShareLinkDrawer
+          offerId={offer.id}
+          open={isShareLinkDrawerOpen}
+          onOpenChange={setIsShareLinkDrawerOpen}
+          triggerButtonRef={dropdownTriggerRef}
+        />
+      )}
+      <DuplicateOfferDialog
+        onCancel={() => setIsModalOpen(false)}
+        onConfirm={onDialogConfirm}
+        isDialogOpen={isModalOpen && shouldDisplayModal}
+      />
+      <CancelCollectiveBookingModal
+        onDismiss={() => setIsCancelledBookingModalOpen(false)}
+        onValidate={cancelBooking}
+        isDialogOpen={isCancelledBookingModalOpen}
+      />
+      <ArchiveConfirmationModal
+        onDismiss={() => setIsArchivedModalOpen(false)}
+        onValidate={archiveOffer}
+        offer={offer}
+        isDialogOpen={isArchivedModalOpen}
+      />
+    </div>
+  )
+}

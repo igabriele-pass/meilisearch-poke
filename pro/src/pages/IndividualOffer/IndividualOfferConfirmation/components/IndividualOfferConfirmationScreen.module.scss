@@ -1,0 +1,145 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+
+.container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 0 var(--size-spacing-l);
+
+  @media (min-width: size.$laptop) {
+    padding: 0 var(--size-spacing-xxxl);
+  }
+}
+
+.title-wrapper {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  gap: var(--size-spacing-xs) var(--size-spacing-s);
+  width: 100%;
+  margin-bottom: var(--size-spacing-xxl);
+
+  &-icon {
+    display: flex;
+    flex-shrink: 0;
+  }
+}
+
+.pending-details {
+  margin-bottom: var(--size-spacing-l);
+}
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  width: 100%;
+
+  @media (min-width: size.$tablet) {
+    display: inline-flex;
+    width: auto;
+    margin-top: var(--size-spacing-l);
+    margin-bottom: var(--size-spacing-xl);
+  }
+
+  &-qr-block {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--size-spacing-xxl);
+    margin-bottom: var(--size-spacing-xxl);
+    width: 100%;
+
+    @media (min-width: size.$tablet) {
+      flex-direction: row;
+      align-items: stretch;
+      width: auto;
+    }
+  }
+
+  &-qr {
+    flex-shrink: 0;
+    align-self: center;
+
+    @media (min-width: size.$tablet) {
+      align-self: flex-start;
+    }
+  }
+
+  &-content {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: var(--size-spacing-l);
+
+    @media (min-width: size.$tablet) {
+      gap: 0;
+    }
+  }
+
+  &-content-title {
+    @include fonts.title4;
+
+    margin: 0;
+  }
+
+  &-content-subtitle {
+    @include fonts.body-s;
+
+    margin: 0;
+  }
+
+  &-actions {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-spacing-l);
+    width: 100%;
+
+    & > * {
+      width: 100%;
+    }
+
+    @media (min-width: size.$tablet) {
+      flex-direction: row;
+      gap: var(--size-spacing-m);
+      width: auto;
+
+      & > * {
+        width: auto;
+      }
+    }
+  }
+}
+
+.enhancement {
+  text-align: left;
+  width: 100%;
+  margin-top: var(--size-spacing-xxxl);
+
+  &-cards {
+    --card-width: #{rem.torem(325px)};
+
+    margin-top: var(--size-spacing-l);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--size-spacing-l);
+  }
+}
+
+.title {
+  @include fonts.title1;
+
+  overflow-wrap: anywhere;
+}
+
+.subtitle {
+  @include fonts.title2;
+
+  overflow-wrap: anywhere;
+}

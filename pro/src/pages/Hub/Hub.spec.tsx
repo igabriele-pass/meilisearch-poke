@@ -1,0 +1,393 @@
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { ApiError } from '@/apiClient/compat'
+import { type VenueListItemLiteResponseModel, VenueState } from '@/apiClient/v1'
+import {
+  defaultGetOffererResponseModel,
+  getOffererNameFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import {
+  makeGetVenueResponseModel,
+  makeVenueListItemLiteResponseModel,
+} from '@/commons/utils/factories/venueFactories'
+import {
+  type RenderComponentFunction,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+
+import { Hub } from './Hub'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getOfferer: vi.fn(),
+    getVenue: vi.fn(),
+    signout: vi.fn(),
+  },
+}))
+
+const renderHub: RenderComponentFunction<
+  void,
+  void,
+  { venues: VenueListItemLiteResponseModel[] | null }
+> = ({ venues }) => {
+  return renderWithProviders(<Hub />, {
+    storeOverrides: {
+      user: {
+        currentUser: sharedCurrentUserFactory(),
+        selectedPartnerVenue: null,
+        venues,
+        offererNames: [
+          getOffererNameFactory({ id: 100 }),
+          getOffererNameFactory({ id: 200 }),
+        ],
+        selectedAdminOfferer: getOffererNameFactory({ id: 100 }),
+      },
+    },
+    initialRouterEntries: ['/hub'],
+  })
+}
+
+describe('Hub', () => {
+  const venuesBase = [
+    makeVenueListItemLiteResponseModel({
+      id: 101,
+      publicName: 'Théâtre du Soleil',
+      managingOfferer: {
+        id: 100,
+        isClosed: false,
+      },
+    }),
+    makeVenueListItemLiteResponseModel({
+      id: 102,
+      publicName: 'Café des Arts',
+      managingOfferer: {
+        id: 100,
+        isClosed: false,
+      },
+    }),
+    makeVenueListItemLiteResponseModel({
+      id: 201,
+      publicName: 'Cinéma Lumière',
+      managingOfferer: {
+        id: 200,
+        isClosed: false,
+      },
+    }),
+  ]
+
+  const venuesWithMoreThanFour = [
+    ...venuesBase,
+    makeVenueListItemLiteResponseModel({
+      id: 202,
+      publicName: 'Musée National',
+      managingOfferer: {
+        id: 200,
+        isClosed: false,
+      },
+    }),
+    makeVenueListItemLiteResponseModel({
+      id: 203,
+      publicName: 'Galerie Moderne',
+      managingOfferer: {
+        id: 200,
+        isClosed: false,
+      },
+    }),
+  ]
+
+  it('should render', async () => {
+    const { container } = renderHub({ venues: venuesBase })
+
+    expect(await axe(container)).toHaveNoViolations()
+
+    expect(
+      screen.getByRole('heading', {
+        level: 1,
+        name: 'À quelle structure souhaitez-vous accéder ?',
+      })
+    ).toBeInTheDocument()
+
+    expect(
+      screen.getByRole('button', { name: /Théâtre du Soleil/ })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /Café des Arts/ })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: /Cinéma Lumière/ })
+    ).toBeInTheDocument()
+  })
+
+  it('should display closed venues', () => {
+    renderHub({
+      venues: [
+        makeVenueListItemLiteResponseModel({
+          id: 101,
+          publicName: 'Venue ouverte 1',
+          managingOfferer: {
+            id: 100,
+            isClosed: false,
+          },
+          state: null,
+        }),
+        makeVenueListItemLiteResponseModel({
+          id: 102,
+          publicName: 'Venue fermée',
+          managingOfferer: {
+            id: 100,
+            isClosed: false,
+          },
+          state: VenueState.CLOSED,
+        }),
+      ],
+    })
+
+    expect(screen.getByText('Structure fermée')).toBeInTheDocument()
+  })
+
+  it('should display venue address', () => {
+    const venuesWithLocation = [
+      makeVenueListItemLiteResponseModel({
+        id: 101,
+        publicName: 'Nom public de la structure avec localisation',
+        managingOfferer: {
+          id: 100,
+          isClosed: false,
+        },
+        location: {
+          id: 1,
+          banId: null,
+          city: 'Paris',
+          departmentCode: null,
+          inseeCode: null,
+          isManualEdition: false,
+          isVenueLocation: false,
+          label: null,
+          latitude: 48.8566,
+          longitude: 2.3522,
+          postalCode: '75001',
+          street: '123 Rue de Test',
+        },
+      }),
+    ]
+
+    renderHub({ venues: venuesWithLocation })
+
+    expect(screen.getByText('123 Rue de Test, 75001 Paris')).toBeInTheDocument()
+  })
+
+  it('should call setSelectedPartnerVenueById when clicking on any venue', async () => {
+    vi.spyOn(api, 'getVenue').mockResolvedValue(
+      makeGetVenueResponseModel({
+        id: 102,
+        publicName: 'Café des Arts',
+        managingOfferer: {
+          id: 100,
+          allowedOnAdage: true,
+          isValidated: true,
+          isClosed: false,
+          name: 'Test Offerer',
+          siren: '123456789',
+        },
+      })
+    )
+    vi.spyOn(api, 'getOfferer').mockResolvedValue({
+      ...defaultGetOffererResponseModel,
+      id: 100,
+      isOnboarded: true,
+    })
+
+    renderHub({ venues: venuesBase })
+
+    await userEvent.click(screen.getByRole('button', { name: /Café des Arts/ }))
+
+    await waitFor(() => {
+      expect(api.getVenue).toHaveBeenCalledWith({ path: { venue_id: 102 } })
+    })
+  })
+
+  it('should show spinner after venue selection', async () => {
+    vi.spyOn(api, 'getVenue').mockResolvedValue(
+      makeGetVenueResponseModel({
+        id: 102,
+        managingOfferer: {
+          id: 100,
+          allowedOnAdage: true,
+          isClosed: false,
+          isValidated: true,
+          name: 'Test Offerer',
+          siren: '123456789',
+        },
+      })
+    )
+    vi.spyOn(api, 'getOfferer').mockResolvedValue({
+      ...defaultGetOffererResponseModel,
+      id: 100,
+      isOnboarded: true,
+    })
+
+    renderHub({ venues: venuesBase })
+
+    await userEvent.click(screen.getByRole('button', { name: /Café des Arts/ }))
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Chargement de la structure en cours…')
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('should stop showing spinner when venue selection fails', async () => {
+    vi.spyOn(api, 'getVenue').mockRejectedValue(
+      new ApiError('/venues/922', 503, 'Service Unavailable', {
+        global: 'failed',
+      })
+    )
+
+    renderHub({ venues: venuesBase })
+
+    await userEvent.click(screen.getByRole('button', { name: /Café des Arts/ }))
+
+    await waitFor(() => {
+      expect(
+        screen.queryByText('Chargement de la structure en cours…')
+      ).not.toBeInTheDocument()
+    })
+
+    expect(
+      screen.getByRole('button', { name: /Café des Arts/ })
+    ).toBeInTheDocument()
+  })
+
+  describe('search functionality', () => {
+    it('should not display search input when there are 4 or fewer venues', () => {
+      renderHub({ venues: venuesBase })
+
+      expect(
+        screen.queryByRole('searchbox', { name: 'Rechercher une structure' })
+      ).not.toBeInTheDocument()
+    })
+
+    it('should display search input when there are more than 4 venues', () => {
+      renderHub({ venues: venuesWithMoreThanFour })
+
+      expect(
+        screen.getByRole('searchbox', { name: 'Rechercher une structure' })
+      ).toBeInTheDocument()
+    })
+
+    it('should filter venues based on search query', async () => {
+      renderHub({ venues: venuesWithMoreThanFour })
+
+      const searchInput = screen.getByRole('searchbox', {
+        name: 'Rechercher une structure',
+      })
+      await userEvent.type(searchInput, 'theatre')
+
+      expect(
+        screen.getByRole('button', { name: /Théâtre du Soleil/ })
+      ).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: /Café des Arts/ })
+      ).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: /Cinéma Lumière/ })
+      ).not.toBeInTheDocument()
+    })
+
+    it('should filter venues ignoring accents', async () => {
+      renderHub({ venues: venuesWithMoreThanFour })
+
+      const searchInput = screen.getByRole('searchbox', {
+        name: 'Rechercher une structure',
+      })
+      await userEvent.type(searchInput, 'cafe')
+
+      expect(
+        screen.getByRole('button', { name: /Café des Arts/ })
+      ).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: /Théâtre du Soleil/ })
+      ).not.toBeInTheDocument()
+    })
+
+    it('should display no results message when no venues match', async () => {
+      renderHub({ venues: venuesWithMoreThanFour })
+
+      const searchInput = screen.getByRole('searchbox', {
+        name: 'Rechercher une structure',
+      })
+      await userEvent.type(searchInput, 'nonexistent')
+
+      expect(
+        screen.getByText(
+          'Aucune structure ne correspond à votre recherche "nonexistent".'
+        )
+      ).toBeInTheDocument()
+    })
+
+    it('should reset filter when search query is cleared', async () => {
+      renderHub({ venues: venuesWithMoreThanFour })
+
+      const searchInput = screen.getByRole('searchbox', {
+        name: 'Rechercher une structure',
+      })
+      await userEvent.type(searchInput, 'theatre')
+
+      expect(
+        screen.getByRole('button', { name: /Théâtre du Soleil/ })
+      ).toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: /Café des Arts/ })
+      ).not.toBeInTheDocument()
+
+      await userEvent.clear(searchInput)
+
+      expect(
+        screen.getByRole('button', { name: /Théâtre du Soleil/ })
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /Café des Arts/ })
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /Cinéma Lumière/ })
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /Musée National/ })
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: /Galerie Moderne/ })
+      ).toBeInTheDocument()
+    })
+
+    it('should announce filtered results count for screen readers', async () => {
+      renderHub({ venues: venuesWithMoreThanFour })
+
+      const searchInput = screen.getByRole('searchbox', {
+        name: 'Rechercher une structure',
+      })
+      await userEvent.type(searchInput, 'musee')
+
+      expect(screen.getByRole('status')).toHaveTextContent(
+        '1 structure trouvée.'
+      )
+    })
+
+    it('should use plural form in screen reader announcement for multiple results', async () => {
+      renderHub({ venues: venuesWithMoreThanFour })
+
+      const searchInput = screen.getByRole('searchbox', {
+        name: 'Rechercher une structure',
+      })
+      await userEvent.type(searchInput, 'a')
+
+      expect(screen.getByRole('status')).toHaveTextContent(
+        'structures trouvées'
+      )
+    })
+  })
+})

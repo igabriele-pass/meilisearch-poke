@@ -1,0 +1,106 @@
+name: 1 [CD] Deploy testing
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "27 5-17 * * 1-5"
+      timezone: "Europe/Paris"
+
+permissions: write-all
+
+jobs:
+  check-docker-images-exist:
+    name: Check docker images exist for sha ${{ github.sha }}
+    environment: pcapi-tst
+    runs-on: ubuntu-latest
+    outputs:
+      checksum-tag: ${{ steps.compute-api-checksum.outputs.checksum-tag }}
+      pcapi-exists: ${{ fromJSON(steps.check-images-exist.outputs.images).pcapi }}
+      pcapi-console-exists: ${{ fromJSON(steps.check-images-exist.outputs.images).pcapi-console }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: false
+          ref: "master"
+          persist-credentials: false
+      - name: Install passdirector
+        uses: pass-culture/common-workflows/actions/setup-passdirector@b470d76b19d7f3ebcda367f5e17484228021d388 # v1.0.0
+        with:
+          version: v0.8.4
+          github_app_id: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID}}
+          github_app_private_key: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY}}
+      - name: "Authentification to Google"
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          service_account: ${{ vars.PCAPI_CI_SERVICE_ACCOUNT }}
+          workload_identity_provider: ${{ vars.WORKLOAD_IDENTITY_PRD }}
+      - name: Compute API checksum
+        id: compute-api-checksum
+        run: |
+          API_CHECKSUM="$(passdirector pcapi checksum)"
+          echo "checksum-tag=$API_CHECKSUM" >> "$GITHUB_OUTPUT"
+      - name: Check pcapi images exist
+        id: check-images-exist
+        env:
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          OUTPUT=$(passdirector pcapi image-exists -t "${GITHUB_SHA}")
+          echo images="$OUTPUT" | tee -a "$GITHUB_OUTPUT"
+      - name: "Summary"
+        run: |
+          echo "checksum-tag : \`${{ steps.compute-api-checksum.outputs.checksum-tag }}\`"
+          echo ""
+          echo "| Image           | Exists                                                                                             |"
+          echo "|-----------------|----------------------------------------------------------------------------------------------------|"
+          echo "|\`pcapi\`        | ${{ fromJSON(steps.check-images-exist.outputs.images).pcapi && ':white_check_mark: Yes' || ':x: No' }}         |"
+          echo "|\`pcapi-console\`| ${{ fromJSON(steps.check-images-exist.outputs.images).pcapi-console && ':white_check_mark: Yes' || ':x: No' }} |"
+
+  create-docker-images-on-registry:
+    name: Build and tag version
+    needs: check-docker-images-exist
+    if: needs.check-docker-images-exist.outputs.pcapi-exists == 'false' || needs.check-docker-images-exist.outputs.pcapi-console-exists == 'false'
+    uses: ./.github/workflows/cd_sub_create_docker_images_on_registry.yml
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+    with:
+      base_ref: ${{ github.sha }}
+      tag_number: ${{ github.sha }}
+
+  deploy:
+    name: Deploy to testing
+    needs:
+      - check-docker-images-exist
+      - create-docker-images-on-registry
+    if: always() && !failure() && !cancelled() && needs.check-docker-images-exist.result == 'success'
+    uses: ./.github/workflows/cd_sub_deploy_app.yml
+    with:
+      environment: testing
+      environment_short_name: tst
+      app_version: ${{ github.sha }}
+      workflow_cluster_name: gke-infra-prd-eu9
+      workflow_project_id: pc-infra-prd
+      app_cluster_name: gke-backend-tst-eu9
+      app_project_id: pc-backend-tst
+      location: europe-west9
+      is_new_infra: true
+      workload_identity_provider_secret_name: gcp_metier_ehp_workload_identity_provider
+      apply_algolia_config: true
+      deploy_api: true
+      deploy_pro: true
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+
+  notify-failure:
+    name: Notify deployment has failed
+    needs: deploy
+    if: always() && (failure() || cancelled())
+    uses: ./.github/workflows/slack_post_message_workflow.yml
+    with:
+      channel: ${{vars.SLACK_ALERTES_DEPLOIEMENT_CHANNEL_ID}}
+      message: ":github-failure: Le <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|déploiement sur testing> a échoué cc <!subteam^${{vars.SLACK_SHERIF_BACK_ID}}> <!subteam^${{vars.SLACK_SHERIF_INFRA_ID}}>"
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

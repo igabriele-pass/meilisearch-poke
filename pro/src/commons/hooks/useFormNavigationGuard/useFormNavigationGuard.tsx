@@ -1,0 +1,225 @@
+import { useState } from 'react'
+import type { FieldValues, UseFormReturn } from 'react-hook-form'
+import { useBlocker, useLocation, useNavigate } from 'react-router'
+
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonVariant } from '@/design-system/Button/types'
+import { SimpleModal } from '@/design-system/SimpleModal/SimpleModal'
+import strokeErrorIcon from '@/icons/stroke-error.svg'
+
+/** State carried by `afterSubmitState`, shown as a snack bar either immediately
+ * (no navigation) or by the destination page once it has taken over. */
+type AfterSubmitState = { successMessage?: string }
+
+/** @link https://app.notion.com/p/passcultureapp/Modale-de-pr-vention-de-changement-de-page-sur-les-formulaires-non-sauvegard-s-38bad4e0ff9880a89338f302f1361f38 */
+export const useFormNavigationGuard = <
+  TFieldValues extends FieldValues = FieldValues,
+  // biome-ignore lint/suspicious/noExplicitAny: Follows original RHF shape.
+  TContext = any,
+  TTransformedValues extends TFieldValues = TFieldValues,
+>({
+  afterSubmitPath,
+  afterSubmitState,
+  form,
+  isExternallyDirty = false,
+  onSubmit,
+}: {
+  afterSubmitPath?: string | (() => string | undefined)
+  /** Success message sent along the `afterSubmitPath` navigation (or shown immediately when there is none), so it isn't dismissed by a navigation racing with it. Can also be a function, resolved at submit time. */
+  afterSubmitState?: AfterSubmitState | (() => AfterSubmitState | undefined)
+  form: UseFormReturn<TFieldValues, TContext, TTransformedValues>
+  /** Used to pass an additional custom dirty state to the navigation guard, in addition to the RHF dirty state. */
+  isExternallyDirty?: boolean
+  /** @returns {Promise<boolean>} `true` if there is no error (thus allowing navigation), `false` otherwise. */
+  onSubmit: (transformedFormValues: TTransformedValues) => Promise<boolean>
+}): {
+  navigationGuardedSubmitHandler: () => Promise<void>
+  navigationGuardDialog: JSX.Element
+  proceedWithPendingNavigation: () => void
+  hasPendingNavigation: boolean
+} => {
+  // https://react-hook-form.com/docs/useform/formstate#:~:text=isReady%5D)-,RULES
+  // > Returned formState is wrapped with a Proxy to improve render performance
+  // > and skip extra logic if specific state is not subscribed to.
+  // > Therefore make sure you invoke or read it before a render in order to enable the state update.
+  //
+  // => `isDirty` and `isSubmitting` MUST be read here, during render, to keep them in sync with the form state.
+  const { isDirty, isSubmitting } = form.formState
+  const location = useLocation()
+  const blocker = useBlocker(
+    () => !isSubmitting && (isDirty || isExternallyDirty)
+  )
+  const navigate = useNavigate()
+  const snackBar = useSnackBar()
+  const [pendingNavigationPath, setPendingNavigationPath] = useState<
+    string | null
+  >(null)
+
+  const proceedWithPendingNavigation = () => {
+    if (!pendingNavigationPath) {
+      return
+    }
+
+    void navigate(pendingNavigationPath)
+    setPendingNavigationPath(null)
+  }
+
+  const getBlockedPath = () =>
+    blocker.location
+      ? `${blocker.location.pathname}${blocker.location.search}${blocker.location.hash}`
+      : null
+
+  const isTargetSameAsCurrentPath = () => {
+    if (!blocker.location) return false
+    const blockedPath = `${blocker.location.pathname}${blocker.location.search}`
+    const currentPath = `${location.pathname}${location.search}`
+    return blockedPath === currentPath
+  }
+
+  // When there is a success message to carry, `blocker.proceed()` is swapped
+  // for an explicit reset + navigate (as already done in the catch fallback
+  // below), since `proceed()` cannot be given a `state` for the next page to read.
+  const proceedBlockedNavigationSafely = (
+    state?: AfterSubmitState | undefined
+  ) => {
+    if (blocker.state !== 'blocked') {
+      return false
+    }
+
+    const isSamePath = isTargetSameAsCurrentPath()
+
+    if (state) {
+      const blockedPath = getBlockedPath()
+      blocker.reset()
+      if (blockedPath) {
+        void navigate(blockedPath, { state })
+      }
+      if (isSamePath) {
+        form.reset()
+      }
+      return true
+    }
+
+    try {
+      blocker.proceed()
+      if (isSamePath) {
+        form.reset()
+      }
+      return true
+    } catch {
+      // `blocker.state` may have changed since render (async submit), fallback to explicit navigation.
+      const blockedPath = getBlockedPath()
+      blocker.reset()
+      if (blockedPath) {
+        void navigate(blockedPath)
+        return true
+      }
+      return false
+    }
+  }
+
+  const navigationGuardedSubmitHandler = form.handleSubmit(
+    async (transformedFormValues: TTransformedValues) => {
+      const canProceed = await onSubmit(transformedFormValues)
+      const isSamePath = isTargetSameAsCurrentPath()
+      if (!canProceed) {
+        if (blocker.state === 'blocked') {
+          const blockedPath = getBlockedPath()
+
+          if (blockedPath) {
+            setPendingNavigationPath(blockedPath)
+          }
+
+          blocker.reset()
+        }
+
+        return
+      }
+
+      const resolvedAfterSubmitPath =
+        typeof afterSubmitPath === 'function'
+          ? afterSubmitPath()
+          : afterSubmitPath
+      const resolvedAfterSubmitState =
+        typeof afterSubmitState === 'function'
+          ? afterSubmitState()
+          : afterSubmitState
+
+      if (proceedBlockedNavigationSafely(resolvedAfterSubmitState)) {
+        return
+      }
+
+      if (resolvedAfterSubmitPath) {
+        if (resolvedAfterSubmitState) {
+          await navigate(resolvedAfterSubmitPath, {
+            state: resolvedAfterSubmitState,
+          })
+        } else {
+          await navigate(resolvedAfterSubmitPath)
+        }
+      } else {
+        isSamePath ? form.reset() : form.reset(transformedFormValues)
+        // No navigation is happening: show the message right away instead of
+        // carrying it through a `state` no page will ever read.
+        if (resolvedAfterSubmitState?.successMessage) {
+          snackBar.success(resolvedAfterSubmitState.successMessage)
+        }
+      }
+    },
+    () => {
+      // Close the guard dialog if there are the validation errors
+      if (blocker.state === 'blocked') {
+        blocker.reset()
+      }
+    }
+  )
+
+  const close = () => {
+    if (blocker.state === 'blocked') {
+      blocker.reset()
+    }
+  }
+
+  const leaveWithoutSubmitting = () => {
+    if (proceedBlockedNavigationSafely()) {
+      setPendingNavigationPath(null)
+    }
+  }
+
+  const navigationGuardDialog = (
+    <SimpleModal
+      iconPath={strokeErrorIcon}
+      onClose={close}
+      isOpen={blocker.state !== 'unblocked'}
+      title="Des modifications ont été apportées à cette page"
+      actionButtons={[
+        <Button
+          isLoading={isSubmitting}
+          label="Ignorer les modifications"
+          onClick={leaveWithoutSubmitting}
+          variant={ButtonVariant.SECONDARY}
+          key="cancel"
+        />,
+        <Button
+          isLoading={isSubmitting}
+          label="Enregistrer et quitter"
+          onClick={navigationGuardedSubmitHandler}
+          key="confirm"
+        />,
+      ]}
+    >
+      <p>
+        Vous avez des modifications non enregistrées. Voulez-vous les
+        sauvegarder avant de quitter cette page ?
+      </p>
+    </SimpleModal>
+  )
+
+  return {
+    hasPendingNavigation: pendingNavigationPath !== null,
+    navigationGuardedSubmitHandler,
+    navigationGuardDialog,
+    proceedWithPendingNavigation,
+  }
+}

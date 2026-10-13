@@ -1,0 +1,63 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_rem.scss" as rem;
+
+/* check-unused-css-disable-next-line */
+.income {
+  &-box {
+    margin-bottom: var(--size-spacing-xl);
+  }
+
+  &-input {
+    max-width: rem.torem(350px);
+  }
+
+  &-filters {
+    display: flex;
+    flex-direction: column;
+    margin-bottom: rem.torem(20px);
+    row-gap: var(--size-spacing-xl);
+
+    &-by-year {
+      display: flex;
+      flex-flow: row wrap;
+      flex-direction: row;
+      gap: var(--size-spacing-s);
+
+      &-button {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: none;
+        cursor: pointer;
+        width: rem.torem(80px);
+        height: rem.torem(40px);
+        padding: rem.torem(10px);
+        color: var(--color-text-default);
+        border: solid rem.torem(1px) var(--color-border-default);
+        border-radius: var(--size-border-radius-m);
+
+        &:hover,
+        &:focus {
+          outline: rem.torem(1px) solid var(--color-border-brand-primary);
+        }
+
+        &-active {
+          @include fonts.button;
+
+          border-color: var(--color-border-selected);
+
+          &::before {
+            content: "";
+            display: block;
+            width: rem.torem(8px);
+            height: rem.torem(8px);
+            background-color: var(--color-icon-brand-primary);
+            border-radius: var(--size-border-radius-pill);
+            margin-right: var(--size-spacing-s);
+          }
+        }
+      }
+    }
+  }
+}

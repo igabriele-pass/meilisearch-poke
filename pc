@@ -1,0 +1,500 @@
+#!/bin/bash
+
+set -o nounset
+
+# =============================================
+#  Helper that describes all functionalities
+# =============================================
+
+if [[ $# -eq 0 ]] || [[ "$1" == "-h" ]]; then
+  echo "$(basename "$0") [-h] [-e env -b backend -f file] c [--fast --force-recreate]
+  program to deal with Pass Culture ecosystem
+where:
+  -h  show this help text
+  -e  specify environment to target (default: development)
+  -b  specify backend to connect with local app (default: localhost)
+  -f  file to upload to pod
+  -t  specify version you want to deploy (create tag with this name)
+  --fast avoid rebuilding the docker images
+  --force-recreate force recreation of the docker images
+  c  command that you want to run
+
+Commands:
+  access-db-logs        Display logs from the local database
+  alembic [command]     Run alembic commands on the local environment
+  bash                  Open a shell on the given environment
+  diff-schema           Create diff ouput between schema in an environment & localhost
+  dump-db               Dump pass_culture database into pgdump file
+  deploy-preview        Deploy testing preview env
+  install               Install new local environment
+  install-hooks         Install pre-push and pre-commit hooks
+  logs                  Display logs from the local API
+  pgcli                 Connect to the given environment database with pgcli
+  psql                  Connect to the given environment database
+  psql-file             Execute requests from the specified file on the local database
+  psql-test             Connect to the local test database
+  python                Open a Python prompt the given environment
+  rebuild-backend       Force docker compose to build the docker images
+  reset-all-db          Clear all data in the local database
+  reset-db-no-docker    Clear all data in the local database (without docker)
+  reset-db-test-no-docker  Clear test data in the local database (without docker)
+  reset-all-storage     Delete all local images
+  restart-backend       Restart API after removing the database and files
+  restart-proxy-backend Restart API after removing the database and files (to call when using a proxy)
+  restart-api-no-docker Restart API after cleaning the database (without docker)
+  restore-db            Restore a postgresql database from file (and anonymize data)
+  restore-db-intact     Restore a postgresql database from file (non anonymized)
+  set-git-config        Define a local Git configuration
+  setup-no-docker       Create the setup to use no-docker pc commands
+  start-backend         Start API and backoffice on localhost
+  start-proxy-backend   Start API and backoffice on localhost (to call when using a proxy)
+  start-api-no-docker   Start API without docker
+  start-backoffice-no-docker  Start Backoffice without docker
+  start-pro             Start PC pro frontend on localhost
+  symlink               Create symlink to use \"pc\" command (admin rights may be needed)
+  test-backend          Run tests for the API
+  test-backoffice       Run tests for the Backoffice
+  up-backend            Start API and backoffice on localhost (does not build the images)
+  start-gunicorn-api-no-docker Start API using gunicorn instead of the flask dev server
+  "
+  exit 0
+fi
+
+# =============================================
+# Get script parameters
+# =============================================
+
+if [[ $# -gt 2 ]] && [[ "$1" == "-e" ]]; then
+  if [[ "$2" == "staging" ]]; then
+    ENV="pcapi-stg"
+  elif [[ "$2" == "testing" ]]; then
+    ENV="pcapi-tst"
+  elif [[ "$2" == "integration" ]]; then
+    ENV="pcapi-int"
+  else
+    ENV=$2
+  fi
+
+  shift 2
+else
+  ENV=${ENV:-'development'}
+fi
+
+if [[ $# -gt 2 ]] && [[ "$1" == "-b" ]]; then
+  BACKEND=$2
+  shift 2
+else
+  BACKEND=${BACKEND:-'localhost'}
+fi
+
+if [[ $# -gt 2 ]] && [[ "$1" == "-f" ]]; then
+  FILE_TO_UPLOAD=$2
+  shift 2
+else
+  FILE_TO_UPLOAD=${FILE_TO_UPLOAD:-'none'}
+fi
+
+if [[ $# -gt 1 ]] && [[ "$2" == '--fast' ]]; then
+  FAST=true
+else
+  FAST=false
+fi
+
+if [[ $# -gt 1 ]] && [[ "$2" == '--force-recreate' ]]; then
+  SLOW=true
+else
+  SLOW=false
+fi
+
+CMD="$1"
+shift
+
+# =============================================
+# Utilities functions
+# =============================================
+RUN=""
+PRG="$BASH_SOURCE"
+
+while [ -h "$PRG" ]; do
+  ls=$(ls -ld "$PRG")
+  link=$(expr "$ls" : '.*-> \(.*\)$')
+  if expr "$link" : '/.*' >/dev/null; then
+    PRG="$link"
+  else
+    PRG=$(dirname "$PRG")"/$link"
+  fi
+done
+
+UNAME_OUT="$(uname -s)"
+case "${UNAME_OUT}" in
+Linux*) MACHINE=Linux ;;
+Darwin*) MACHINE=Mac ;;
+CYGWIN*) MACHINE=Cygwin ;;
+MINGW*) MACHINE=MinGw ;;
+*) MACHINE="UNKNOWN:${UNAME_OUT}" ;;
+esac
+
+ROOT_PATH=$(realpath "$(dirname "$PRG")")
+INFRA_SCRIPTS_PATH="$ROOT_PATH"/infra/pc_scripts/
+CONSOLE_PRODUCTION_ERROR="Console actions are not available on production environment"
+
+FLASK_CONTAINER_NAME='pc-api'
+
+function confirm() {
+  read -p "$1 (y/n) : " -n 1 -r
+  echo
+  if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    exit
+  fi
+}
+
+current_branch=$(git symbolic-ref -q HEAD)
+current_branch=${current_branch##refs/heads/}
+
+function exit_success_restoring_branch() {
+  git checkout "$current_branch"
+  exit 0
+}
+
+function pod_console() {
+  if [[ "$ENV" == pcapi-preview* ]]; then
+    POD_GREP="pcapi-tst-api"
+  else
+    POD_GREP="$ENV-console"
+  fi
+  kubectl get pod -n $ENV --field-selector status.phase=Running | grep $POD_GREP | awk '{print $1}'
+}
+
+# =============================================
+# Local commands : use Docker
+# =============================================
+
+# Run alembic migration
+# Need to specify what alembic command you want to execute
+# Example: ./pc alembic upgrade head
+if [[ "$CMD" == "alembic" ]]; then
+  RUN='docker exec '$FLASK_CONTAINER_NAME' bash -c "cd /usr/src/app && alembic '"$*"'"'
+
+# Connect to API container
+elif [[ "$CMD" == "bash" ]]; then
+  if [[ "$ENV" == "development" ]]; then
+    RUN='docker exec -it '$FLASK_CONTAINER_NAME' bash'
+  elif [[ "$ENV" == "production" ]]; then
+    echo $CONSOLE_PRODUCTION_ERROR
+    exit 1
+  else
+    if [ "$FILE_TO_UPLOAD" == 'none' ]; then
+      kubectl -n $ENV exec -it $(pod_console) -- bash
+    else
+      kubectl cp -n $ENV "$FILE_TO_UPLOAD" $(pod_console):"$FILE_TO_UPLOAD" &&
+        kubectl -n $ENV exec -it $(pod_console) -- bash
+    fi
+    exit
+  fi
+
+# Create diff output between schema in an environment & local
+elif [[ "$CMD" == "diff-schema" ]]; then
+  docker exec pc-postgres pg_dump -d pass_culture -U pass_culture -s >/tmp/pc_schema_local
+  if [[ "$ENV" == "production" ]]; then
+    echo $CONSOLE_PRODUCTION_ERROR
+    exit 1
+  fi
+  kubectl -n $ENV exec -it $(pod_console) -- bash -c 'pg_dump "$DATABASE_URL" -s' >/tmp/pc_schema_$ENV
+  diff /tmp/pc_schema_$ENV /tmp/pc_schema_local
+  exit
+
+# Dump pass_culture database into pgdump file
+elif [[ "$CMD" == "dump-db" ]]; then
+  RUN='mkdir -p "$ROOT_PATH/db_dumps";
+    docker exec pc-postgres pg_dump -d pass_culture -U pass_culture -F c > "$ROOT_PATH"/db_dumps/`date +%Y%m%d_%H%M%S`.pgdump'
+
+# Force docker compose to build the docker images
+elif [[ "$CMD" == "rebuild-backend" ]]; then
+  RUN='docker compose -f "$ROOT_PATH/docker-compose-backend.yml" build --no-cache;
+    sudo rm -rf $ROOT_PATH/api/static/object_store_data;
+    docker compose -f "$ROOT_PATH/docker-compose-backend.yml" down --volumes'
+
+# Execute request from specified file
+elif [[ "$CMD" == "psql-file" ]]; then
+  COLUMNS=${COLUMNS:-''}
+  RUN='docker exec -t pc-postgres bash -c "COLUMNS=\"'$COLUMNS'\" psql -U pass_culture pass_culture -f $1"'
+
+# Restart API after removing the database and files
+elif [[ "$CMD" == "restart-backend" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend.sh
+  SLOW=true
+  drop_data
+  build_backend
+  start_backend
+
+
+elif [[ "$CMD" == "restart-proxy-backend" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend.sh
+  SLOW=true
+  drop_data
+  build_proxy_backend
+  start_backend
+
+# Clear all data in postgresql database
+elif [[ "$CMD" == "reset-all-db" ]]; then
+  RUN='docker exec -it '$FLASK_CONTAINER_NAME' bash -c "rm -rf /usr/src/app/static/object_store_data/*";
+    docker exec '$FLASK_CONTAINER_NAME' bash -c "cd /usr/src/app/ && flask clean_database"'
+
+# Delete all local images
+elif [[ "$CMD" == "reset-all-storage" ]]; then
+  RUN='sudo rm -rf $ROOT_PATH/flask/static/object_store_data;'
+
+# Restore a postgresql database from file (and anonymize data)
+elif [[ "$CMD" == "restore-db" ]]; then
+  confirm "Warning: your database will be wiped. Is this OK ?"
+  "$ROOT_PATH"/pc -e "$ENV" reset-all-db
+  if [[ $# == 0 ]]; then
+    echo "Usage : pc restore-db <backup_file> [arguments]"
+    exit
+  fi
+  backup_file="$1"
+  RUN='cat "'$backup_file'" | docker exec -i pc-postgres pg_restore -d pass_culture -U pass_culture -c;
+    ./api/scalingo/anonymize_database.sh -p Password_ ;
+    rm $backup_file'
+
+# Start API server with database and nginx server (builds the images first)
+elif [[ "$CMD" == "start-backend" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend.sh
+  build_backend
+  start_backend
+
+elif [[ "$CMD" == "start-proxy-backend" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend.sh
+  build_proxy_backend
+  start_backend
+
+# Start API server with database and nginx server (without building the images)
+elif [[ "$CMD" == "up-backend" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend.sh
+  start_backend
+
+# Commands to start API & Backoffice without docker
+elif [[ "$CMD" == "start-gunicorn-api-no-docker" ]]; then
+  cd api/ && \
+  eval $(poetry env activate) && \
+  GUNICORN_PORT=5001 FLASK_SERVER=0 ./entrypoint.sh
+
+# Commands to start API & Backoffice without docker
+elif [[ "$CMD" == "setup-no-docker" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend_no_docker.sh
+  RUN='setup_no_docker'
+
+elif [[ "$CMD" == "start-api-no-docker" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend_no_docker.sh
+  start_api_no_docker
+
+elif [[ "$CMD" == "restart-api-no-docker" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend_no_docker.sh
+  restart_api_no_docker
+
+elif [[ "$CMD" == "start-backoffice-no-docker" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend_no_docker.sh
+  start_backoffice_no_docker
+
+elif [[ "$CMD" == "reset-db-no-docker" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend_no_docker.sh
+  RUN='recreate_database && recreate_database_test'
+
+elif [[ "$CMD" == "reset-db-test-no-docker" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/start_backend_no_docker.sh
+  RUN='recreate_database_test'
+
+# Start pro or adage application
+elif [[ "$CMD" == "start-pro" ]]; then
+  RUN='cd $ROOT_PATH/pro'
+  if [[ "$BACKEND" == "testing" ]]; then
+    RUN="$RUN"' && export THUMBS_URL=https://storage.gra3.cloud.ovh.net/v1/AUTH_810600e32fdc4cb49a8d15332b68d2cc/storage-pc/thumbs && export API_URL=https://backend.passculture-testing.beta.gouv.fr'
+  elif [[ "$BACKEND" != "localhost" ]]; then
+    echo "Can only set backend as localhost or testing for developping your front app."
+    exit
+  fi
+  RUN="$RUN"' && pnpm start'
+
+# Run tests for API
+# Need start-backend to be successful and delete all data
+elif [[ "$CMD" == "test-backend" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/test_backend.sh
+  test_backend $*
+
+# Run tests for Backoffice
+# Need start-backend to be successful and delete all data
+elif [[ "$CMD" == "test-backoffice" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/test_backend.sh
+  test_backoffice $*
+
+# =============================================
+# Initialization commands
+# =============================================
+
+# Install new local environment
+elif [[ "$CMD" == "install" ]]; then
+  cd $ROOT_PATH
+  git checkout master
+  cd $ROOT_PATH/pro && pnpm install
+  cd $ROOT_PATH/api && uv sync
+  pc install-hooks
+  pc set-git-config
+  exit_success_restoring_branch
+
+# Install pre-push and pre-commit hooks
+elif [[ "$CMD" == "install-hooks" ]]; then
+  RUN='git config core.hooksPath ./.githooks'
+
+# Define a local Git configuration
+elif [[ "$CMD" == "set-git-config" ]]; then
+  RUN='cd $ROOT_PATH;
+    git config --local commit.template .git-commit-message-template'
+
+# Create symlink to use "pc" command (admin rights may be needed)
+elif [[ "$CMD" == "symlink" ]]; then
+  RUN='cd /usr/local/bin && ln -sf '"$(pwd)"'/pc pc && chmod +x pc && chmod +x '"$(pwd)"'/pc'
+
+# =============================================
+# Administration commands
+# =============================================
+
+# Display logs from API
+elif [[ "$CMD" == "logs" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/logs.sh
+  logs $*
+
+# Display logs from Database
+elif [[ "$CMD" == "access-db-logs" ]]; then
+  source "$INFRA_SCRIPTS_PATH"/access_db_logs.sh
+  access_db_logs
+
+# Connect to Postgresql database in command line using psql
+elif [[ "$CMD" == "psql" ]]; then
+  COLUMNS=${COLUMNS:-''}
+  if [[ "$ENV" == "development" ]]; then
+    RUN='docker exec -it pc-postgres bash -c "COLUMNS=\"'$COLUMNS'\" psql -U pass_culture pass_culture $*"'
+  elif [[ "$ENV" == "production" ]]; then
+    echo $CONSOLE_PRODUCTION_ERROR
+    exit 1
+  else
+    kubectl -n $ENV exec -it $(pod_console) -- bash -c 'psql "$DATABASE_URL"'
+    exit
+  fi
+
+# Connect to Postgresql test database in command line using psql
+elif [[ "$CMD" == "psql-test" ]]; then
+  COLUMNS=${COLUMNS:-''}
+  if [[ "$ENV" == "development" ]]; then
+    RUN='docker exec -it pc-postgres-pytest bash -c "COLUMNS=\"'$COLUMNS'\" psql -U pytest pass_culture $*"'
+  else
+    echo "Only available in development environment"
+    exit
+  fi
+
+# Connect to Postgresql database in command line using pgcli
+elif [[ "$CMD" == "pgcli" ]]; then
+  COLUMNS=${COLUMNS:-''}
+  if [[ "$ENV" == "development" ]]; then
+    source "$ROOT_PATH"/env_file
+    RUN='docker exec -it '$FLASK_CONTAINER_NAME' bash -c "bin/pgcli-wrapper.sh"'
+  elif [[ "$ENV" == "production" ]]; then
+    echo $CONSOLE_PRODUCTION_ERROR
+    exit 1
+  else
+    kubectl -n $ENV exec -it $(pod_console) -- bash -c 'bin/pgcli-wrapper.sh'
+    exit
+  fi
+
+# Open a python prompt in the specified environment
+elif [[ "$CMD" == "python" ]]; then
+  COLUMNS=${COLUMNS:-''}
+  if [[ "$ENV" == "development" ]]; then
+    RUN='docker exec -it '$FLASK_CONTAINER_NAME' bash -c "cd /usr/src/app/ && flask shell '"$*"'"'
+  elif [[ "$ENV" == "production" ]]; then
+    echo $CONSOLE_PRODUCTION_ERROR
+    exit 1
+  else
+    if [ "$FILE_TO_UPLOAD" == 'none' ]; then
+      kubectl -n $ENV exec -it $(pod_console) -- flask shell
+    else
+      kubectl cp -n $ENV "$FILE_TO_UPLOAD" $(pod_console):/tmp/"$FILE_TO_UPLOAD"
+      kubectl -n $ENV exec -it $(pod_console) -- flask shell
+    fi
+    exit
+  fi
+
+# Used to deploy preview environment
+# Usage pc deploy-preview --branch <branch> -f sandbox=empty|industrial -f sandbox-args='...' -f front-only=true|false
+# --branch <branch> : branch to deploy defaults to current branch
+# -f sandbox : sandbox to use (empty|industrial) defaults to empty
+# -f sandbox-args : arguments to pass to the sandbox command
+# -f front-only : if true, only deploys the front-end, defaults to false
+elif [[ "$CMD" == "deploy-preview" ]]; then
+  REF_ARG=""
+  EXTRA_FLAGS=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --branch)
+        shift
+        if [[ -z "${1:-}" ]]; then
+          echo "Error: --branch requires a branch name"
+          exit 1
+        fi
+        REF_ARG="$1"
+        ;;
+      -f)
+        shift
+        if [[ -z "${1:-}" ]]; then
+          echo "Error: -f requires a value (e.g., sandbox=industrial)"
+          exit 1
+        fi
+        EXTRA_FLAGS="$EXTRA_FLAGS -f '$1'"
+        ;;
+      *)
+        shift
+        ;;
+    esac
+  done
+
+  # If no branches is specified, use current branch
+  if [[ -z "$REF_ARG" ]]; then
+    if ! REF_ARG=$(git rev-parse --abbrev-ref HEAD 2>/dev/null); then
+      echo "Error: could not determine current git branch. Use --branch explicitly."
+      exit 1
+    fi
+  fi
+
+  RUN="gh workflow run ci_deploy_pr_preview.yml --ref master -f source_branch=$REF_ARG $EXTRA_FLAGS"
+
+
+
+
+# =============================================
+# Python Scripts commands
+# =============================================
+
+# Run python scripts from api/scripts
+else
+  if [[ "$ENV" == "development" ]]; then
+    RUN='docker exec '$FLASK_CONTAINER_NAME' bash -c "cd /usr/src/app/ && flask '"$CMD $*"'"'
+  elif [[ "$ENV" == "production" ]]; then
+    echo $CONSOLE_PRODUCTION_ERROR
+    exit 1
+  else
+    if [ "$FILE_TO_UPLOAD" == 'none' ]; then
+      kubectl -n $ENV exec -it $(pod_console) -- flask "$CMD" $*
+    else
+      kubectl cp -n $ENV "$FILE_TO_UPLOAD" $(pod_console):"$FILE_TO_UPLOAD"
+      kubectl -n $ENV exec -it $(pod_console) -- flask "$CMD" $*
+    fi
+    exit
+  fi
+fi
+
+# =============================================
+# Execute command locally
+# =============================================
+
+echo "$RUN"
+eval "$RUN"

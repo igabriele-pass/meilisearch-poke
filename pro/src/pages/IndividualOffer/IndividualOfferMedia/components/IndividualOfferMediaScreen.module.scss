@@ -1,0 +1,17 @@
+@use "styles/mixins/_size.scss" as size;
+
+.media-row {
+  gap: 0 !important;
+
+  @media screen and (min-width: size.$laptop) {
+    gap: var(--size-spacing-xxxl) !important;
+  }
+}
+
+.media-sub-section {
+  width: 100%;
+}
+
+.media-divider {
+  margin: 0;
+}

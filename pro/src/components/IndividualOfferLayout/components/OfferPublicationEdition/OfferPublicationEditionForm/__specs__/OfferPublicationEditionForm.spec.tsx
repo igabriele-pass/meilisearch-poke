@@ -1,0 +1,138 @@
+import { screen, waitFor } from '@testing-library/react'
+import { addDays } from 'date-fns'
+
+import { api } from '@/apiClient/api'
+import {
+  getIndividualOfferFactory,
+  getOfferStockFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import {
+  OfferPublicationEditionForm,
+  type OfferPublicationEditionFormProps,
+} from '../OfferPublicationEditionForm'
+
+function renderOfferPublicationEditionForm(
+  props: OfferPublicationEditionFormProps
+) {
+  return renderWithProviders(<OfferPublicationEditionForm {...props} />)
+}
+
+describe('OfferPublicationEditionForm', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'getStocks').mockResolvedValue({
+      stocks: [getOfferStockFactory()],
+      totalStockCount: 1,
+      editedStockCount: 1,
+    })
+  })
+
+  it('should render the form', async () => {
+    renderOfferPublicationEditionForm({
+      offer: getIndividualOfferFactory({
+        // TODO (tpommellet) to remove once GetIndividualOfferResponseModel is migrated to Pydantic V2
+        // @ts-expect-error
+        publicationDatetime: null,
+        // TODO (tpommellet) to remove once GetIndividualOfferResponseModel is migrated to Pydantic V2
+        // @ts-expect-error
+        bookingAllowedDatetime: null,
+      }),
+      onSubmit: () => {},
+    })
+
+    expect(
+      await screen.findAllByRole('group', {
+        name: /Quand votre offre doit-elle être publiée/,
+      })
+    ).toHaveLength(1)
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('button', { name: 'Mettre en pause l’offre' })
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('should disable the form if the pause toggle is on', async () => {
+    renderOfferPublicationEditionForm({
+      offer: getIndividualOfferFactory({
+        // TODO (tpommellet) to remove once GetIndividualOfferResponseModel is migrated to Pydantic V2
+        // @ts-expect-error
+        publicationDatetime: null,
+        // TODO (tpommellet) to remove once GetIndividualOfferResponseModel is migrated to Pydantic V2
+        // @ts-expect-error
+        bookingAllowedDatetime: null,
+      }),
+      onSubmit: () => {},
+    })
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('radio', {
+          name: 'Publier plus tard L’offre restera secrète pour le public jusqu’à sa publication.',
+        })
+      ).toBeDisabled()
+    })
+
+    expect(
+      screen.getByRole('radio', {
+        name: /Rendre réservable plus tard/,
+      })
+    ).toBeDisabled()
+  })
+
+  it('should pre-fill the publication date', async () => {
+    const publicationDate = addDays(new Date(), 2).toISOString()
+
+    //  The publication date can only have a time every 15 minutes : 12:00, 12:15, 12:30...
+    const publicationDateFomatted = `${publicationDate.split('T')[0]}T12:00:00Z`
+
+    renderOfferPublicationEditionForm({
+      offer: getIndividualOfferFactory({
+        publicationDatetime: publicationDateFomatted,
+        // TODO (tpommellet) to remove once GetIndividualOfferResponseModel is migrated to Pydantic V2
+        // @ts-expect-error
+        bookingAllowedDatetime: null,
+      }),
+      onSubmit: () => {},
+    })
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('radio', {
+          name: 'Publier plus tard L’offre restera secrète pour le public jusqu’à sa publication.',
+        })
+      ).toBeEnabled()
+    })
+
+    expect(screen.getByLabelText('Date *')).toHaveValue()
+    expect(screen.getByLabelText(/Heure/)).toHaveValue()
+  })
+
+  it('should pre-fill the booking allowed date', async () => {
+    const bookingAllowedDate = addDays(new Date(), 2).toISOString()
+
+    //  The booking allowed date can only have a time every 15 minutes : 12:00, 12:15, 12:30...
+    const bookingAllowedDateFormatted = `${bookingAllowedDate.split('T')[0]}T12:00:00Z`
+
+    renderOfferPublicationEditionForm({
+      offer: getIndividualOfferFactory({
+        publicationDatetime: new Date().toISOString(),
+        bookingAllowedDatetime: bookingAllowedDateFormatted,
+      }),
+      onSubmit: () => {},
+    })
+
+    await waitFor(() => {
+      expect(
+        screen.getByRole('radio', {
+          name: /Rendre réservable plus tard/,
+        })
+      ).toBeEnabled()
+    })
+
+    expect(screen.getByLabelText('Date *')).toHaveValue()
+    expect(screen.getByLabelText(/Heure/)).toHaveValue()
+  })
+})

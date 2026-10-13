@@ -1,0 +1,71 @@
+import {
+  CollectiveLocationType,
+  type GetCollectiveOfferResponseModel,
+  type GetCollectiveOfferTemplateResponseModel,
+} from '@/apiClient/v1'
+import { getInterventionAreaLabels } from '@/pages/AdageIframe/app/components/OffersInstantSearch/OffersSearch/Offers/utils/getInterventionAreaLabels'
+import {
+  type Description,
+  SummaryDescriptionList,
+} from '@/ui-kit/SummaryLayout/SummaryDescriptionList'
+import { SummarySubSection } from '@/ui-kit/SummaryLayout/SummarySubSection'
+
+import styles from '../CollectiveOfferSummary.module.scss'
+
+interface CollectiveOfferLocationSectionProps {
+  offer:
+    | GetCollectiveOfferTemplateResponseModel
+    | GetCollectiveOfferResponseModel
+}
+
+const getLocationInformation = ({
+  offer,
+}: CollectiveOfferLocationSectionProps) => {
+  const offerLocation = offer.location
+  if (offerLocation?.locationType === CollectiveLocationType.ADDRESS) {
+    const { label, street, city, postalCode } = offerLocation.location || {}
+    return (
+      <div className={styles['location-information']}>
+        <p>Intitulé : {label ?? '-'}</p>
+        <p>
+          Adresse : {street}, {postalCode}, {city}
+        </p>
+      </div>
+    )
+  }
+
+  const interventionAreas = getInterventionAreaLabels(offer.interventionArea)
+  if (offerLocation?.locationType === CollectiveLocationType.SCHOOL) {
+    return (
+      <div className={styles['location-information']}>
+        <p>Dans l’établissement scolaire</p>
+        <p>Zone de mobilité : {interventionAreas}</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className={styles['location-information']}>
+      <p>À déterminer avec l’enseignant</p>
+      <p>Commentaire : {offerLocation?.locationComment ?? '-'}</p>
+      <p>Zone de mobilité : {interventionAreas}</p>
+    </div>
+  )
+}
+
+export const CollectiveOfferLocationSection = ({
+  offer,
+}: CollectiveOfferLocationSectionProps) => {
+  const descriptions: Description[] = [
+    { text: getLocationInformation({ offer }), isBlock: true },
+  ]
+
+  return (
+    <SummarySubSection
+      title="Localisation de l'événement"
+      shouldShowDivider={false}
+    >
+      <SummaryDescriptionList descriptions={descriptions} />
+    </SummarySubSection>
+  )
+}

@@ -1,0 +1,31 @@
+import { CollectiveOffersSortingColumn } from '@/commons/core/OfferEducational/types'
+import { SortingMode } from '@/commons/hooks/useColumnSorting'
+
+const sortByDate = (dateA: string, dateB: string, mode: SortingMode) => {
+  const compareDates = dateA > dateB ? -1 : 1
+
+  return (
+    (dateA === dateB ? 0 : compareDates) * (mode === SortingMode.ASC ? -1 : 1)
+  )
+}
+
+export function sortCollectiveOffers<
+  T extends { dates?: { start?: string; end?: string } | null },
+>(
+  offers: T[],
+  currentSortingColumn: CollectiveOffersSortingColumn | null,
+  sortingMode: SortingMode
+) {
+  const sortedOffers = offers.slice()
+
+  if (currentSortingColumn === CollectiveOffersSortingColumn.EVENT_DATE) {
+    return sortedOffers.sort((offerA, offerB) =>
+      sortByDate(
+        offerA.dates?.start ?? '',
+        offerB.dates?.start ?? '',
+        sortingMode
+      )
+    )
+  }
+  return sortedOffers
+}

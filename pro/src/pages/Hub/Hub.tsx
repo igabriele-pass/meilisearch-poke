@@ -1,0 +1,168 @@
+import { type ChangeEvent, useRef, useState } from 'react'
+import { useNavigate } from 'react-router'
+
+import { type VenueListItemLiteResponseModel, VenueState } from '@/apiClient/v1'
+import { FullLayout } from '@/app/App/layouts/FullLayout/FullLayout'
+import { useAppDispatch } from '@/commons/hooks/useAppDispatch'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { setSelectedPartnerVenueById } from '@/commons/store/user/dispatchers/setSelectedPartnerVenueById'
+import { ensureVenues } from '@/commons/store/user/selectors'
+import { normalizeStrForSearch } from '@/commons/utils/normalizeStrForSearch'
+import { pluralizeFr } from '@/commons/utils/pluralize'
+import { withVenueHelpers } from '@/commons/utils/withVenueHelpers'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonVariant } from '@/design-system/Button/types'
+import { SearchInput } from '@/design-system/SearchInput/SearchInput'
+import { Tag, TagVariant } from '@/design-system/Tag/Tag'
+import fullMoreIcon from '@/icons/full-more.svg'
+import { Spinner } from '@/ui-kit/Spinner/Spinner'
+
+import styles from './Hub.module.scss'
+
+export const Hub = () => {
+  const venuesWithNormalizedNameRef = useRef<
+    [normalizedName: string, venue: VenueListItemLiteResponseModel][]
+  >([])
+
+  const dispatch = useAppDispatch()
+  const venues = useAppSelector(ensureVenues)
+  const navigate = useNavigate()
+
+  const [filteredVenues, setFilteredVenues] = useState(venues)
+  const [isLoading, setIsLoading] = useState(false)
+  const [query, setQuery] = useState('')
+
+  const filterVenues = (event: ChangeEvent<HTMLInputElement>) => {
+    const query = event.target.value
+
+    setQuery(query)
+
+    const normalizedQuery = normalizeStrForSearch(event.target.value)
+    if (!normalizedQuery) {
+      setFilteredVenues(venues)
+
+      return
+    }
+
+    if (venuesWithNormalizedNameRef.current.length === 0) {
+      venuesWithNormalizedNameRef.current = venues.map((venue) => [
+        normalizeStrForSearch(venue.publicName),
+        venue,
+      ])
+    }
+
+    setFilteredVenues(
+      venuesWithNormalizedNameRef.current
+        .filter(([normalizedName]) => normalizedName.includes(normalizedQuery))
+        .map(([, venue]) => venue)
+    )
+  }
+
+  const setSelectedVenueByIdAndRedirect = async (
+    nextSelectedVenueId: number
+  ) => {
+    setIsLoading(true)
+    try {
+      const { selectedPartnerVenue } = await dispatch(
+        setSelectedPartnerVenueById({
+          nextSelectedPartnerVenueId: nextSelectedVenueId,
+          shouldAlignSelectedAdminOfferer: true,
+        })
+      ).unwrap()
+
+      if (!selectedPartnerVenue) {
+        setIsLoading(false)
+        return
+      }
+
+      await navigate('/accueil')
+    } catch {
+      setIsLoading(false)
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div aria-busy="true" className={styles['spinner-container']}>
+        <Spinner message="Chargement de la structure en cours…" />
+      </div>
+    )
+  }
+
+  return (
+    <FullLayout headerPropsOverride={{ hideAdminButton: false }}>
+      <div className={styles['content-flex']}>
+        <h1 className={styles['title']}>
+          À quelle structure souhaitez-vous accéder ?
+        </h1>
+
+        {venues.length > 4 && (
+          <SearchInput
+            label="Rechercher une structure"
+            onChange={filterVenues}
+            value={query}
+            name="searchQuery"
+          />
+        )}
+
+        {/* Hidden helper text for screen readers */}
+        {
+          <div
+            className={styles['sr-only']}
+            role="status"
+            aria-atomic="true"
+            aria-live="polite"
+          >
+            {!!query &&
+              `${filteredVenues.length} ${pluralizeFr(filteredVenues.length, 'structure trouvée', 'structures trouvées')}.`}
+          </div>
+        }
+        {venues.length > 0 && filteredVenues.length === 0 && (
+          <div>Aucune structure ne correspond à votre recherche "{query}".</div>
+        )}
+        <div className={styles['venue-list']}>
+          {filteredVenues.map((venue) => (
+            <div key={venue.id}>
+              <button
+                aria-labelledby={`venue-${venue.id}-name`}
+                className={styles['venue-item-button']}
+                onClick={() => setSelectedVenueByIdAndRedirect(venue.id)}
+                type="button"
+              >
+                {(venue.managingOfferer.isClosed ||
+                  venue.state === VenueState.CLOSED) && (
+                  <div className={styles['venue-item-state']}>
+                    <Tag variant={TagVariant.ERROR} label="Structure fermée" />
+                  </div>
+                )}
+                <span
+                  className={styles['venue-item-name']}
+                  id={`venue-${venue.id}-name`}
+                >
+                  {venue.publicName}
+                </span>
+                <span className={styles['venue-location']}>
+                  {withVenueHelpers(venue).fullAddressAsString}
+                </span>
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className={styles['venue-actions']}>
+          <Button
+            as="router-link"
+            icon={fullMoreIcon}
+            to="/inscription/structure/recherche"
+            variant={ButtonVariant.SECONDARY}
+            label="Ajouter une structure"
+          />
+        </div>
+      </div>
+    </FullLayout>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = Hub

@@ -1,0 +1,122 @@
+import hashlib
+import os
+import time
+from collections import namedtuple
+from contextlib import suppress
+from pathlib import Path
+
+import sass
+
+from pcapi import settings
+
+
+HashesContainer = namedtuple("HashesContainer", ("js", "css"))
+hashes = HashesContainer("", "")
+
+
+JS_BUNDLE = Path("src/pcapi/static/backoffice/js/bundle.js")
+JS_FILES = [
+    # Bootstrap JS,
+    Path("src/pcapi/static/backoffice/js/libs/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"),
+    Path("src/pcapi/static/backoffice/js/libs/tom-select@2.4.1/dist/js/tom-select.complete.min.js"),
+    # Vanilla datetime range picker
+    Path("src/pcapi/static/backoffice/js/libs/momentjs@2.30.1/moment.min.js"),
+    Path(
+        "src/pcapi/static/backoffice/js/libs/vanilla-datetimerange-picker@latest/dist/vanilla-datetimerange-picker.js"
+    ),
+    # htmx lib to dynamically load some parts of the html
+    Path("src/pcapi/static/backoffice/js/libs/htmx.2.0.4.min.js"),
+    # Our core libs,
+    Path("src/pcapi/static/backoffice/js/core/pc-utils.js"),
+    Path("src/pcapi/static/backoffice/js/core/pc-event-handler.js"),
+    Path("src/pcapi/static/backoffice/js/core/pc-addon.js"),
+    # Our app,
+    Path("src/pcapi/static/backoffice/js/core/pc-backoffice-app.js"),
+    # Our JS libs,
+    Path("src/pcapi/static/backoffice/js/addons/"),
+]
+CSS_BUNDLE = Path("src/pcapi/static/backoffice/css/bundle.css")
+CSS_FILES = [
+    # Tom Select JS configuration
+    Path("src/pcapi/static/backoffice/css/tom-select@2.4.1/dist/css/tom-select.css"),
+    Path("src/pcapi/static/backoffice/css/tom-select-bootstrap-5.min.css"),
+    # Vanilla datetime range picker
+    Path("src/pcapi/static/backoffice/css/vanilla-datetimerange-picker@latest/dist/vanilla-datetimerange-picker.css"),
+    # Our css needs to be imported after Bootstrap to have a stronger weight
+    Path("src/pcapi/static/backoffice/css/compiled/pc/pc.css"),
+]
+
+
+def generate_bundles() -> None:
+    if os.environ.get("WERKZEUG_RUN_MAIN") != "true" and settings.IS_RUNNING_TESTS is not True:
+        preprocess_scss()
+        print("compile scss with: flask compile css", flush=True)
+        print("auto rebuild bundles by settings ENABLE_BO_BUNDLES_AUTORELOAD to 1", flush=True)
+        generate_bundle(JS_FILES, JS_BUNDLE)
+        generate_bundle(CSS_FILES, CSS_BUNDLE)
+
+
+def preprocess_scss() -> None:
+    source = Path("src/pcapi/static/backoffice/scss")
+    destination = Path("src/pcapi/static/backoffice/css/compiled")
+
+    Path(destination).mkdir(parents=True, exist_ok=True)
+
+    sass.compile(
+        dirname=(source, destination),
+        output_style="compressed",
+        source_map_contents=True,
+        source_map_embed=True,
+        source_map_root=destination,
+    )
+
+
+def get_hashes() -> HashesContainer:
+    global hashes  # noqa: PLW0603 (global-statement)
+    if settings.ENABLE_BO_BUNDLES_AUTORELOAD:
+        # make it easier to debug js and css files in bo (but it takes a few ms for each http call)
+        generate_bundle(JS_FILES, JS_BUNDLE)
+        generate_bundle(CSS_FILES, CSS_BUNDLE)
+    if settings.ENABLE_BO_BUNDLES_AUTORELOAD or not hashes.js:
+        with suppress(FileNotFoundError):
+            js = _retrieve_hash(JS_BUNDLE)
+            css = _retrieve_hash(CSS_BUNDLE)
+            hashes = HashesContainer(js=js, css=css)
+    return hashes
+
+
+def _retrieve_hash(file_path: Path) -> str:
+    with open(file_path, mode="r", encoding="utf-8") as fp:
+        data = fp.read(66)
+        return data[2:]
+
+
+def generate_bundle(files: list[Path], destination: Path) -> None:
+    if settings.ENABLE_BO_BUNDLES_AUTORELOAD:
+        with suppress(FileNotFoundError):
+            # do not rebuild the bundle if it was built less than 1s ago
+            if os.stat(destination).st_mtime > time.time() - 1:
+                return
+
+    with suppress(FileNotFoundError):
+        os.unlink(destination)
+
+    bundle_content = b""
+    for path in files:
+        paths: list[Path] = []
+        if path.is_file():
+            paths.append(path)
+        else:
+            paths = list(path.iterdir())
+
+        for filepath in paths:
+            bundle_content += f"/* {filepath} */\n".encode()
+            with open(filepath, mode="rb") as fp:
+                bundle_content += fp.read()
+                bundle_content += b"\n"
+
+    bundle_hash = hashlib.sha256(bundle_content).hexdigest()
+    bundle_content = (f"/*{bundle_hash}*/\n").encode() + bundle_content
+
+    with open(destination, mode="wb") as fp:
+        fp.write(bundle_content)

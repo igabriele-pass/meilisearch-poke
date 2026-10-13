@@ -1,0 +1,54 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_outline.scss" as outline;
+
+.survey-satisfaction {
+  margin-top: var(--size-spacing-l);
+  background-image: url("./assets/survey.svg");
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  border-radius: var(--size-border-radius-m);
+  padding: var(--size-spacing-xxl) var(--size-spacing-xl);
+
+  &-infos {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-spacing-l);
+
+    &-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+  }
+}
+
+.survey-title {
+  @include fonts.title3;
+
+  color: var(--color-text-brand-primary);
+}
+
+.survey-description {
+  @include fonts.body;
+}
+
+.survey-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-l);
+  flex-wrap: wrap;
+}
+
+.survey-close {
+  background-color: transparent;
+  border: none;
+  width: rem.torem(24px);
+  height: rem.torem(24px);
+  cursor: pointer;
+
+  &:focus-visible {
+    @include outline.focus-outline;
+  }
+}

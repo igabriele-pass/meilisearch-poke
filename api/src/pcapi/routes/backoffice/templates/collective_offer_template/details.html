@@ -1,0 +1,193 @@
+{% extends "layouts/details.html" %}
+{% from "components/dynamic/modal.html" import build_lazy_modal with context %}
+{% import "components/badges.html" as badges with context %}
+{% import "components/clipboard.html" as clipboard %}
+{% import "components/links.html" as links with context %}
+{% from "components/connect_as.html" import build_connect_as %}
+{% from "components/description.html" import description_detail_horizontal %}
+{% from "components/description.html" import description_detail_vertical %}
+{% from "components/presentation/accessibility.html" import accessibility_indicator %}
+{% from "components/presentation/images.html" import offer_detail_image %}
+{% import "components/logo.html" as logo %}
+{% block title %}
+  {{ collective_offer_template.name }}
+{% endblock title %}
+{% block header_extra %}
+  {{ collective_offer_template.validation | format_offer_validation_status(with_badge=True) }}
+{% endblock header_extra %}
+{% block action_buttons %}
+  {% if has_permission("PRO_FRAUD_ACTIONS") %}
+    {{ action_bar_button("hand-thumbs-up", "Valider", modal_id="#validate-collective-offer-template-modal-" + collective_offer_template.id|string) }}
+    {{ action_bar_button("hand-thumbs-down", "Rejeter", modal_id="#reject-collective-offer-template-modal-" + collective_offer_template.id|string) }}
+  {% endif %}
+  {% if has_permission("MOVE_COLLECTIVE_OFFER") %}
+    {{ action_bar_button("shop", "Déplacer l'offre vitrine", modal_id="#move-collective-offer-template-modal") }}
+  {% endif %}
+{% endblock action_buttons %}
+{% block details_container %}
+  {% call details_content_wrapper("offer-details") %}
+    <!-- DETAILS -->
+    {% call nav_section("details", "Détails de l'offre") %}
+      <div class="d-flex gap-1">
+        <div class="flex-grow-1">
+          {% call description_detail_horizontal("Période de validité") %}
+            {% if collective_offer_template.dateRange and not collective_offer_template.dateRange.empty %}
+              {% set start_date = collective_offer_template.dateRange.lower | format_date_time(collective_offer_template.address) %}
+              {% set end_date = collective_offer_template.dateRange.upper | format_date_time(collective_offer_template.address) %}
+              {{ start_date }}
+              {% if end_date and end_date != start_date %}→ {{ end_date }}{% endif %}
+            {% endif %}
+          {% endcall %}
+          {% call description_detail_horizontal("Durée") %}
+            {% if collective_offer_template.durationMinutes %}{{ collective_offer_template.durationMinutes }} minutes{% endif %}
+          {% endcall %}
+          {% call description_detail_horizontal("Description") %}
+            {{ collective_offer_template.description | empty_string_if_null | nl2br }}
+          {% endcall %}
+        </div>
+        {{ offer_detail_image(collective_offer_template.imageUrl, collective_offer_template.imageCredit) }}
+      </div>
+    {% endcall %}
+    <!-- INFO -->
+    {% call nav_section("info", "Informations pratiques") %}
+      {% call description_detail_horizontal("Informations sur le prix") %}
+        {% if collective_offer_template.priceDetail %}{{ collective_offer_template.priceDetail | nl2br }}{% endif %}
+      {% endcall %}
+      {% call description_detail_horizontal("Zone de mobilité") %}
+        {% if collective_offer_template.interventionArea %}{{ collective_offer_template.interventionArea | join(", ") }}{% endif %}
+      {% endcall %}
+      {% if collective_offer_template.locationType %}
+        {% call description_detail_horizontal("Lieu") %}
+          {% if collective_offer_template.locationType.value == "ADDRESS" %}
+            <div>
+              <div>{{ collective_offer_template.offererAddress.address.street }}</div>
+              <div>{{ collective_offer_template.offererAddress.address.postalCode }} {{ collective_offer_template.offererAddress.address.city }}</div>
+            </div>
+          {% elif collective_offer_template.locationComment %}
+            {{ collective_offer_template.locationComment | nl2br }}
+          {% else %}
+            {{ collective_offer_template.locationType | format_collective_location_type }}
+          {% endif %}
+        {% endcall %}
+      {% endif %}
+    {% endcall %}
+    <!-- PUBLICS -->
+    {% call nav_section("publics", "Public concerné") %}
+      {% call description_detail_horizontal("Niveau scolaire") %}
+        {% for students in collective_offer_template.students %}<div>{{ students.value }}</div>{% endfor %}
+      {% endcall %}
+      {% call description_detail_horizontal("Accessibilité") %}
+        <div class="hstack gap-5">
+          {{ accessibility_indicator(logo.handicap_visual() , collective_offer_template.visualDisabilityCompliant, "Handicap visuel") }}
+          {{ accessibility_indicator(logo.handicap_mental() , collective_offer_template.mentalDisabilityCompliant, "Handicap mental") }}
+          {{ accessibility_indicator(logo.handicap_motor() , collective_offer_template.motorDisabilityCompliant, "Handicap moteur") }}
+          {{ accessibility_indicator(logo.handicap_audio() , collective_offer_template.audioDisabilityCompliant, "Handicap auditif") }}
+        </div>
+      {% endcall %}
+    {% endcall %}
+    <!-- CONTACT -->
+    {% call nav_section("contact", "Contact du partenaire culturel") %}
+      {% call description_detail_horizontal("Téléphone") %}
+        {% if collective_offer_template.contactPhone %}{{ collective_offer_template.contactPhone }}{% endif %}
+      {% endcall %}
+      {% call description_detail_horizontal("Email de contact") %}
+        {% if collective_offer_template.contactEmail %}{{ collective_offer_template.contactEmail }}{% endif %}
+      {% endcall %}
+      {% call description_detail_horizontal("Email auquel envoyer les notifications") %}
+        {% for booking_email in collective_offer_template.bookingEmails %}
+          {{ booking_email | empty_string_if_null }}
+          {% if booking_email %}{{ clipboard.copy_to_clipboard(booking_email, "Copier") }}{% endif %}
+          <br />
+        {% endfor %}
+      {% endcall %}
+      {% call description_detail_horizontal("Formulaire standard") %}
+        {% if collective_offer_template.contactForm %}
+          oui
+        {% else %}
+          non
+        {% endif %}
+      {% endcall %}
+      {% call description_detail_horizontal("Formulaire personalisé") %}
+        {% if collective_offer_template.contactUrl %}
+          oui
+        {% else %}
+          non
+        {% endif %}
+      {% endcall %}
+    {% endcall %}
+  {% endcall %}
+{% endblock details_container %}
+{% block side_column %}
+  {% call build_connect_as(connect_as) %}
+    <button type="button"
+            class="btn btn-outline-primary-subtle-bg"
+            href="{{ connect_as.href }}"
+            data-bs-toggle="tooltip"
+            data-bs-placement="top"
+            data-bs-title="Accéder à l'offre sur PC Pro"
+            data-submit-form="{{ connect_as.formName }}">
+      Accéder PC Pro
+      <i class="bi bi-briefcase"></i>
+    </button>
+  {% endcall %}
+  <div>
+    {% call description_detail_vertical("CollectiveOfferTemplate ID") %}
+      {{ collective_offer_template.id }}
+      {{ clipboard.copy_to_clipboard(collective_offer_template.id, "Copier l'ID de l'offre") }}
+    {% endcall %}
+    {% call description_detail_vertical("Statut") %}
+      {{ collective_offer_template.displayedStatus | format_collective_offer_displayed_status }}
+    {% endcall %}
+    {% set formats_label = collective_offer_template.formats | length | pluralize("Format", "Formats") %}
+    {% call description_detail_vertical(formats_label) %}
+      {{ collective_offer_template.formats | format_collective_offer_formats }}
+    {% endcall %}
+    {% set domains_label = collective_offer_template.domains | length | pluralize("Domaine artistique", "Domaines artistiques") %}
+    {% call description_detail_vertical(domains_label) %}
+      {% for domain in collective_offer_template.domains %}<div>{{ domain.name }}</div>{% endfor %}
+    {% endcall %}
+    {% call description_detail_vertical("Dispositif national") %}
+      {% if collective_offer_template.nationalProgram %}{{ collective_offer_template.nationalProgram.name }}{% endif %}
+    {% endcall %}
+    <hr />
+    {% call description_detail_vertical("Entité juridique") %}
+      <div class="vstack gap-1">
+        <div>{{ links.build_offerer_name_to_details_link(collective_offer_template.venue.managingOfferer) }}</div>
+        {% call badges.badges_container() %}
+          {{ badges.build_offer_offerer_fraud_badges(collective_offer_template.venue.managingOfferer) }}
+        {% endcall %}
+      </div>
+    {% endcall %}
+    {% call description_detail_vertical("Partenaire culturel") %}
+      <div class="vstack gap-1">
+        <div>{{ links.build_venue_name_to_details_link(collective_offer_template.venue) }}</div>
+        {% call badges.badges_container() %}
+          {{ badges.build_offer_venue_fraud_badges(collective_offer_template.venue) }}
+        {% endcall %}
+      </div>
+    {% endcall %}
+    <hr />
+    {% call description_detail_vertical("Date de création") %}
+      {{ collective_offer_template.dateCreated | format_date_time }}
+    {% endcall %}
+    {% if collective_offer_template.rejectionReason %}
+      {% call description_detail_vertical("Raison de rejet") %}
+        {{ collective_offer_template.rejectionReason | format_collective_offer_rejection_reason }}
+      {% endcall %}
+    {% endif %}
+    {% if collective_offer_template.lastValidationAuthor %}
+      {% call description_detail_vertical("Utilisateur de la dernière validation") %}
+        {{ collective_offer_template.lastValidationAuthor.full_name }}
+      {% endcall %}
+    {% endif %}
+  </div>
+{% endblock side_column %}
+{% block extra_main_content %}
+  {% if has_permission("PRO_FRAUD_ACTIONS") %}
+    {{ build_lazy_modal(url_for('backoffice.collective_offer_template.get_validate_collective_offer_template_form', collective_offer_template_id=collective_offer_template.id) , "validate-collective-offer-template-modal-" + collective_offer_template.id|string) }}
+    {{ build_lazy_modal(url_for('backoffice.collective_offer_template.get_reject_collective_offer_template_form', collective_offer_template_id=collective_offer_template.id) , "reject-collective-offer-template-modal-" + collective_offer_template.id|string) }}
+  {% endif %}
+  {% if has_permission("MOVE_COLLECTIVE_OFFER") %}
+    {{ build_lazy_modal(url_for('backoffice.collective_offer_template.get_move_collective_offer_template_form', collective_offer_template_id=collective_offer_template.id) , "move-collective-offer-template-modal") }}
+  {% endif %}
+{% endblock extra_main_content %}

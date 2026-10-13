@@ -1,0 +1,187 @@
+import { format } from 'date-fns'
+import { useLocation } from 'react-router'
+import useSWR, { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import { isErrorAPIError } from '@/apiClient/helpers'
+import type {
+  CollectiveStockCreationBodyModel,
+  CollectiveStockResponseModel,
+  GetCollectiveOfferResponseModel,
+} from '@/apiClient/v1'
+import {
+  GET_COLLECTIVE_OFFER_QUERY_KEY,
+  GET_COLLECTIVE_REQUEST_INFORMATIONS_QUERY_KEY,
+} from '@/commons/config/swrQueryKeys'
+import { Mode } from '@/commons/core/OfferEducational/types'
+import { hasStatusCodeAndErrorsCode } from '@/commons/core/OfferEducational/utils/hasStatusCode'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { FORMAT_ISO_DATE_ONLY } from '@/commons/utils/date'
+import { objectFromEntries } from '@/commons/utils/object'
+import { queryParamsFromOfferer } from '@/commons/utils/queryParamsFromOfferer'
+import { CollectiveOfferLayout } from '@/pages/CollectiveOffer/CollectiveOfferLayout/CollectiveOfferLayout'
+
+import {
+  type CollectiveOfferFromParamsProps,
+  withOnlyCollectiveOfferFromParams,
+} from '../../CollectiveOffer/components/OfferEducational/useCollectiveOfferFromParams'
+import { CollectiveOfferStockForm } from '../components/CollectiveOfferStockForm/CollectiveOfferStockForm'
+
+const STOCK_KEYS: (keyof CollectiveStockCreationBodyModel)[] = [
+  'bookingLimitDatetime',
+  'endDatetime',
+  'numberOfTickets',
+  'startDatetime',
+  'price',
+  'numberOfTeachers',
+  'collectiveAdditionalFees',
+  'servicePrice',
+]
+
+function isComplete(
+  stock: Partial<CollectiveStockCreationBodyModel>
+): stock is CollectiveStockCreationBodyModel {
+  return STOCK_KEYS.every((key) => key in stock && stock[key] !== undefined)
+}
+
+function handleStockError(
+  e: unknown,
+  onError: (message: string) => void
+): void {
+  console.error(e)
+  if (hasStatusCodeAndErrorsCode(e) && e.status === 400) {
+    const errorMessages: Partial<Record<string, string>> = {
+      EDUCATIONAL_STOCK_ALREADY_EXISTS:
+        'Une erreur s’est produite. Les informations dates et prix existent déjà pour cette offre.',
+      COLLECTIVE_OFFER_NOT_FOUND:
+        'Une erreur s’est produite. L’offre n’a pas été trouvée.',
+    }
+    const message = errorMessages[e.errors.code]
+    if (message) {
+      onError(message)
+      return
+    }
+  }
+  if (isErrorAPIError(e) && e.status < 500) {
+    throw e
+  }
+  onError('Une erreur est survenue lors de la création de votre stock.')
+}
+
+function getCreateStock(
+  collectiveStock: CollectiveStockCreationBodyModel
+): CollectiveStockCreationBodyModel {
+  return objectFromEntries(STOCK_KEYS.map((k) => [k, collectiveStock[k]]))
+}
+
+export const CollectiveOfferStockCreation = ({
+  offer,
+}: CollectiveOfferFromParamsProps): JSX.Element | null => {
+  const snackBar = useSnackBar()
+  const location = useLocation()
+  const isCreation = !location.pathname.includes('edition')
+  const { requete: requestId } = queryParamsFromOfferer(location)
+  const { mutate } = useSWRConfig()
+
+  const { data: requestInformations } = useSWR(
+    () =>
+      requestId
+        ? [GET_COLLECTIVE_REQUEST_INFORMATIONS_QUERY_KEY, requestId]
+        : null,
+    ([, id]) =>
+      api.getCollectiveOfferRequest({
+        path: { request_id: Number(id) },
+      })
+  )
+
+  const initialStock: Partial<CollectiveStockResponseModel> =
+    offer.collectiveStock || {}
+
+  if (requestInformations) {
+    const { totalStudents, totalTeachers, requestedDate } = requestInformations
+    if (totalStudents || totalTeachers) {
+      initialStock.numberOfTickets = (totalStudents ?? 0) + (totalTeachers ?? 0)
+    }
+    if (requestedDate) {
+      initialStock.startDatetime = format(
+        new Date(requestedDate),
+        FORMAT_ISO_DATE_ONLY
+      )
+    }
+  }
+
+  const departementCode = offer.venue.departementCode ?? ''
+  const stepPaths = {
+    previous: `/offre/collectif/${offer.id}/creation`,
+    next: `/offre/${offer.id}/collectif/informations-pratiques`,
+  }
+  if (requestId) {
+    stepPaths.previous += `?requete=${requestId}`
+    stepPaths.next += `?requete=${requestId}`
+  }
+
+  const handleSubmitStock = async (
+    collectiveStock: Partial<CollectiveStockCreationBodyModel>
+  ): Promise<boolean> => {
+    try {
+      let response: CollectiveStockResponseModel | null = null
+      if (offer.collectiveStock) {
+        response = await api.editCollectiveStock({
+          path: { collective_stock_id: offer.collectiveStock.id },
+          body: collectiveStock,
+        })
+      } else if (isComplete(collectiveStock)) {
+        response = await api.createCollectiveStock({
+          body: {
+            ...getCreateStock(collectiveStock),
+            offerId: offer.id,
+          },
+        })
+      } else {
+        throw new Error('Missing required values')
+      }
+      await mutate<GetCollectiveOfferResponseModel>(
+        [GET_COLLECTIVE_OFFER_QUERY_KEY, Number(offer.id)],
+        {
+          ...offer,
+          collectiveStock: {
+            ...offer.collectiveStock,
+            ...response,
+          },
+        },
+        { revalidate: false }
+      )
+
+      return true
+    } catch (e) {
+      handleStockError(e, snackBar.error)
+
+      return false
+    }
+  }
+
+  return (
+    <CollectiveOfferLayout
+      subTitle={offer.name}
+      isTemplate={false}
+      isCreation={isCreation}
+      requestId={requestId}
+      offer={offer}
+    >
+      <CollectiveOfferStockForm
+        initialStock={initialStock}
+        departementCode={departementCode}
+        mode={Mode.CREATION}
+        allowedActions={offer.allowedActions}
+        onAfterSubmit={handleSubmitStock}
+        stepPaths={stepPaths}
+      />
+    </CollectiveOfferLayout>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = withOnlyCollectiveOfferFromParams(
+  CollectiveOfferStockCreation
+)

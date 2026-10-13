@@ -1,0 +1,62 @@
+import logging
+
+from flask import render_template
+
+from pcapi.core import mails
+from pcapi.core.bookings.models import Booking
+from pcapi.core.bookings.repository import find_ongoing_bookings_by_stock
+from pcapi.core.mails import models
+from pcapi.utils.date import get_date_formatted_for_email
+from pcapi.utils.date import get_time_formatted_for_email
+from pcapi.utils.mailing import get_event_datetime
+
+
+logger = logging.getLogger(__name__)
+
+
+def send_booking_cancellation_confirmation_by_pro_to_pro_email(booking: Booking) -> None:
+    offerer_booking_email = booking.stock.offer.bookingEmail
+    if not offerer_booking_email:
+        return
+    email = get_booking_cancellation_confirmation_by_pro_email_data(booking)
+    mails.send(recipients=[offerer_booking_email], data=email)
+
+
+def get_booking_cancellation_confirmation_by_pro_email_data(
+    booking: Booking,
+) -> models.TransactionalWithoutTemplateEmailData:
+    stock_name = booking.stock.offer.name
+    venue = booking.venue
+    user_name = booking.userName
+    user_email = booking.email
+    email_subject = f"Confirmation de votre annulation de réservation pour {stock_name}, proposé par {venue.name}"
+    ongoing_stock_bookings = find_ongoing_bookings_by_stock(booking.stock.id)
+    try:
+        # Booking is (being) cancelled, but the query here may still
+        # return it if changes have not been saved yet.
+        ongoing_stock_bookings.remove(booking)
+    except ValueError:
+        pass
+    stock_date_time = None
+    booking_is_on_event = booking.stock.beginningDatetime is not None
+    if booking_is_on_event:
+        stock_date_time = (
+            get_date_formatted_for_email(get_event_datetime(booking.stock))
+            + ", "
+            + get_time_formatted_for_email(get_event_datetime(booking.stock))
+        )
+    email_html = render_template(
+        "mails/offerer_recap_email_after_offerer_cancellation.html",
+        booking_is_on_event=booking_is_on_event,
+        user_name=user_name,
+        user_email=user_email,
+        stock_date_time=stock_date_time,
+        number_of_bookings=len(ongoing_stock_bookings),
+        stock_bookings=ongoing_stock_bookings,
+        stock_name=stock_name,
+        venue=venue,
+    )
+
+    return models.TransactionalWithoutTemplateEmailData(
+        subject=email_subject, html_content=email_html, sender=models.TransactionalSender.SUPPORT_PRO
+    )

@@ -1,0 +1,56 @@
+import { screen } from '@testing-library/react'
+import { Route, Routes } from 'react-router'
+import { axe } from 'vitest-axe'
+
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { OfferType } from './OfferType'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getOfferer: vi.fn(),
+  },
+}))
+
+const renderOfferTypes = (initialRoute = '/', allowedOnAdage = false) => {
+  return renderWithProviders(
+    <Routes>
+      <Route path="/" element={<OfferType />} />
+    </Routes>,
+    {
+      storeOverrides: {
+        user: {
+          currentUser: sharedCurrentUserFactory(),
+          selectedPartnerVenue: makeGetVenueResponseModel({
+            id: 2,
+            allowedOnAdage,
+          }),
+        },
+      },
+      user: sharedCurrentUserFactory(),
+      initialRouterEntries: [initialRoute],
+    }
+  )
+}
+
+describe('OfferType', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderOfferTypes()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display with the lateral bar', async () => {
+    renderOfferTypes()
+    expect(await screen.findByTestId('lateral-panel')).toBeInTheDocument()
+  })
+
+  it('should show a collective specific title if the url contains the collective type', async () => {
+    renderOfferTypes('/?type=collective')
+    expect(
+      await screen.findByRole('heading', { name: 'Créer une offre collective' })
+    ).toBeInTheDocument()
+  })
+})

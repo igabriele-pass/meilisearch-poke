@@ -1,0 +1,71 @@
+@use "styles/mixins/_a11y.scss" as a11y;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.bs-filter {
+  position: relative;
+  display: inline-block;
+
+  .bs-filter-legend {
+    @include fonts.body-accent-xs;
+
+    color: var(--color-text-subtle);
+    padding-bottom: var(--size-spacing-s);
+    white-space: nowrap;
+  }
+
+  .bs-filter-tooltip {
+    background-color: var(--color-background-default);
+    border-radius: var(--size-border-radius-s);
+    box-shadow: var(--shadow-overlay);
+    right: 0;
+    margin-top: var(--size-spacing-s);
+    padding: var(--size-spacing-l);
+    position: absolute;
+    z-index: 1;
+  }
+}
+
+.bs-filter-button {
+  background-color: transparent;
+  border: none;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.table-head-label {
+  @include fonts.body-accent-xs;
+
+  color: var(--color-text-default);
+  min-height: rem.torem(60px);
+  padding: rem.torem(14px);
+  vertical-align: middle;
+  text-align: left;
+
+  .status-filter {
+    padding-left: 0;
+  }
+}
+
+.status-container {
+  position: relative;
+}
+
+.status-icon {
+  width: rem.torem(16px);
+  vertical-align: middle;
+
+  &.active {
+    color: var(--color-icon-brand-primary);
+  }
+}
+
+.bs-filter-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-l);
+}
+
+.visually-hidden {
+  @include a11y.visually-hidden;
+}

@@ -1,0 +1,97 @@
+import { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import { isErrorAPIError } from '@/apiClient/helpers'
+import type { CollectiveStockEditionBodyModel } from '@/apiClient/v1'
+import { GET_COLLECTIVE_OFFER_QUERY_KEY } from '@/commons/config/swrQueryKeys'
+import { Mode } from '@/commons/core/OfferEducational/types'
+import { PATCH_SUCCESS_MESSAGE } from '@/commons/core/shared/constants'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { useSyncVenueCache } from '@/commons/hooks/useSyncVenueCache'
+import { isCollectiveStockEditable } from '@/commons/utils/isActionAllowedOnCollectiveOffer'
+import { BannerPublicApi } from '@/components/BannerPublicApi/BannerPublicApi'
+import { CollectiveStatusLabel } from '@/components/CollectiveStatusLabel/CollectiveStatusLabel'
+import { CollectiveOfferLayout } from '@/pages/CollectiveOffer/CollectiveOfferLayout/CollectiveOfferLayout'
+
+import {
+  type CollectiveOfferFromParamsProps,
+  withOnlyCollectiveOfferFromParams,
+} from '../../CollectiveOffer/components/OfferEducational/useCollectiveOfferFromParams'
+import { CollectiveOfferStockForm } from '../components/CollectiveOfferStockForm/CollectiveOfferStockForm'
+import styles from './CollectiveOfferStockEdition.module.scss'
+
+export const CollectiveOfferStockEdition = ({
+  offer,
+}: CollectiveOfferFromParamsProps): JSX.Element => {
+  const snackBar = useSnackBar()
+  const { mutate } = useSWRConfig()
+  const { syncVenue } = useSyncVenueCache()
+
+  const departementCode = offer.venue.departementCode ?? ''
+  const stepPaths = {
+    previous: '/offres/collectives',
+    next: `/offre/${offer.id}/collectif/recapitulatif`,
+  }
+
+  const handleSubmitStock = async (
+    newCollectiveStock: CollectiveStockEditionBodyModel
+  ): Promise<boolean> => {
+    if (!offer.collectiveStock) {
+      snackBar.error('Impossible de mettre à jour le stock.')
+
+      return false
+    }
+    try {
+      await api.editCollectiveStock({
+        path: { collective_stock_id: offer.collectiveStock.id },
+        body: newCollectiveStock,
+      })
+    } catch (error) {
+      if (isErrorAPIError(error) && error.status < 500) {
+        throw error
+      }
+      snackBar.error(
+        'Une erreur est survenue lors de la mise à jour de votre stock.'
+      )
+
+      return false
+    }
+
+    await mutate([GET_COLLECTIVE_OFFER_QUERY_KEY, offer.id])
+    await syncVenue(offer.venue.id)
+
+    snackBar.success(PATCH_SUCCESS_MESSAGE)
+
+    return true
+  }
+  const stockCanBeEdited = isCollectiveStockEditable(offer)
+
+  return (
+    <CollectiveOfferLayout
+      offer={offer}
+      subTitle={offer.name}
+      isTemplate={false}
+    >
+      <div className={styles['actions']}>
+        <CollectiveStatusLabel offerDisplayedStatus={offer.displayedStatus} />
+      </div>
+      {offer.isPublicApi && (
+        <BannerPublicApi className={styles['banner-space']} />
+      )}
+      <CollectiveOfferStockForm
+        initialStock={offer.collectiveStock ?? {}}
+        departementCode={departementCode}
+        allowedActions={offer.allowedActions}
+        mode={stockCanBeEdited ? Mode.EDITION : Mode.READ_ONLY}
+        onAfterSubmit={handleSubmitStock}
+        stepPaths={stepPaths}
+      />
+    </CollectiveOfferLayout>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = withOnlyCollectiveOfferFromParams(
+  CollectiveOfferStockEdition
+)

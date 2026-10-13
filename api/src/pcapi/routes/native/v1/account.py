@@ -1,0 +1,458 @@
+import logging
+import re
+
+import pydantic
+import pydantic.v1 as pydantic_v1
+import sqlalchemy.orm as sa_orm
+from flask_login import current_user
+
+import pcapi.core.bookings.exceptions as bookings_exceptions
+import pcapi.core.mails.transactional as transactional_mails
+import pcapi.core.users.models as users_models
+from pcapi.connectors import api_recaptcha
+from pcapi.core import token as token_utils
+from pcapi.core.mails.transactional.users.pre_anonymize_beneficiary import send_beneficiary_pre_anonymization_email
+from pcapi.core.subscription.dms import api as dms_subscription_api
+from pcapi.core.users import api
+from pcapi.core.users import constants
+from pcapi.core.users import email as email_api
+from pcapi.core.users import exceptions
+from pcapi.core.users import gdpr_api
+from pcapi.core.users import password_utils
+from pcapi.core.users import schemas as users_schemas
+from pcapi.core.users.repository import find_user_by_email
+from pcapi.core.users.sessions import create_user_jwt_tokens
+from pcapi.models import api_errors
+from pcapi.models import db
+from pcapi.models.feature import FeatureToggle
+from pcapi.models.utils import get_or_404
+from pcapi.routes.native.security import authenticated_and_active_user_required
+from pcapi.routes.native.security import authenticated_maybe_inactive_user_required
+from pcapi.serialization.decorator import spectree_serialize
+from pcapi.utils import phone_number as phone_number_utils
+from pcapi.utils import postal_code as postal_code_utils
+from pcapi.utils.transaction_manager import atomic
+
+from .. import blueprint
+from .serialization import account as serializers
+from .serialization import authentication as auth_serializers
+
+
+logger = logging.getLogger(__name__)
+
+
+@blueprint.native_route("/me", methods=["GET"])
+@spectree_serialize(
+    response_model=serializers.UserProfileResponse,
+    on_success_status=200,
+    api=blueprint.api,
+)
+@authenticated_and_active_user_required
+def get_user_profile() -> serializers.UserProfileResponse:
+    return serializers.UserProfileResponse.model_validate(current_user)
+
+
+@blueprint.native_route("/profile", methods=["POST", "PATCH"])
+@spectree_serialize(
+    response_model=serializers.UserProfileResponse,
+    on_success_status=200,
+    api=blueprint.api,
+)
+@authenticated_and_active_user_required
+@atomic()
+def patch_user_profile(body: serializers.UserProfilePatchRequest) -> serializers.UserProfileResponse:
+    profile_update_dict = body.dict(exclude_unset=True)
+
+    if "postal_code" in profile_update_dict:
+        postal_code = profile_update_dict["postal_code"]
+        if postal_code in postal_code_utils.INELIGIBLE_POSTAL_CODES:
+            error = {"code": "INELIGIBLE_POSTAL_CODE"}
+            logger.warning("Failed to update postal code", extra={"code postal": postal_code, "code": error["code"]})
+            raise api_errors.ApiErrors(error, status_code=400)
+        if not re.match(r"^\d{5}$", postal_code):
+            raise api_errors.ApiErrors({"code": "INVALID_POSTAL_CODE"})
+
+    if "subscriptions" in profile_update_dict:
+        api.update_notification_subscription(current_user, body.subscriptions, body.origin)
+        profile_update_dict.pop("subscriptions", None)
+        profile_update_dict.pop("origin", None)
+
+    if "activity_id" in profile_update_dict:
+        activity_id = profile_update_dict.pop("activity_id", None)
+        profile_update_dict["activity"] = users_models.ActivityEnum[activity_id.value] if activity_id else None
+
+    if "phone_number" in profile_update_dict:
+        phone_number = profile_update_dict["phone_number"]
+        if not phone_number:
+            phone_number = None
+        else:
+            try:
+                phone_data = phone_number_utils.ParsedPhoneNumber(phone_number)
+                phone_number_utils.check_phone_number_is_legit(phone_data.phone_number, phone_data.country_code)
+            except phone_number_utils.InvalidCountryCode:
+                error = {"code": "INVALID_COUNTRY_CODE", "message": "L'indicatif téléphonique n'est pas accepté"}
+                logger.warning("Failed to update phone number", extra={"number": phone_number, "code": error["code"]})
+                raise api_errors.ApiErrors(error, status_code=400)
+            except phone_number_utils.InvalidPhoneNumber:
+                error = {"code": "INVALID_PHONE_NUMBER", "message": "Le numéro de téléphone est invalide"}
+                logger.warning("Failed to update phone number", extra={"number": phone_number, "code": error["code"]})
+                raise api_errors.ApiErrors(error, status_code=400)
+
+            phone_number = phone_data.phone_number
+
+        if phone_number != current_user.phoneNumber:
+            profile_update_dict["phone_validation_status"] = None
+
+    api.update_user_info(current_user, author=current_user, **profile_update_dict)
+
+    return serializers.UserProfileResponse.model_validate(current_user)
+
+
+@blueprint.native_route("/reset_recredit_amount_to_show", methods=["POST"])
+@spectree_serialize(on_success_status=200, api=blueprint.api, response_model=serializers.UserProfileResponse)
+@authenticated_and_active_user_required
+def reset_recredit_amount_to_show() -> serializers.UserProfileResponse:
+    api.reset_recredit_amount_to_show(current_user)
+
+    return serializers.UserProfileResponse.model_validate(current_user)
+
+
+@blueprint.native_route("/profile/email_update/cancel", methods=["POST"])
+@spectree_serialize(on_success_status=204, api=blueprint.api)
+@atomic()
+def cancel_email_update(body: serializers.ChangeBeneficiaryEmailBody) -> None:
+    try:
+        email_api.update.cancel_email_update_request(body.token)
+    except exceptions.InvalidToken:
+        raise api_errors.ApiErrors(
+            {"code": "INVALID_TOKEN", "message": "aucune demande de changement d'email en cours"},
+            status_code=401,
+        )
+
+
+@blueprint.native_route("/profile/email_update/validate", methods=["PUT"])
+@spectree_serialize(response_model=serializers.ChangeBeneficiaryEmailResponse, on_success_status=200, api=blueprint.api)
+def validate_user_email(body: serializers.ChangeBeneficiaryEmailBody) -> serializers.ChangeBeneficiaryEmailResponse:
+    try:
+        token = token_utils.Token.load_and_check(
+            encoded_token=body.token,
+            type_=token_utils.TokenType.EMAIL_CHANGE_VALIDATION,
+        )
+    except exceptions.InvalidToken:
+        raise api_errors.ApiErrors(
+            {"code": "INVALID_TOKEN", "message": "Token invalide"},
+            status_code=400,
+        )
+    token.expire()
+    user = get_or_404(users_models.User, token.user_id)
+
+    try:
+        email_api.update.validate_email_update_request(user=user, author=user, new_email=token.data["new_email"])
+    except pydantic_v1.ValidationError:
+        raise api_errors.ApiErrors(
+            {"code": "INVALID_EMAIL", "message": "Adresse email invalide"},
+            status_code=400,
+        )
+    except exceptions.EmailExistsError:
+        # Returning an error message might help the end client find
+        # existing email addresses through user enumeration attacks.
+        pass
+
+    if user.is_eligible and not user.is_beneficiary:
+        try:
+            dms_subscription_api.try_dms_orphan_adoption(user)
+        except Exception:
+            logger.exception(
+                "An unexpected error occurred while trying to link dms orphan to user", extra={"user_id": user.id}
+            )
+
+    tokens = create_user_jwt_tokens(
+        user=user,
+        device_info=body.device_info,
+    )
+    return serializers.ChangeBeneficiaryEmailResponse(
+        access_token=tokens.access,
+        refresh_token=tokens.refresh,
+    )
+
+
+@blueprint.native_route("/profile/token_expiration", methods=["GET"])
+@spectree_serialize(on_success_status=200, api=blueprint.api, response_model=serializers.UpdateEmailTokenExpiration)
+@authenticated_and_active_user_required
+def get_email_update_token_expiration_date() -> serializers.UpdateEmailTokenExpiration:
+    return serializers.UpdateEmailTokenExpiration(expiration=email_api.get_active_token_expiration(current_user))
+
+
+@blueprint.native_route("/account", methods=["POST"])
+@spectree_serialize(on_success_status=204, api=blueprint.api, on_error_statuses=[400])
+@atomic()
+def create_account(body: serializers.AccountRequest) -> None:
+    if FeatureToggle.ENABLE_NATIVE_APP_RECAPTCHA.is_active():
+        try:
+            api_recaptcha.check_native_app_recaptcha_token(body.token)
+        except api_recaptcha.ReCaptchaException:
+            raise api_errors.ApiErrors({"token": "The given token is not valid"})
+
+    password_utils.check_password_strength("password", body.password)
+
+    try:
+        created_user = api.create_account(
+            email=body.email,
+            password=body.password,
+            birthdate=body.birthdate,
+            marketing_email_subscription=bool(body.marketing_email_subscription),
+            is_email_validated=False,
+            firebase_pseudo_id=body.firebase_pseudo_id,
+        )
+
+        if body.trusted_device is not None:
+            api.save_trusted_device(device_info=body.trusted_device, user=created_user)
+
+    except exceptions.UserAlreadyExistsException:
+        user = find_user_by_email(body.email)
+        assert user is not None
+        api.handle_create_account_with_existing_email(user)
+
+    except exceptions.UnderAgeUserException:
+        raise api_errors.ApiErrors({"dateOfBirth": "The birthdate is invalid"})
+
+
+@blueprint.native_route("/oauth/<string:sso_provider>/account", methods=["POST"])
+@spectree_serialize(response_model=auth_serializers.SigninResponse, api=blueprint.api, on_error_statuses=[400])
+@atomic()
+def create_account_with_sso(sso_provider: str, body: serializers.SSOAccountRequest) -> auth_serializers.SigninResponse:
+    if sso_provider not in auth_serializers.SSOProvider:
+        raise api_errors.ApiErrors({"code": "SSO_PROVIDER_INVALID", "general": "Le fournisseur SSO est invalide"})
+
+    if FeatureToggle.ENABLE_NATIVE_APP_RECAPTCHA.is_active():
+        try:
+            api_recaptcha.check_native_app_recaptcha_token(body.token)
+        except api_recaptcha.ReCaptchaException as e:
+            raise api_errors.ApiErrors({"token": "The given token is not valid"}) from e
+
+    try:
+        account_creation_token = token_utils.UUIDToken.load_and_check(
+            body.account_creation_token, token_utils.TokenType.ACCOUNT_CREATION
+        )
+    except exceptions.ExpiredToken as e:
+        raise api_errors.ApiErrors(
+            {
+                "code": "SSO_ACCOUNT_CREATION_TIMEOUT",
+                "general": ["La demande de création de compte a mis trop de temps."],
+            }
+        ) from e
+    except exceptions.InvalidToken as e:
+        raise api_errors.ApiErrors(
+            {
+                "code": "SSO_INVALID_ACCOUNT_CREATION",
+                "general": ["La demande de création de compte est invalide."],
+            }
+        ) from e
+
+    try:
+        sso_user = users_schemas.SSOUser.model_validate(account_creation_token.data)
+    except pydantic.ValidationError as e:
+        logger.error("Error loading account creation token data", extra={"error": str(e)})
+        raise api_errors.ApiErrors({"error": "Internal error"})
+
+    account_creation_token.expire()
+
+    if not sso_user.email_verified:
+        raise api_errors.ApiErrors({"code": "EMAIL_NOT_VALIDATED", "general": ["L'email n'a pas été validé."]})
+
+    if not sso_user.email:
+        raise api_errors.ApiErrors(
+            {"code": "EMAIL_MISSING", "general": ["L'email n'a pas pu être récupéré auprès du fournisseur SSO."]}
+        )
+
+    try:
+        created_user = api.create_account(
+            email=sso_user.email,
+            password=None,
+            sso_provider=sso_provider,
+            sso_user_id=sso_user.sub,
+            sso_extra_data=sso_user.extra_data,
+            birthdate=body.birthdate,
+            marketing_email_subscription=bool(body.marketing_email_subscription),
+            is_email_validated=True,
+            firebase_pseudo_id=body.firebase_pseudo_id,
+        )
+
+        if body.trusted_device is not None:
+            api.save_trusted_device(device_info=body.trusted_device, user=created_user)
+
+    except exceptions.UserAlreadyExistsException:
+        raise api_errors.ApiErrors({"email": [f"Un compte existe déjà pour l'adresse mail {sso_user.email}"]})
+
+    except exceptions.UnderAgeUserException:
+        raise api_errors.ApiErrors({"dateOfBirth": "The birthdate is invalid"})
+
+    try:
+        dms_subscription_api.try_dms_orphan_adoption(created_user)
+    except Exception:
+        logger.exception(
+            "An unexpected error occurred while trying to link dms orphan to user", extra={"user_id": created_user.id}
+        )
+
+    tokens = create_user_jwt_tokens(
+        user=created_user,
+        device_info=body.trusted_device,
+    )
+    return auth_serializers.SigninResponse(
+        access_token=tokens.access,
+        refresh_token=tokens.refresh,
+        account_state=created_user.account_state,
+    )
+
+
+@blueprint.native_route("/resend_email_validation", methods=["POST"])
+@spectree_serialize(on_success_status=204, api=blueprint.api, on_error_statuses=[400, 429])
+def resend_email_validation(body: serializers.ResendEmailValidationRequest) -> None:
+    try:
+        api.check_email_validation_resends_count(body.email)
+        api.increment_email_resends_count(body.email)
+    except exceptions.EmailValidationLimitReached:
+        raise api_errors.ApiErrors(
+            {"message": "Le nombre de tentatives maximal est dépassé.", "code": "TOO_MANY_EMAIL_VALIDATION_RESENDS"},
+            status_code=429,
+        )
+
+    user = find_user_by_email(body.email)
+    if not user or not user.isActive:
+        return
+
+    if user.isEmailValidated:
+        api.request_password_reset(user)
+    else:
+        api.request_email_confirmation(user)
+
+
+# TODO(dnguyen): remove route when the native app stops calling it
+@blueprint.native_route("/email_validation_remaining_resends", methods=["GET"])
+@spectree_serialize(api=blueprint.api, response_model=serializers.EmailValidationRemainingResendsResponse)
+def empty_email_validation_remaining_resends() -> serializers.EmailValidationRemainingResendsResponse | None:
+    logger.warning("GET /email_validation_remaining_resends called without an email")
+
+    email = ""
+    remaining_resends = api.get_remaining_email_resends(email)
+    expiration_time = api.get_email_validation_resends_limitation_expiration_time(email)
+
+    return serializers.EmailValidationRemainingResendsResponse(
+        remainingResends=remaining_resends, counterResetDatetime=expiration_time
+    )
+
+
+@blueprint.native_route("/email_validation_remaining_resends/<email>", methods=["GET"])
+@spectree_serialize(api=blueprint.api, response_model=serializers.EmailValidationRemainingResendsResponse)
+def email_validation_remaining_resends(email: str) -> serializers.EmailValidationRemainingResendsResponse | None:
+    remaining_resends = api.get_remaining_email_resends(email)
+    expiration_time = api.get_email_validation_resends_limitation_expiration_time(email)
+
+    return serializers.EmailValidationRemainingResendsResponse(
+        remainingResends=remaining_resends, counterResetDatetime=expiration_time
+    )
+
+
+@blueprint.native_route("/account/suspend", methods=["POST"])
+@spectree_serialize(api=blueprint.api, on_success_status=204)
+@authenticated_and_active_user_required
+@atomic()
+def suspend_account() -> None:
+    try:
+        api.suspend_account(current_user, reason=constants.SuspensionReason.UPON_USER_REQUEST, actor=current_user)
+    except bookings_exceptions.BookingIsAlreadyCancelled:
+        raise api_errors.ResourceGoneError()
+    except bookings_exceptions.BookingIsAlreadyRefunded:
+        raise api_errors.ForbiddenError()
+    transactional_mails.send_user_request_to_delete_account_reception_email(current_user)
+
+
+@blueprint.native_route("/account/suspend_for_hack_suspicion", methods=["POST"])
+@spectree_serialize(api=blueprint.api, on_success_status=204)
+@authenticated_and_active_user_required
+def suspend_account_for_hack_suspicion() -> None:
+    api.suspend_account(
+        current_user, reason=constants.SuspensionReason.SUSPICIOUS_LOGIN_REPORTED_BY_USER, actor=current_user
+    )
+
+
+@blueprint.native_route("/account/suspend_for_suspicious_login", methods=["POST"])
+@spectree_serialize(api=blueprint.api, on_success_status=204, on_error_statuses=[400, 401, 404])
+def suspend_account_for_suspicious_login(body: serializers.SuspendAccountForSuspiciousLoginRequest) -> None:
+    try:
+        token = token_utils.Token.load_and_check(body.token, token_utils.TokenType.SUSPENSION_SUSPICIOUS_LOGIN)
+        user = db.session.query(users_models.User).filter_by(id=token.user_id).one()
+    except sa_orm.exc.NoResultFound:
+        raise api_errors.ResourceNotFoundError()
+    except exceptions.ExpiredToken:
+        raise api_errors.ApiErrors({"reason": "Le token a expiré."}, status_code=401)
+    except exceptions.InvalidToken:
+        raise api_errors.ApiErrors({"reason": "Le token est invalide."})
+    api.suspend_account(user, reason=constants.SuspensionReason.SUSPICIOUS_LOGIN_REPORTED_BY_USER, actor=user)
+
+
+@blueprint.native_route("/account/suspend/token_validation/<token>", methods=["GET"])
+@spectree_serialize(on_success_status=204, api=blueprint.api, on_error_statuses=[400, 401])
+def account_suspension_token_validation(token: str) -> None:
+    try:
+        token_utils.Token.load_and_check(token, token_utils.TokenType.SUSPENSION_SUSPICIOUS_LOGIN)
+    except exceptions.InvalidToken:
+        raise api_errors.ApiErrors({"reason": "Le token est invalide."})
+
+
+@blueprint.native_route("/account/anonymize", methods=["POST"])
+@spectree_serialize(on_success_status=204, api=blueprint.api, on_error_statuses=[400])
+@authenticated_and_active_user_required
+@atomic()
+def anonymize_account() -> None:
+    if gdpr_api.has_unprocessed_extract(current_user):
+        raise api_errors.ApiErrors({"code": "EXISTING_UNPROCESSED_GDPR_EXTRACT"})
+
+    if not gdpr_api.is_beneficiary_anonymizable(current_user):
+        raise api_errors.ApiErrors({"code": "NOT_ANONYMIZABLE_BENEFICIARY"})
+
+    try:
+        gdpr_api.pre_anonymize_user(current_user, author=current_user)
+    except exceptions.UserAlreadyHasPendingAnonymization:
+        raise api_errors.ApiErrors({"code": "ALREADY_HAS_PENDING_ANONYMIZATION"})
+
+    send_beneficiary_pre_anonymization_email(current_user)
+
+
+@blueprint.native_route("/account/suspension_date", methods=["GET"])
+@spectree_serialize(response_model=serializers.UserSuspensionDateResponse, api=blueprint.api, on_success_status=200)
+@authenticated_maybe_inactive_user_required
+def get_account_suspension_date() -> serializers.UserSuspensionDateResponse:
+    reason = current_user.suspension_reason
+    if reason != constants.SuspensionReason.UPON_USER_REQUEST:
+        # If the account has not been suspended upon user request, it
+        # has no reason to ask for its suspension date.
+        raise api_errors.ForbiddenError()
+
+    return serializers.UserSuspensionDateResponse(date=current_user.suspension_date)
+
+
+@blueprint.native_route("/account/suspension_status", methods=["GET"])
+@spectree_serialize(response_model=serializers.UserSuspensionStatusResponse, api=blueprint.api, on_success_status=200)
+@authenticated_maybe_inactive_user_required
+def get_account_suspension_status() -> serializers.UserSuspensionStatusResponse:
+    return serializers.UserSuspensionStatusResponse(status=current_user.account_state)
+
+
+@blueprint.native_route("/account/unsuspend", methods=["POST"])
+@spectree_serialize(api=blueprint.api, on_success_status=204)
+@authenticated_maybe_inactive_user_required
+def unsuspend_account() -> None:
+    if not FeatureToggle.ENABLE_UNSUSPEND_ACCOUNT.is_active():
+        raise api_errors.ForbiddenError({"code": "UNSUSPENSION_NOT_ALLOWED"})
+
+    try:
+        api.check_can_unsuspend(current_user)
+    except exceptions.NotSuspended:
+        raise api_errors.ForbiddenError({"code": "ALREADY_UNSUSPENDED"})
+    except exceptions.CantAskForUnsuspension:
+        raise api_errors.ForbiddenError({"code": "UNSUSPENSION_NOT_ALLOWED"})
+    except exceptions.UnsuspensionTimeLimitExceeded:
+        raise api_errors.ForbiddenError({"code": "UNSUSPENSION_LIMIT_REACHED"})
+
+    api.unsuspend_account(current_user, actor=current_user, send_email=True)

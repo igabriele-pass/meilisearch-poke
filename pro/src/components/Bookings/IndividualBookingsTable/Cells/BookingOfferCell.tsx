@@ -1,0 +1,88 @@
+import { format } from 'date-fns-tz'
+
+import type { BookingRecapResponseModel } from '@/apiClient/v1'
+import {
+  INDIVIDUAL_OFFER_WIZARD_STEP_IDS,
+  OFFER_WIZARD_MODE,
+} from '@/commons/core/Offers/constants'
+import { getIndividualOfferUrl } from '@/commons/core/Offers/utils/getIndividualOfferUrl'
+import {
+  convertEuroToPacificFranc,
+  formatPacificFranc,
+} from '@/commons/utils/convertEuroToPacificFranc'
+import { FORMAT_DD_MM_YYYY_HH_mm } from '@/commons/utils/date'
+import { formatPrice } from '@/commons/utils/formatPrice'
+import strokeDuoIcon from '@/icons/stroke-duo.svg'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import styles from './BookingOfferCell.module.scss'
+
+export interface BookingOfferCellProps {
+  booking: BookingRecapResponseModel
+  isCaledonian?: boolean
+}
+
+export const BookingOfferCell = ({
+  booking,
+  isCaledonian = false,
+}: BookingOfferCellProps) => {
+  const offerUrl = booking.stock.offerIsEducational
+    ? `/offre/${booking.stock.offerId}/collectif/recapitulatif`
+    : getIndividualOfferUrl({
+        offerId: booking.stock.offerId,
+        mode: OFFER_WIZARD_MODE.EDITION,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.EXPOSURE,
+      })
+
+  const eventBeginningDatetime = booking.stock.eventBeginningDatetime
+
+  const eventDatetimeFormatted = eventBeginningDatetime
+    ? format(eventBeginningDatetime, FORMAT_DD_MM_YYYY_HH_mm)
+    : null
+
+  const formattedPacificFrancPrice = formatPacificFranc(
+    convertEuroToPacificFranc(booking.bookingAmount)
+  )
+
+  const formattedPrice = isCaledonian
+    ? formattedPacificFrancPrice
+    : formatPrice(booking.bookingAmount)
+
+  const formattedPriceWithoutCategoryLabel = isCaledonian
+    ? formattedPacificFrancPrice
+    : formatPrice(booking.bookingAmount, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+        trailingZeroDisplay: 'stripIfInteger',
+      })
+
+  return (
+    <div className={styles['offer-details-wrapper']}>
+      <div>
+        <p>
+          <a href={offerUrl} className={styles['booking-offer-name']}>
+            {booking.stock.offerName}
+          </a>
+        </p>
+        {booking.stock.offerEan ||
+          (eventBeginningDatetime && (
+            <p className={styles['booking-offer-additional-info']}>
+              {eventDatetimeFormatted || booking.stock.offerEan}
+            </p>
+          ))}
+        <p className={styles['tarif']}>
+          {booking.bookingPriceCategoryLabel
+            ? `${booking.bookingPriceCategoryLabel} - ${formattedPrice}`
+            : formattedPriceWithoutCategoryLabel}
+        </p>
+      </div>
+      {booking.bookingIsDuo && (
+        <SvgIcon
+          src={strokeDuoIcon}
+          alt="Réservation DUO"
+          className={styles['bookings-duo-icon']}
+        />
+      )}
+    </div>
+  )
+}

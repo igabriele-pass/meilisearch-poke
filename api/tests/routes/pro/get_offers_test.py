@@ -1,0 +1,724 @@
+import datetime
+from unittest.mock import patch
+
+import pytest
+
+import pcapi.core.offerers.factories as offerers_factories
+import pcapi.core.offers.factories as offers_factories
+import pcapi.core.offers.models as offers_models
+import pcapi.core.offers.repository as offers_repository
+import pcapi.core.users.factories as users_factories
+from pcapi.core import testing
+from pcapi.core.categories import subcategories
+from pcapi.core.highlights import factories as highlights_factories
+from pcapi.models import db
+from pcapi.models.offer_mixin import OfferStatus
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+class Returns200Test:
+    number_of_queries = testing.AUTHENTICATION_QUERIES
+    number_of_queries += 1  # search offers
+    number_of_queries += 1  # search highlight
+
+    def should_filter_by_venue_when_user_is_not_admin_and_request_specific_venue_with_rights_on_it(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        requested_venue = offerers_factories.VenueFactory(managingOfferer=offerer, siret="12345678912345")
+        other_venue = offerers_factories.VenueFactory(managingOfferer=offerer, siret="54321987654321")
+        offers_factories.ThingOfferFactory(venue=requested_venue)
+        offers_factories.ThingOfferFactory(venue=other_venue)
+
+        requested_venue_id = requested_venue.id
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get(f"/offers?venueId={requested_venue_id}")
+            assert response.status_code == 200
+
+        offers = response.json
+        assert len(offers) == 1
+
+    @patch("pcapi.routes.pro.offers.offers_repository.get_capped_offers_for_filters")
+    def should_filter_offers_by_given_venue_id(self, mocked_get_capped_offers, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        venue_id = venue.id
+        authenticated_client = client.with_session_auth(email=pro.email)
+        # -2 due to mocking
+        with testing.assert_num_queries(self.number_of_queries - 2):
+            response = authenticated_client.get(f"/offers?venueId={venue_id}")
+            assert response.status_code == 200
+        mocked_get_capped_offers.assert_called_once_with(
+            user_id=pro.id,
+            offers_limit=101,
+            venue_id=venue.id,
+            category_id=None,
+            name_keywords_or_ean=None,
+            period_beginning_date=None,
+            period_ending_date=None,
+            status=None,
+            creation_mode=None,
+            offerer_address_id=None,
+        )
+
+    @patch("pcapi.routes.pro.offers.offers_repository.get_capped_offers_for_filters")
+    def should_filter_offers_by_given_status(self, mocked_get_capped_offers, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        authenticated_client = client.with_session_auth(email=pro.email)
+        # -2 due to mocking
+        with testing.assert_num_queries(self.number_of_queries - 2):
+            response = authenticated_client.get("/offers?status=ACTIVE")
+            assert response.status_code == 200
+
+        mocked_get_capped_offers.assert_called_once_with(
+            user_id=pro.id,
+            offers_limit=101,
+            venue_id=None,
+            category_id=None,
+            name_keywords_or_ean=None,
+            period_beginning_date=None,
+            period_ending_date=None,
+            status=OfferStatus.ACTIVE,
+            creation_mode=None,
+            offerer_address_id=None,
+        )
+
+    @patch("pcapi.routes.pro.offers.offers_repository.get_capped_offers_for_filters")
+    def should_filter_offers_by_given_creation_mode(self, mocked_get_capped_offers, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        authenticated_client = client.with_session_auth(email=pro.email)
+        # -2 due to mocking
+        with testing.assert_num_queries(self.number_of_queries - 2):
+            response = authenticated_client.get("/offers?creationMode=imported")
+            assert response.status_code == 200
+
+        mocked_get_capped_offers.assert_called_once_with(
+            user_id=pro.id,
+            offers_limit=101,
+            venue_id=None,
+            category_id=None,
+            name_keywords_or_ean=None,
+            period_beginning_date=None,
+            period_ending_date=None,
+            status=None,
+            creation_mode="imported",
+            offerer_address_id=None,
+        )
+
+    @patch("pcapi.routes.pro.offers.offers_repository.get_capped_offers_for_filters")
+    def test_results_are_filtered_by_given_period_beginning_date(self, mocked_get_capped_offers, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        authenticated_client = client.with_session_auth(email=pro.email)
+        # -2 due to mocking
+        with testing.assert_num_queries(self.number_of_queries - 2):
+            response = authenticated_client.get("/offers?periodBeginningDate=2020-10-11")
+            assert response.status_code == 200
+
+        mocked_get_capped_offers.assert_called_once_with(
+            user_id=pro.id,
+            offers_limit=101,
+            venue_id=None,
+            category_id=None,
+            name_keywords_or_ean=None,
+            period_beginning_date=datetime.date(2020, 10, 11),
+            period_ending_date=None,
+            status=None,
+            creation_mode=None,
+            offerer_address_id=None,
+        )
+
+    @pytest.mark.parametrize("dp", ["974", "971"])
+    def should_consider_the_offer_oa_timezone_for_begining_period(self, dp, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer, offererAddress__address__departmentCode="75")
+        oa = offerers_factories.OfferLocationFactory(offerer=offerer, venue=venue, address__departmentCode=dp)
+
+        offer = offers_factories.ThingOfferFactory(
+            subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id, venue=venue, offererAddress=oa
+        )
+
+        offers_factories.EventStockFactory(offer=offer, beginningDatetime=datetime.datetime(2024, 10, 10, 00, 00))
+        authenticated_client = client.with_session_auth(email=pro.email)
+
+        response = authenticated_client.get(f"/offers?venueId={venue.id}&periodBeginningDate=2024-10-10")
+
+        if dp == "974":
+            assert response.json[0]["stocks"][0]["beginningDatetime"] == "2024-10-10T00:00:00Z"
+        else:
+            assert response.json == []
+
+    @pytest.mark.parametrize("dp", ["974", "971"])
+    def should_consider_the_offer_oa_timezone_for_ending_period(self, dp, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer, offererAddress__address__departmentCode="75")
+        oa = offerers_factories.OfferLocationFactory(offerer=offerer, venue=venue, address__departmentCode=dp)
+
+        offer = offers_factories.ThingOfferFactory(
+            subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id, venue=venue, offererAddress=oa
+        )
+
+        offers_factories.EventStockFactory(offer=offer, beginningDatetime=datetime.datetime(2024, 10, 10, 00, 00))
+        authenticated_client = client.with_session_auth(email=pro.email)
+
+        response = authenticated_client.get(f"/offers?venueId={venue.id}&periodEndingDate=2024-10-9")
+
+        if dp == "971":
+            assert response.json[0]["stocks"][0]["beginningDatetime"] == "2024-10-10T00:00:00Z"
+        else:
+            assert response.json == []
+
+    @patch("pcapi.routes.pro.offers.offers_repository.get_capped_offers_for_filters")
+    def test_results_are_filtered_by_given_period_ending_date(self, mocked_get_capped_offers, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        authenticated_client = client.with_session_auth(email=pro.email)
+        # -2 due to mocking
+        with testing.assert_num_queries(self.number_of_queries - 2):
+            response = authenticated_client.get("/offers?periodEndingDate=2020-10-11")
+            assert response.status_code == 200
+
+        mocked_get_capped_offers.assert_called_once_with(
+            user_id=pro.id,
+            offers_limit=101,
+            venue_id=None,
+            category_id=None,
+            name_keywords_or_ean=None,
+            period_beginning_date=None,
+            period_ending_date=datetime.date(2020, 10, 11),
+            status=None,
+            creation_mode=None,
+            offerer_address_id=None,
+        )
+
+    @patch("pcapi.routes.pro.offers.offers_repository.get_capped_offers_for_filters")
+    def should_filter_offers_by_given_category_id(self, mocked_get_capped_offers, client, db_session):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        authenticated_client = client.with_session_auth(email=pro.email)
+        # -2 due to mocking
+        with testing.assert_num_queries(self.number_of_queries - 2):
+            response = authenticated_client.get("/offers?categoryId=LIVRE")
+            assert response.status_code == 200
+
+        mocked_get_capped_offers.assert_called_once_with(
+            user_id=pro.id,
+            offers_limit=101,
+            venue_id=None,
+            category_id="LIVRE",
+            name_keywords_or_ean=None,
+            period_beginning_date=None,
+            period_ending_date=None,
+            status=None,
+            creation_mode=None,
+            offerer_address_id=None,
+        )
+
+    def should_return_event_correctly_serialized(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offerer_address1 = offerers_factories.OfferLocationFactory(
+            label="Accor Arena",
+            offerer=offerer,
+            venue=venue,
+            address__street="8 Boulevard de Bercy",
+            address__banId="75112_0877_00008",
+        )
+        product = offers_factories.EventProductFactory()
+        event_offer = offers_factories.EventOfferFactory(
+            venue=venue,
+            offererAddress=offerer_address1,
+            publicationDatetime=datetime.datetime(2022, 10, 21, 13, 19),
+            bookingAllowedDatetime=datetime.datetime(2022, 11, 21, 13, 19),
+            product=product,
+        )
+        event_stock = offers_factories.EventStockFactory(
+            offer=event_offer,
+            beginningDatetime=datetime.datetime(2022, 9, 21, 13, 19),
+            dnBookedQuantity=50,
+        )
+        highlight = highlights_factories.HighlightFactory()
+        highlight_name = highlight.name
+        highlight_id = highlight.id
+        highlights_factories.HighlightRequestFactory(offer=event_offer, highlight=highlight)
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get("/offers")
+            assert response.status_code == 200
+
+        assert response.json == [
+            {
+                "id": event_offer.id,
+                "isEvent": True,
+                "name": event_offer.name,
+                "stocks": [
+                    {
+                        "id": event_stock.id,
+                        "remainingQuantity": 950,
+                        "beginningDatetime": "2022-09-21T13:19:00Z",
+                    }
+                ],
+                "thumbUrl": None,
+                "productIsbn": None,
+                "subcategoryId": "SEANCE_CINE",
+                "status": "EXPIRED",
+                "location": {
+                    "banId": offerer_address1.address.banId,
+                    "city": offerer_address1.address.city,
+                    "departmentCode": offerer_address1.address.departmentCode,
+                    "id": offerer_address1.address.id,
+                    "inseeCode": offerer_address1.address.inseeCode,
+                    "isVenueLocation": False,
+                    "isManualEdition": offerer_address1.address.isManualEdition,
+                    "label": offerer_address1.label,
+                    "latitude": float(offerer_address1.address.latitude),
+                    "longitude": float(offerer_address1.address.longitude),
+                    "postalCode": offerer_address1.address.postalCode,
+                    "street": offerer_address1.address.street,
+                },
+                "publicationDatetime": "2022-10-21T13:19:00Z",
+                "bookingAllowedDatetime": "2022-11-21T13:19:00Z",
+                "bookingsCount": 50,
+                "hasProAdvice": False,
+                "productId": product.id,
+                "highlightRequests": [{"id": highlight_id, "name": highlight_name}],
+            }
+        ]
+
+    def test_list_draft_offers_should_not_blindly_return_venue_offerer_address(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(
+            managingOfferer=offerer,
+            offererAddress__label="Accor Arena",
+            offererAddress__offerer=offerer,
+            offererAddress__address__street="8 Boulevard de Bercy",
+            offererAddress__address__banId="75112_0877_00008",
+        )
+        event_offer = offers_factories.EventOfferFactory(
+            venue=venue, offererAddress=None, validation=offers_models.OfferValidationStatus.DRAFT
+        )
+        event_stock = offers_factories.EventStockFactory(
+            offer=event_offer, beginningDatetime=datetime.datetime(2022, 9, 21, 13, 19)
+        )
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get("/offers")
+            assert response.status_code == 200
+
+        assert response.json == [
+            {
+                "id": event_offer.id,
+                "isEvent": True,
+                "name": event_offer.name,
+                "stocks": [
+                    {
+                        "id": event_stock.id,
+                        "remainingQuantity": 1000,
+                        "beginningDatetime": "2022-09-21T13:19:00Z",
+                    }
+                ],
+                "thumbUrl": None,
+                "productIsbn": None,
+                "subcategoryId": "SEANCE_CINE",
+                "status": "DRAFT",
+                "location": None,
+                "publicationDatetime": None,
+                "bookingAllowedDatetime": None,
+                "bookingsCount": 0,
+                "hasProAdvice": False,
+                "productId": None,
+                "highlightRequests": [],
+            }
+        ]
+
+    def should_not_return_soft_deleted_stocks(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        event_offer = offers_factories.EventOfferFactory(
+            venue=venue,
+            publicationDatetime=datetime.datetime(2022, 10, 21, 13, 19),
+        )
+
+        offers_factories.EventStockFactory(
+            offer=event_offer, beginningDatetime=datetime.datetime(2022, 9, 21, 13, 19), isSoftDeleted=True
+        )
+        offers_factories.EventStockFactory(
+            offer=event_offer, beginningDatetime=datetime.datetime(2022, 9, 22, 13, 19), isSoftDeleted=True
+        )
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get("/offers")
+            assert response.status_code == 200
+
+        assert response.json == [
+            {
+                "id": event_offer.id,
+                "isEvent": True,
+                "name": event_offer.name,
+                "stocks": [],
+                "thumbUrl": None,
+                "productIsbn": None,
+                "subcategoryId": "SEANCE_CINE",
+                "status": "SOLD_OUT",
+                "location": {
+                    "banId": venue.offererAddress.address.banId,
+                    "city": venue.offererAddress.address.city,
+                    "departmentCode": venue.offererAddress.address.departmentCode,
+                    "id": venue.offererAddress.address.id,
+                    "inseeCode": venue.offererAddress.address.inseeCode,
+                    "isVenueLocation": True,
+                    "isManualEdition": venue.offererAddress.address.isManualEdition,
+                    "label": None,
+                    "latitude": float(venue.offererAddress.address.latitude),
+                    "longitude": float(venue.offererAddress.address.longitude),
+                    "postalCode": venue.offererAddress.address.postalCode,
+                    "street": venue.offererAddress.address.street,
+                },
+                "publicationDatetime": "2022-10-21T13:19:00Z",
+                "bookingAllowedDatetime": None,
+                "bookingsCount": 0,
+                "hasProAdvice": False,
+                "productId": None,
+                "highlightRequests": [],
+            }
+        ]
+
+    def should_have_one_query_for_active_mediations(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        requested_venue = offerers_factories.VenueFactory(managingOfferer=offerer, siret="12345678912345")
+        offers_factories.MediationFactory.create_batch(10, offer__venue=requested_venue)
+
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get("/offers")
+            assert response.status_code == 200
+
+    def should_not_list_offers_from_soft_deleted_venues(self):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        soft_deleted_venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offers_factories.EventOfferFactory(venue=venue)
+        offers_factories.EventOfferFactory(venue=soft_deleted_venue)
+
+        soft_deleted_venue.isSoftDeleted = True
+        db.session.add(soft_deleted_venue)
+        db.session.flush()
+
+        offers = offers_repository.get_offers_by_filters(user_id=pro.id).all()
+        assert len(offers) == 1
+
+    def should_return_offers_filtered_by_offerer_address(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offerer_address1 = offerers_factories.OfferLocationFactory(
+            label="Accor Arena",
+            offerer=offerer,
+            venue=venue,
+            address__street="8 Boulevard de Bercy",
+            address__banId="75112_0877_00008",
+        )
+
+        event_offer1 = offers_factories.EventOfferFactory(
+            name="The Weeknd",
+            subcategoryId=subcategories.CONCERT.id,
+            venue=venue,
+            offererAddress=offerer_address1,
+            publicationDatetime=datetime.datetime(2022, 10, 21, 13, 19),
+        )
+        event_offer2 = offers_factories.EventOfferFactory(
+            name="Taylor Swift",
+            subcategoryId=subcategories.CONCERT.id,
+            venue=venue,
+            offererAddress=offerer_address1,
+            publicationDatetime=datetime.datetime(2022, 11, 21, 13, 19),
+        )
+
+        offerer_address2 = offerers_factories.OfferLocationFactory(
+            label="La Cigale",
+            offerer=offerer,
+            venue=venue,
+            address__street="120 Boulevard Marguerite de Rochechouart",
+            address__banId="75118_8288_00120",
+        )
+
+        event_offer3 = offers_factories.EventOfferFactory(
+            name="Philippine Lavrey",
+            subcategoryId=subcategories.CONCERT.id,
+            venue=venue,
+            offererAddress=offerer_address2,
+        )
+        offers_factories.EventStockFactory(offer=event_offer3)
+        offerer_address1_id = offerer_address1.id
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get(f"/offers?offererAddressId={offerer_address1_id}")
+            assert response.status_code == 200
+
+        assert len(response.json) == 2
+        assert response.json == [
+            {
+                "id": event_offer2.id,
+                "isEvent": True,
+                "name": event_offer2.name,
+                "productIsbn": None,
+                "status": "SOLD_OUT",
+                "stocks": [],
+                "subcategoryId": "CONCERT",
+                "thumbUrl": None,
+                "location": {
+                    "id": offerer_address1.address.id,
+                    "banId": offerer_address1.address.banId,
+                    "inseeCode": offerer_address1.address.inseeCode,
+                    "label": "Accor Arena",
+                    "street": offerer_address1.address.street,
+                    "postalCode": offerer_address1.address.postalCode,
+                    "city": offerer_address1.address.city,
+                    "departmentCode": offerer_address1.address.departmentCode,
+                    "isVenueLocation": False,
+                    "isManualEdition": offerer_address1.address.isManualEdition,
+                    "latitude": float(offerer_address1.address.latitude),
+                    "longitude": float(offerer_address1.address.longitude),
+                },
+                "publicationDatetime": "2022-11-21T13:19:00Z",
+                "bookingAllowedDatetime": None,
+                "bookingsCount": 0,
+                "hasProAdvice": False,
+                "productId": None,
+                "highlightRequests": [],
+            },
+            {
+                "id": event_offer1.id,
+                "isEvent": True,
+                "name": event_offer1.name,
+                "productIsbn": None,
+                "status": "SOLD_OUT",
+                "stocks": [],
+                "subcategoryId": "CONCERT",
+                "thumbUrl": None,
+                "location": {
+                    "id": offerer_address1.address.id,
+                    "banId": offerer_address1.address.banId,
+                    "inseeCode": offerer_address1.address.inseeCode,
+                    "label": "Accor Arena",
+                    "street": offerer_address1.address.street,
+                    "postalCode": offerer_address1.address.postalCode,
+                    "city": offerer_address1.address.city,
+                    "departmentCode": offerer_address1.address.departmentCode,
+                    "isVenueLocation": False,
+                    "isManualEdition": offerer_address1.address.isManualEdition,
+                    "latitude": float(offerer_address1.address.latitude),
+                    "longitude": float(offerer_address1.address.longitude),
+                },
+                "publicationDatetime": "2022-10-21T13:19:00Z",
+                "bookingAllowedDatetime": None,
+                "bookingsCount": 0,
+                "hasProAdvice": False,
+                "productId": None,
+                "highlightRequests": [],
+            },
+        ]
+
+    def should_return_offer_with_address_of_oa(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offerer_address1 = offerers_factories.OfferLocationFactory(
+            label="Accor Arena",
+            offerer=offerer,
+            venue=venue,
+            address__street="8 Boulevard de Bercy",
+            address__banId="75112_0877_00008",
+        )
+
+        event_offer1 = offers_factories.EventOfferFactory(
+            name="The Weeknd",
+            subcategoryId=subcategories.CONCERT.id,
+            venue=venue,
+            offererAddress=offerer_address1,
+            publicationDatetime=datetime.datetime(2022, 11, 21, 13, 19),
+        )
+
+        venue_id = venue.id
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get(f"/offers?venueId={venue_id}")
+            assert response.status_code == 200
+
+        assert response.json == [
+            {
+                "id": event_offer1.id,
+                "isEvent": True,
+                "name": "The Weeknd",
+                "stocks": [],
+                "thumbUrl": None,
+                "productIsbn": None,
+                "subcategoryId": "CONCERT",
+                "status": "SOLD_OUT",
+                "location": {
+                    "id": offerer_address1.address.id,
+                    "banId": offerer_address1.address.banId,
+                    "inseeCode": offerer_address1.address.inseeCode,
+                    "label": offerer_address1.label,
+                    "street": offerer_address1.address.street,
+                    "postalCode": offerer_address1.address.postalCode,
+                    "city": offerer_address1.address.city,
+                    "departmentCode": offerer_address1.address.departmentCode,
+                    "isVenueLocation": False,
+                    "isManualEdition": offerer_address1.address.isManualEdition,
+                    "latitude": float(offerer_address1.address.latitude),
+                    "longitude": float(offerer_address1.address.longitude),
+                },
+                "publicationDatetime": "2022-11-21T13:19:00Z",
+                "bookingAllowedDatetime": None,
+                "bookingsCount": 0,
+                "hasProAdvice": False,
+                "productId": None,
+                "highlightRequests": [],
+            }
+        ]
+
+    def should_return_offer_with_address_of_venue(self, client, db_session):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(
+            name="Best Place to be",
+            managingOfferer=offerer,
+            offererAddress__address__street="4 Boulevard de Bercy",
+            offererAddress__address__banId="75112_0877_00001",
+            offererAddress__address__postalCode="75001",
+            offererAddress__address__longitude=1.34765,
+            offererAddress__address__latitude=4.34765,
+        )
+
+        event_offer1 = offers_factories.EventOfferFactory(
+            name="The Weeknd",
+            subcategoryId=subcategories.CONCERT.id,
+            venue=venue,
+            offererAddress=None,
+            publicationDatetime=datetime.datetime(2022, 11, 21, 13, 19),
+        )
+        venue_id = venue.id
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get(f"/offers?venueId={venue_id}")
+            assert response.status_code == 200
+        assert response.json == [
+            {
+                "id": event_offer1.id,
+                "isEvent": True,
+                "name": "The Weeknd",
+                "stocks": [],
+                "thumbUrl": None,
+                "productIsbn": None,
+                "subcategoryId": "CONCERT",
+                "status": "SOLD_OUT",
+                "location": None,
+                "publicationDatetime": "2022-11-21T13:19:00Z",
+                "bookingAllowedDatetime": None,
+                "bookingsCount": 0,
+                "hasProAdvice": False,
+                "productId": None,
+                "highlightRequests": [],
+            }
+        ]
+
+    def should_return_has_pro_advice_true_when_offer_has_pro_advice(self, client):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        offer_with_advice = offers_factories.ThingOfferFactory(venue=venue)
+        offers_factories.ProAdviceFactory(offer=offer_with_advice, venue=venue)
+
+        authenticated_client = client.with_session_auth(email=pro.email)
+        response = authenticated_client.get(f"/offers?venueId={venue.id}")
+
+        assert response.status_code == 200
+        has_pro_advice_by_offer_id = {offer["id"]: offer["hasProAdvice"] for offer in response.json}
+        assert has_pro_advice_by_offer_id[offer_with_advice.id] is True
+
+    def should_return_no_offers_when_user_has_no_rights_on_requested_venue(self, client, db_session):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+
+        venue_id = venue.id
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries - 1):
+            response = authenticated_client.get(f"/offers?venueId={venue_id}")
+            assert response.status_code == 200
+
+        assert response.json == []
+
+    def should_return_no_offers_when_user_offerer_is_not_validated(self, client, db_session):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory()
+        offerers_factories.NewUserOffererFactory(user=pro, offerer=offerer)
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer)
+        offers_factories.ThingOfferFactory(venue=venue)
+
+        venue_id = offerer.id
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries - 1):
+            response = authenticated_client.get(f"/offers?venueId={venue_id}")
+            assert response.status_code == 200
+
+        assert response.json == []
+
+
+class Returns400Test:
+    number_of_queries = testing.AUTHENTICATION_QUERIES
+
+    def should_return_error_if_status_is_not_valid(self, client, db_session):
+        pro = users_factories.ProFactory()
+
+        authenticated_client = client.with_session_auth(email=pro.email)
+        with testing.assert_num_queries(self.number_of_queries):
+            response = authenticated_client.get("/offers?status=NOPENOPENOPE")
+            assert response.status_code == 400
+
+        msg = response.json["status"][0]
+        assert msg.startswith("value is not a valid enumeration member")
+
+        for value in OfferStatus:
+            assert value.name in msg

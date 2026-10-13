@@ -1,0 +1,184 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useSearchParams } from 'react-router'
+
+import { AdageFrontRoles, AdagePlaylistType } from '@/apiClient/adage'
+import { apiAdage } from '@/apiClient/api'
+import { useEducationalDomains } from '@/commons/hooks/swr/useEducationalDomains'
+import { useIsElementVisible } from '@/commons/hooks/useIsElementVisible'
+
+import { useAdageUser } from '../../hooks/useAdageUser'
+import { SurveySatisfaction } from '../SurveySatisfaction/SurveySatisfaction'
+import styles from './AdageDiscovery.module.scss'
+import { AdageDiscoveryBanner } from './AdageDiscoveryBanner/AdageDiscoveryBanner'
+import { Carousel } from './Carousel/Carousel'
+import { DOMAINS_PLAYLIST } from './constant'
+import circles from './DomainsCard/assets/circles.svg'
+import ellipses from './DomainsCard/assets/ellipses.svg'
+import pills from './DomainsCard/assets/pills.svg'
+import rectangles from './DomainsCard/assets/rectangles.svg'
+import squares from './DomainsCard/assets/squares.svg'
+import triangles from './DomainsCard/assets/triangles.svg'
+import { DomainsCard } from './DomainsCard/DomainsCard'
+import { ClassroomPlaylist } from './Playlist/ClassroomPlaylist/ClassroomPlaylist'
+import { NewOffererPlaylist } from './Playlist/NewOffererPlaylist/NewOffererPlaylist'
+import { NewOfferPlaylist } from './Playlist/NewOfferPlaylist/NewOfferPlaylist'
+import { VenuePlaylist } from './Playlist/VenuePlaylist/VenuePlaylist'
+import type { PlaylistTracker } from './types'
+
+export const AdageDiscovery = () => {
+  const hasSeenAllPlaylist = useRef<boolean>(false)
+  const [searchParams] = useSearchParams()
+  const location = useLocation()
+  const { adageUser } = useAdageUser()
+
+  const footerSuggestion = useRef<HTMLDivElement>(null)
+  const [isFooterSuggestionVisible] = useIsElementVisible(footerSuggestion)
+
+  const adageAuthToken = searchParams.get('token')
+
+  const discoveryRef = useRef<HTMLDivElement>(null)
+
+  const [shouldShowSurveySatisfaction, setShouldShowSurveySatisfaction] =
+    useState(
+      !adageUser.preferences?.feedback_form_closed &&
+        adageUser.role !== AdageFrontRoles.READONLY
+    )
+
+  useEffect(() => {
+    if (isFooterSuggestionVisible && !hasSeenAllPlaylist.current) {
+      hasSeenAllPlaylist.current = true
+      void apiAdage.logHasSeenAllPlaylist({
+        body: { iframeFrom: location.pathname },
+      })
+    }
+  }, [isFooterSuggestionVisible, location.pathname])
+
+  const { data: educationalDomains } = useEducationalDomains()
+
+  const domainsOptions = useMemo(
+    () =>
+      (educationalDomains ?? []).map(({ id, name }) => ({
+        value: id,
+        label: name,
+      })),
+    [educationalDomains]
+  )
+
+  function onWholePlaylistSeen({
+    playlistId,
+    playlistType,
+    numberOfTiles,
+  }: PlaylistTracker) {
+    void apiAdage.logHasSeenWholePlaylist({
+      body: {
+        iframeFrom: location.pathname,
+        playlistId,
+        playlistType,
+        numberOfTiles,
+      },
+    })
+  }
+
+  const colorAndMotifOrder = [
+    { color: 'orange', src: squares },
+    { color: 'purple', src: pills },
+    { color: 'pink', src: triangles },
+    { color: 'green', src: rectangles },
+    { color: 'red', src: ellipses },
+    { color: 'blue', src: circles },
+  ]
+
+  const trackPlaylistElementClicked = (
+    playlistTrackerParameters: PlaylistTracker
+  ) => {
+    void apiAdage.logConsultPlaylistElement({
+      body: {
+        iframeFrom: location.pathname,
+        ...playlistTrackerParameters,
+      },
+    })
+  }
+
+  return (
+    <div ref={discoveryRef}>
+      <AdageDiscoveryBanner />
+
+      <div className={styles['discovery-playlists']}>
+        <div>
+          <NewOfferPlaylist
+            onWholePlaylistSeen={onWholePlaylistSeen}
+            trackPlaylistElementClicked={trackPlaylistElementClicked}
+            observableRef={discoveryRef}
+          />
+        </div>
+        {shouldShowSurveySatisfaction && (
+          <div className={styles['survey-container']}>
+            <SurveySatisfaction
+              onClose={() => setShouldShowSurveySatisfaction(false)}
+            />
+          </div>
+        )}
+        <div>
+          <Carousel
+            title={
+              <h2 className={styles['playlist-carousel-title']}>
+                Explorez les domaines artistiques et culturels
+              </h2>
+            }
+            observableRef={discoveryRef}
+            onLastCarouselElementVisible={() =>
+              onWholePlaylistSeen({
+                playlistId: DOMAINS_PLAYLIST,
+                playlistType: AdagePlaylistType.DOMAIN,
+              })
+            }
+            elements={domainsOptions.map((elm, index) => {
+              const colorAndMotif =
+                colorAndMotifOrder[index % colorAndMotifOrder.length]
+
+              return (
+                <DomainsCard
+                  handlePlaylistElementTracking={() =>
+                    trackPlaylistElementClicked({
+                      playlistId: DOMAINS_PLAYLIST,
+                      playlistType: AdagePlaylistType.DOMAIN,
+                      domainId: elm.value,
+                      index,
+                    })
+                  }
+                  key={`domains-${elm.value}`}
+                  title={elm.label}
+                  color={colorAndMotif.color}
+                  src={colorAndMotif.src}
+                  href={`/adage-iframe/recherche?token=${adageAuthToken}&domain=${elm.value}`}
+                />
+              )
+            })}
+          />
+        </div>
+        <div>
+          <NewOffererPlaylist
+            onWholePlaylistSeen={onWholePlaylistSeen}
+            trackPlaylistElementClicked={trackPlaylistElementClicked}
+            observableRef={discoveryRef}
+          />
+        </div>
+        <div>
+          <ClassroomPlaylist
+            onWholePlaylistSeen={onWholePlaylistSeen}
+            trackPlaylistElementClicked={trackPlaylistElementClicked}
+            observableRef={discoveryRef}
+          />
+        </div>
+
+        <div ref={footerSuggestion}>
+          <VenuePlaylist
+            onWholePlaylistSeen={onWholePlaylistSeen}
+            trackPlaylistElementClicked={trackPlaylistElementClicked}
+            observableRef={discoveryRef}
+          />
+        </div>
+      </div>
+    </div>
+  )
+}

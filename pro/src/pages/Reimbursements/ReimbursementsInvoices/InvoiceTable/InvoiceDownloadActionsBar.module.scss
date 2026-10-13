@@ -1,0 +1,5 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.invoices-download-description {
+  @include fonts.body-accent;
+}

@@ -1,0 +1,142 @@
+import sqlalchemy as sa
+from flask_login import current_user
+from sqlalchemy.orm import joinedload
+
+import pcapi.core.chronicles.api as chronicles_api
+import pcapi.core.mails.transactional as transactional_mails
+from pcapi.core.categories import subcategories
+from pcapi.core.categories.app_search_tree import NATIVE_CATEGORIES
+from pcapi.core.categories.app_search_tree import SEARCH_GROUPS
+from pcapi.core.categories.app_search_tree import SEARCH_NODES
+from pcapi.core.categories.models import GenreType
+from pcapi.core.external.batch import transactional_notifications
+from pcapi.core.offers import repository
+from pcapi.core.offers.models import Offer
+from pcapi.models import db
+from pcapi.models.api_errors import ResourceNotFoundError
+from pcapi.models.offer_mixin import OfferValidationStatus
+from pcapi.models.utils import first_or_404
+from pcapi.models.utils import get_or_404
+from pcapi.routes.native.security import authenticated_and_active_user_required
+from pcapi.serialization.decorator import spectree_serialize
+from pcapi.utils.transaction_manager import atomic
+
+from .. import blueprint
+from .serialization import offers as serializers
+from .serialization import subcategories_v2 as subcategories_v2_serializers
+
+
+@blueprint.native_route("/offers/stocks", methods=["POST"], version="v2")
+@spectree_serialize(response_model=serializers.OffersStocksResponseV2, api=blueprint.api)
+def get_offers_and_stocks(body: serializers.OffersStocksRequest) -> serializers.OffersStocksResponseV2:
+    offer_ids = body.offer_ids
+    query = repository.get_offers_details(offer_ids)
+    serialized_offers = [serializers.OfferResponseV2.build(offer) for offer in query]
+    offers_response = serializers.OffersStocksResponseV2(offers=serialized_offers)
+    return offers_response
+
+
+@blueprint.native_route("/offer/<int:offer_id>/chronicles", methods=["GET"])
+@spectree_serialize(
+    on_success_status=200, on_error_statuses=[404], api=blueprint.api, response_model=serializers.OfferChronicles
+)
+@atomic()
+def offer_chronicles(offer_id: int) -> serializers.OfferChronicles:
+    offer = get_or_404(Offer, offer_id)
+
+    chronicles = chronicles_api.get_offer_published_chronicles(offer)
+
+    return serializers.OfferChronicles(
+        chronicles=[serializers.OfferChronicle.build(chronicle) for chronicle in chronicles]
+    )
+
+
+@blueprint.native_route("/offer/<int:offer_id>/advices", methods=["GET"])
+@spectree_serialize(
+    on_success_status=200, on_error_statuses=[404], api=blueprint.api, response_model=serializers.OfferProAdvices
+)
+def get_offer_pro_advices(offer_id: int, query: serializers.OfferProAdviceQuery) -> serializers.OfferProAdvices:
+    product_id = db.session.scalar(sa.select(Offer.productId).where(Offer.id == offer_id))
+
+    limit = query.results_per_page
+    offset = (query.page - 1) * limit
+
+    results = repository.get_pro_advices(
+        offer_id=offer_id,
+        product_id=product_id,
+        latitude=query.latitude,
+        longitude=query.longitude,
+        offset=offset,
+        limit=limit,
+    )
+
+    if product_id and len(results) >= limit:
+        nb_results = repository.get_product_pro_advices_count(product_id)
+    else:
+        nb_results = offset + len(results) if product_id else len(results)
+
+    return serializers.OfferProAdvices(
+        pro_advices=[
+            serializers.OfferProAdvice.build(pro_advice, distance, query.max_content_length)
+            for pro_advice, distance in results
+        ],
+        nb_results=nb_results,
+    )
+
+
+@blueprint.native_route("/send_offer_webapp_link_by_email/<int:offer_id>", methods=["POST"])
+@spectree_serialize(on_success_status=204, api=blueprint.api)
+@authenticated_and_active_user_required
+def send_offer_app_link(offer_id: int) -> None:
+    """
+    On iOS native app, users cannot book numeric offers with price > 0, so
+    give them webapp link.
+    """
+    offer = first_or_404(
+        db.session.query(Offer)
+        .options(joinedload(Offer.venue))
+        .filter(Offer.id == offer_id, Offer.validation == OfferValidationStatus.APPROVED)
+    )
+    transactional_mails.send_offer_link_to_ios_user_email(current_user, offer)
+
+
+@blueprint.native_route("/send_offer_link_by_push/<int:offer_id>", methods=["POST"])
+@spectree_serialize(on_success_status=204, api=blueprint.api)
+@authenticated_and_active_user_required
+def send_offer_link_by_push(offer_id: int) -> None:
+    offer = get_or_404(Offer, offer_id)
+    if offer.validation != OfferValidationStatus.APPROVED:
+        raise ResourceNotFoundError()
+    transactional_notifications.send_offer_link_by_push(user_id=current_user.id, offer=offer)
+
+
+@blueprint.native_route("/subcategories/v2", methods=["GET"])
+@spectree_serialize(api=blueprint.api, response_model=subcategories_v2_serializers.SubcategoriesResponseModelv2)
+def get_subcategories_v2() -> subcategories_v2_serializers.SubcategoriesResponseModelv2:
+    return subcategories_v2_serializers.SubcategoriesResponseModelv2(
+        subcategories=[
+            subcategories_v2_serializers.SubcategoryResponseModelv2.build(subcategory)
+            for subcategory in subcategories.ALL_SUBCATEGORIES
+        ],
+        searchGroups=[
+            subcategories_v2_serializers.SearchGroupResponseModelv2.model_validate(search_group)
+            for search_group in SEARCH_GROUPS
+        ],
+        homepageLabels=[
+            subcategories_v2_serializers.HomepageLabelResponseModelv2.model_validate(homepage_label_name)
+            for homepage_label_name in subcategories.HomepageLabels
+        ],
+        nativeCategories=[
+            subcategories_v2_serializers.NativeCategoryResponseModelv2.build(native_category)
+            for native_category in NATIVE_CATEGORIES
+        ],
+        genreTypes=[subcategories_v2_serializers.GenreTypeModel.model_validate(genre_type) for genre_type in GenreType],
+    )
+
+
+@blueprint.native_route("/categories", methods=["GET"])
+@spectree_serialize(api=blueprint.api, response_model=subcategories_v2_serializers.CategoriesResponseModel)
+def get_categories() -> subcategories_v2_serializers.CategoriesResponseModel:
+    return subcategories_v2_serializers.CategoriesResponseModel(
+        categories=[subcategories_v2_serializers.CategoryResponseModel.build(node) for node in SEARCH_NODES]
+    )

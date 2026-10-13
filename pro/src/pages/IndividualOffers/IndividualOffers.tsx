@@ -1,0 +1,109 @@
+import { useEffect } from 'react'
+import { useNavigate } from 'react-router'
+import useSWR from 'swr'
+
+import { api } from '@/apiClient/api'
+import { GetVenueAddressesWithOffersOption } from '@/apiClient/v1'
+import {
+  GET_CATEGORIES_QUERY_KEY,
+  GET_OFFERS_QUERY_KEY,
+} from '@/commons/config/swrQueryKeys'
+import { HeadlineOfferContextProvider } from '@/commons/context/HeadlineOfferContext/HeadlineOfferContext'
+import { DEFAULT_PAGE } from '@/commons/core/Offers/constants'
+import { useQuerySearchFilters } from '@/commons/core/Offers/hooks/useQuerySearchFilters'
+import { computeIndividualOffersUrl } from '@/commons/core/Offers/utils/computeIndividualOffersUrl'
+import type { Audience } from '@/commons/core/shared/types'
+import { formatAndOrderAddresses } from '@/commons/format/venuesService'
+import { useVenueAddresses } from '@/commons/hooks/swr/useVenueAddresses'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { sortByLabel } from '@/commons/utils/strings'
+import { useStoredFilterConfig } from '@/components/OffersTableSearch/utils'
+
+import type { IndividualOffersFilters } from './common/types'
+import styles from './IndividualOffers.module.scss'
+import { IndividualOffersContainer } from './IndividualOffersContainer/IndividualOffersContainer'
+import { computeIndividualApiFilters } from './utils/computeIndividualApiFilters'
+
+export const IndividualOffers = () => {
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+  const snackbar = useSnackBar()
+
+  const urlSearchFilters = useQuerySearchFilters()
+  const { storedFilters } = useStoredFilterConfig('individual')
+  const finalSearchFilters = {
+    ...urlSearchFilters,
+    ...(storedFilters as Partial<IndividualOffersFilters>),
+  }
+
+  const currentPageNumber = finalSearchFilters.page ?? DEFAULT_PAGE
+  const navigate = useNavigate()
+
+  const categoriesQuery = useSWR(
+    [GET_CATEGORIES_QUERY_KEY],
+    () => api.getCategories(),
+    { fallbackData: { categories: [], subcategories: [] } }
+  )
+
+  const categoriesOptions = sortByLabel(
+    (categoriesQuery.data?.categories ?? [])
+      .filter((category) => category.isSelectable)
+      .map((category) => ({
+        value: category.id,
+        label: category.proLabel,
+      }))
+  )
+
+  const redirectWithSelectedFilters = (
+    filters: Partial<IndividualOffersFilters> & {
+      audience?: Audience
+    }
+  ) => {
+    void navigate(computeIndividualOffersUrl(filters), { replace: true })
+  }
+
+  const venueAddressQuery = useVenueAddresses(
+    GetVenueAddressesWithOffersOption.INDIVIDUAL_OFFERS_ONLY
+  )
+  const venueAddresses = formatAndOrderAddresses(venueAddressQuery.data ?? [])
+
+  const apiFilters = computeIndividualApiFilters({
+    finalSearchFilters,
+    selectedVenueId: selectedPartnerVenue.id,
+  })
+
+  const offersQuery = useSWR([GET_OFFERS_QUERY_KEY, apiFilters], () =>
+    api.listOffers({ query: apiFilters })
+  )
+
+  useEffect(() => {
+    if (offersQuery.error) {
+      snackbar.error(
+        'Une erreur est survenue pendant le rafraîchissement des offres.'
+      )
+    }
+  }, [offersQuery.error, snackbar.error])
+
+  return (
+    <>
+      <h1 className={styles['title']}>Offres individuelles</h1>
+
+      <HeadlineOfferContextProvider>
+        <IndividualOffersContainer
+          categories={categoriesOptions}
+          currentPageNumber={currentPageNumber}
+          initialSearchFilters={apiFilters}
+          isLoading={offersQuery.isLoading}
+          offers={offersQuery.data}
+          redirectWithSelectedFilters={redirectWithSelectedFilters}
+          venueAddresses={venueAddresses}
+        />
+      </HeadlineOfferContextProvider>
+    </>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = IndividualOffers

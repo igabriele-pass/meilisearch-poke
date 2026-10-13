@@ -1,0 +1,421 @@
+import enum
+import typing
+from collections.abc import Iterable
+from datetime import date
+from datetime import datetime
+
+import pydantic as pydantic_v2
+from sqlalchemy.engine import Row
+
+import pcapi.core.offerers.models as offerers_models
+import pcapi.core.offers.models as offers_models
+from pcapi.core.offerers import schemas as offerers_schemas
+from pcapi.core.offerers.models import Target
+from pcapi.routes.serialization import HttpBodyModel
+from pcapi.routes.serialization import HttpQueryParamsModel
+from pcapi.routes.serialization import address_serialize
+from pcapi.routes.serialization import finance_serialize
+from pcapi.routes.serialization import venue_collective_serialize
+from pcapi.routes.serialization.venue_banners_serialize import BannerMetaModel
+from pcapi.serialization.exceptions import PydanticError
+from pcapi.serialization.utils import validate_phone_number_nullable
+from pcapi.utils import phone_number as phone_number_utils
+from pcapi.utils.email import sanitize_email
+
+
+class GetOffererVenueResponseModel(HttpBodyModel):
+    booking_email: str | None
+    has_created_offer: bool
+    has_adage_id: bool
+    name: str
+    id: int
+    public_name: str
+    siret: str | None
+    activity: offerers_models.DisplayableActivity | None
+    withdrawal_details: str | None
+    last_collective_dms_application: venue_collective_serialize.DMSApplicationForEAC | None
+    has_venue_providers: bool
+    is_permanent: bool
+    banner_url: str | None
+    banner_meta: BannerMetaModel | None
+    state: offerers_models.VenueState | None
+
+    @classmethod
+    def build(
+        cls,
+        venue: offerers_models.Venue,
+        ids_of_venues_with_offers: Iterable[int] = (),
+    ) -> "GetOffererVenueResponseModel":
+        dms_application = venue.last_collective_dms_application
+        return cls(
+            activity=offerers_models.DisplayableActivity[venue.activity.name],
+            banner_meta=venue.bannerMeta,  # type: ignore [arg-type]
+            banner_url=venue.bannerUrl,
+            booking_email=venue.bookingEmail,
+            last_collective_dms_application=venue_collective_serialize.DMSApplicationForEAC.build(
+                dms_application, venue_id=venue.id
+            )
+            if dms_application
+            else None,
+            has_adage_id=bool(venue.adageId),
+            has_created_offer=venue.id in ids_of_venues_with_offers,
+            has_venue_providers=bool(venue.venueProviders),
+            id=venue.id,
+            is_permanent=venue.isPermanent,
+            name=venue.name,
+            public_name=venue.publicName,
+            siret=venue.siret,
+            state=venue.state,
+            withdrawal_details=venue.withdrawalDetails,
+        )
+
+
+# GetOffererResponseModel includes sensitive information and can be returned only if authenticated user has a validated
+# access to the offerer. During subscription process, use PostOffererResponseModel
+class GetOffererResponseModel(HttpBodyModel):
+    is_validated: bool
+    is_active: bool
+    is_closed: bool
+    managed_venues: list[GetOffererVenueResponseModel]
+    name: str
+    id: int
+    siren: str
+    has_valid_bank_account: bool
+    has_pending_bank_account: bool
+    has_non_free_offer: bool
+    venues_with_non_free_offers_without_bank_accounts: list[int]
+    allowed_on_adage: bool
+    has_bank_account_with_pending_corrections: bool
+    is_onboarded: bool
+    is_caledonian: bool
+    can_display_highlights: bool
+
+    @classmethod
+    def build(
+        cls,
+        row: Row,
+        ids_of_venues_with_offers: Iterable[int],
+        venues_with_non_free_offers_without_bank_accounts: list[int],
+    ) -> typing.Self:
+        offerer: offerers_models.Offerer = row.Offerer
+
+        return cls(
+            allowed_on_adage=offerer.allowedOnAdage,
+            can_display_highlights=row.canDisplayHighlights,
+            has_bank_account_with_pending_corrections=row.hasBankAccountWithPendingCorrections,
+            has_non_free_offer=row.hasNonFreeOffer,
+            has_pending_bank_account=row.hasPendingBankAccount,
+            has_valid_bank_account=row.hasValidBankAccount,
+            id=offerer.id,
+            is_active=offerer.isActive and not offerer.isClosed,
+            is_closed=offerer.isClosed,
+            is_caledonian=offerer.is_caledonian,
+            is_onboarded=row.isOnboarded,
+            # Behavior in PC Pro for a closed offerer should be the same as for a suspended validated offerer
+            is_validated=offerer.isValidated or offerer.isClosed,  # do now show "en attente de traitement"
+            managed_venues=[
+                GetOffererVenueResponseModel.build(venue, ids_of_venues_with_offers)
+                for venue in sorted(offerer.managedVenues, key=lambda v: v.publicName)
+            ],
+            name=offerer.name,
+            siren=offerer.siren,
+            venues_with_non_free_offers_without_bank_accounts=venues_with_non_free_offers_without_bank_accounts,
+        )
+
+
+class GetOffererNameResponseModel(HttpBodyModel):
+    id: int
+    name: str
+    validated: bool
+
+
+class OffererMemberStatus(enum.Enum):
+    VALIDATED = "validated"
+    PENDING = "pending"
+
+
+class GetOffererMemberResponseModel(HttpBodyModel):
+    email: str
+    status: OffererMemberStatus
+
+
+class GetOffererMembersResponseModel(HttpBodyModel):
+    members: list[GetOffererMemberResponseModel]
+
+
+class GetOfferersNamesResponseModel(HttpBodyModel):
+    offerers_names: list[GetOffererNameResponseModel]
+
+    @classmethod
+    def build(
+        cls, offerers_names: Iterable, offerers_names_with_pending_validation: Iterable
+    ) -> "GetOfferersNamesResponseModel":
+        validated = sorted(
+            [GetOffererNameResponseModel(id=o.id, name=o.name, validated=True) for o in offerers_names],
+            key=lambda o: o.name,
+        )
+        pending = sorted(
+            [
+                GetOffererNameResponseModel(id=o.id, name=o.name, validated=False)
+                for o in offerers_names_with_pending_validation
+            ],
+            key=lambda o: o.name,
+        )
+        return cls(
+            offerers_names=validated + pending,
+        )
+
+
+class GetEducationalOffererVenueResponseModel(HttpBodyModel):
+    id: int
+    publicName: str
+    name: str
+    collectiveInterventionArea: list[str] | None = None
+    collectivePhone: str | None = None
+    collectiveEmail: str | None = None
+    # address data
+    city: str | None = None
+    postalCode: str | None = None
+    street: str | None = None
+    # accessibility
+    audioDisabilityCompliant: bool | None = None
+    mentalDisabilityCompliant: bool | None = None
+    motorDisabilityCompliant: bool | None = None
+    visualDisabilityCompliant: bool | None = None
+
+    @classmethod
+    def build(cls, venue: offerers_models.Venue) -> "GetEducationalOffererVenueResponseModel":
+        return cls(
+            id=venue.id,
+            publicName=venue.publicName,
+            name=venue.name,
+            collectiveInterventionArea=venue.collectiveInterventionArea,
+            collectivePhone=venue.collectivePhone,
+            collectiveEmail=venue.collectiveEmail,
+            # accessibility
+            audioDisabilityCompliant=venue.audioDisabilityCompliant,
+            mentalDisabilityCompliant=venue.mentalDisabilityCompliant,
+            motorDisabilityCompliant=venue.motorDisabilityCompliant,
+            visualDisabilityCompliant=venue.visualDisabilityCompliant,
+            # data coming from `offererAddress.address`
+            city=venue.offererAddress.address.city,
+            postalCode=venue.offererAddress.address.postalCode,
+            street=venue.offererAddress.address.street,
+        )
+
+
+class GetEducationalOffererResponseModel(HttpBodyModel):
+    id: int
+    name: str
+    managedVenues: list[GetEducationalOffererVenueResponseModel]
+    allowedOnAdage: bool
+
+    @classmethod
+    def build(cls, offerer: offerers_models.Offerer) -> "GetEducationalOffererResponseModel":
+        return cls(
+            id=offerer.id,
+            name=offerer.name,
+            managedVenues=[
+                GetEducationalOffererVenueResponseModel.build(venue)
+                for venue in offerer.managedVenues
+                if not venue.isSoftDeleted
+                # We need to explicitly filter isSoftDeleted as the library does not filter them
+            ],
+            allowedOnAdage=offerer.allowedOnAdage,
+        )
+
+
+class GetEducationalOfferersResponseModel(HttpBodyModel):
+    educational_offerers: list[GetEducationalOffererResponseModel]
+
+
+class GetEducationalOfferersQueryModel(HttpQueryParamsModel):
+    offerer_id: int | None = None
+
+
+class CreateOffererBodyModel(HttpBodyModel):
+    name: str
+    siren: str
+    phone_number: str | None = None
+    # address data
+    city: str
+    postal_code: str
+    street: str | None = None
+    insee_code: str | None = None
+    longitude: float | None = None
+    latitude: float | None = None
+
+    @pydantic_v2.field_validator("phone_number", mode="after")
+    @classmethod
+    def validate_field(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+
+        try:
+            parsed = phone_number_utils.parse_phone_number(value)
+        except phone_number_utils.InvalidPhoneNumber:
+            raise PydanticError("Ce numéro de telephone ne semble pas valide")
+
+        return phone_number_utils.get_formatted_phone_number(parsed)
+
+
+class SaveNewOnboardingDataQueryModel(HttpBodyModel):
+    activity: offerers_models.ActivityOpenToPublic | offerers_models.ActivityNotOpenToPublic
+    otherActivityComment: str | None = None
+    address: address_serialize.LocationBodyModelV2
+    cultural_domains: list[str] | None = pydantic_v2.Field(min_length=1, default=None)
+    create_venue_without_siret: bool = False
+    is_open_to_public: bool
+    public_name: str | None = None
+    siret: str
+    target: Target
+    token: str
+    web_presence: str
+    phone_number: str | None = None
+
+    @pydantic_v2.field_validator("phone_number", mode="after")
+    def validate_phone_number(cls, phone_number: str | None) -> str | None:
+        return validate_phone_number_nullable(phone_number)
+
+
+class InviteMemberQueryModel(HttpQueryParamsModel):
+    email: str
+
+    @pydantic_v2.field_validator("email")
+    def validate_email(cls, email: str) -> str:
+        try:
+            return sanitize_email(email)
+        except Exception as e:
+            raise ValueError(email) from e
+
+
+class GetOffererBankAccountsResponseModel(HttpBodyModel):
+    id: int
+    bank_accounts: list[finance_serialize.BankAccountResponseModel]
+    managed_venues: list[finance_serialize.ManagedVenue]
+
+
+class TopOffersResponseData(HttpBodyModel):
+    offerId: int
+    numberOfViews: int
+    offerName: str
+    image: offers_models.OfferImage | None
+    isHeadlineOffer: bool
+
+
+class OffererStatsDataModel(HttpBodyModel):
+    totalViewsLast30Days: int
+    topOffers: list[TopOffersResponseData]
+    dailyViews: list[offerers_models.OffererViewsModel]
+
+
+class GetOffererStatsResponseModel(HttpBodyModel):
+    offererId: int
+    syncDate: datetime | None
+    jsonData: OffererStatsDataModel
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        offerer_id: int,
+        syncDate: datetime,
+        dailyViews: list[dict],  # dicts are serialized from offerers_models.OffererViewsModel
+        topOffers: list[dict],  # dicts are serialized from offerers_models.TopOffersData
+        total_views_last_30_days: int,
+    ) -> typing.Self:
+        top_offers_response = []
+        if topOffers:
+            top_offers_response = [
+                TopOffersResponseData(
+                    offerName=topOffer["offerName"],
+                    offerId=topOffer["offerId"],
+                    image=topOffer["image"],
+                    numberOfViews=topOffer["numberOfViews"],
+                    isHeadlineOffer=topOffer["isHeadlineOffer"],
+                )
+                for topOffer in topOffers
+            ]
+
+        return cls(
+            offererId=offerer_id,
+            syncDate=syncDate,
+            jsonData=OffererStatsDataModel(
+                topOffers=top_offers_response,
+                totalViewsLast30Days=total_views_last_30_days,
+                dailyViews=[offerers_models.OffererViewsModel(**_v) for _v in dailyViews],
+            ),
+        )
+
+
+class VenueDailyViewModel(HttpBodyModel):
+    day: date
+    views: int
+
+
+class VenueStatsDataModel(HttpBodyModel):
+    total_views_last_30_days: int
+    top_offers: list[TopOffersResponseData]
+    daily_views: list[VenueDailyViewModel]
+
+
+class GetVenueStatsResponseModel(HttpBodyModel):
+    venue_id: int
+    json_data: VenueStatsDataModel
+
+
+class VenueMonthlyViewModel(HttpBodyModel):
+    month: date
+    views: int
+
+
+class TopOfferResponseModel(HttpBodyModel):
+    offer_id: int
+    name: str
+    views: int
+    image: offers_models.OfferImage | None
+    is_headline_offer: bool
+
+
+class VenueOffersPeriodStatsModel(HttpBodyModel):
+    top_offers: list[TopOfferResponseModel]
+    cumulated_views: int
+    views_by_month: list[VenueMonthlyViewModel]
+
+
+class GetVenueOffersStatsV2ResponseModel(HttpBodyModel):
+    venue_id: int
+    last_3_months: VenueOffersPeriodStatsModel
+    last_6_months: VenueOffersPeriodStatsModel
+
+
+class LinkVenueToBankAccountBodyModel(HttpBodyModel):
+    venues_ids: set[int]
+
+
+class GetOffererAddressResponseModel(HttpBodyModel):
+    id: int
+    label: str | None
+    street: str | None
+    postal_code: str
+    city: str
+    department_code: str | None
+
+
+class GetOffererAddressesResponseModel(pydantic_v2.RootModel):
+    root: list[GetOffererAddressResponseModel]
+
+
+class GetOffererAddressesQueryModel(HttpQueryParamsModel):
+    with_offers_option: offerers_schemas.GetOffererAddressesWithOffersOption | None = None
+
+
+class TopOffersByConsultationModel(HttpBodyModel):
+    offerId: str
+    totalViewsLast30Days: int
+
+
+class GetVenueOffersStatsModel(HttpBodyModel):
+    venueId: int
+    totalViews6Months: int
+    topOffersByConsultation: list[TopOffersByConsultationModel]

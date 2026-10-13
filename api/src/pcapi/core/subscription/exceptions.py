@@ -1,0 +1,32 @@
+class SubscriptionException(Exception):
+    pass
+
+
+class IneligiblePostalCodeException(SubscriptionException):
+    pass
+
+
+class InvalidAgeException(SubscriptionException):
+    def __init__(self, age: int | None) -> None:
+        super().__init__()
+        self.age = age
+
+
+class BeneficiaryFraudCheckMissingException(SubscriptionException):
+    pass
+
+
+class CannotUpgradeBeneficiaryRole(SubscriptionException):
+    pass
+
+
+class FraudException(Exception):
+    pass
+
+
+class IncompatibleFraudCheckStatus(FraudException):
+    pass
+
+
+class SubscriptionNotMovable(Exception):
+    pass

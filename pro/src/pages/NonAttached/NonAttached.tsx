@@ -1,0 +1,44 @@
+import { useNavigate } from 'react-router'
+
+import { FullLayout } from '@/app/App/layouts/FullLayout/FullLayout'
+import { Newsletter } from '@/components/Newsletter/Newsletter'
+import { Button } from '@/design-system/Button/Button'
+import {
+  ButtonColor,
+  ButtonVariant,
+  IconPositionEnum,
+} from '@/design-system/Button/types'
+import fullBackIcon from '@/icons/full-back.svg'
+
+import { NonAttachedBanner } from '../../components/NonAttachedBanner/NonAttachedBanner'
+import styles from './NonAttached.module.scss'
+
+const NonAttached = () => {
+  const navigate = useNavigate()
+
+  return (
+    <FullLayout>
+      <div className={styles['wrapper']}>
+        <h1 className={styles['title']}>
+          Bienvenue sur votre espace partenaire
+        </h1>
+        <Button
+          onClick={() => {
+            void navigate('/hub')
+          }}
+          variant={ButtonVariant.TERTIARY}
+          color={ButtonColor.NEUTRAL}
+          icon={fullBackIcon}
+          iconPosition={IconPositionEnum.LEFT}
+          label="Retour vers la sélection du partenaire"
+        />
+        <NonAttachedBanner />
+        <Newsletter />
+      </div>
+    </FullLayout>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = NonAttached

@@ -1,0 +1,59 @@
+@use "styles/mixins/_rem.scss" as rem;
+
+.loading-spinner {
+  color: var(--color-text-subtle);
+  text-align: center;
+
+  &-icon {
+    width: rem.torem(48px);
+    height: rem.torem(48px);
+    color: var(--color-icon-brand-primary);
+    animation: rotation 3s infinite linear;
+    margin-bottom: rem.torem(15px);
+
+    @media screen and (prefers-reduced-motion: reduce) {
+      animation: none;
+      margin-bottom: rem.torem(15px);
+    }
+  }
+
+  .content {
+    position: relative;
+  }
+
+  .content::after {
+    content: "";
+    animation: dots 3s infinite linear;
+    position: absolute;
+
+    @media screen and (prefers-reduced-motion: reduce) {
+      content: "...";
+      animation: none;
+    }
+  }
+}
+
+@keyframes rotation {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(359deg);
+  }
+}
+
+@keyframes dots {
+  0%,
+  100% {
+    content: ".";
+  }
+
+  33.3% {
+    content: "..";
+  }
+
+  66.6% {
+    content: "...";
+  }
+}

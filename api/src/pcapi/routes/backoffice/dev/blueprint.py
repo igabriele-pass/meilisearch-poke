@@ -1,0 +1,641 @@
+import datetime
+import logging
+import typing
+from urllib.parse import urlencode
+
+import sqlalchemy as sa
+from flask import flash
+from flask import redirect
+from flask import render_template
+from flask import request
+from flask import url_for
+from markupsafe import Markup
+from sqlalchemy.exc import IntegrityError
+from werkzeug.exceptions import NotFound
+
+from pcapi import settings
+from pcapi.core import token as token_utils
+from pcapi.core.offers import generator as offers_generator
+from pcapi.core.offers import models as offers_models
+from pcapi.core.subscription import factories as subscription_factories
+from pcapi.core.subscription import models as subscription_models
+from pcapi.core.subscription.bonus import constants as bonus_constants
+from pcapi.core.subscription.bonus import schemas as bonus_schemas
+from pcapi.core.subscription.ubble import schemas as ubble_schemas
+from pcapi.core.users import constants as users_constants
+from pcapi.core.users import exceptions as users_exceptions
+from pcapi.core.users import generator as users_generator
+from pcapi.core.users import models as users_models
+from pcapi.models import db
+from pcapi.routes.backoffice import blueprint as backoffice_blueprint
+from pcapi.routes.backoffice.forms import empty as empty_forms
+from pcapi.routes.backoffice.pro.utils import get_connect_as
+from pcapi.routes.backoffice.utils import access_control
+from pcapi.routes.backoffice.utils import request as request_utils
+from pcapi.routes.backoffice.utils import response as response_utils
+from pcapi.utils import date as date_utils
+from pcapi.utils import string as string_utils
+from pcapi.utils import urls
+from pcapi.utils.transaction_manager import mark_transaction_as_invalid
+
+from . import forms
+
+
+logger = logging.getLogger(__name__)
+
+dev_blueprint = backoffice_blueprint.child_backoffice_blueprint(
+    "dev",
+    __name__,
+    url_prefix="/dev",
+)
+
+
+def get_token_expiration_timestamp(token: token_utils.Token) -> int:
+    expiration_date = (
+        token.get_expiration_date_from_token()
+        or date_utils.get_naive_utc_now() + users_constants.EMAIL_VALIDATION_TOKEN_LIFE_TIME
+    )
+    return int(expiration_date.timestamp())
+
+
+def create_ubble_fraud_check(user: users_models.User, form: forms.UbbleConfigurationForm) -> None:
+    final_response_code = form.final_response_code.data
+    intermediate_response_code = form.intermediate_response_code.data
+    if intermediate_response_code:
+        external_applicant_id = f"eaplt_{intermediate_response_code}A{final_response_code}".ljust(32, "0")
+    else:
+        external_applicant_id = f"eaplt_{final_response_code}".ljust(32, "0")
+    ubble_fraud_check = subscription_models.BeneficiaryFraudCheck(
+        user=user,
+        eligibilityType=user.eligibility,
+        type=subscription_models.FraudCheckType.UBBLE,
+        thirdPartyId="",
+        status=subscription_models.FraudCheckStatus.STARTED,
+        resultContent=ubble_schemas.UbbleContent(
+            birth_date=form.birth_date.data,
+            external_applicant_id=external_applicant_id,
+            id_document_number=form.id_document_number.data,
+        ).dict(exclude_none=True),
+    )
+    db.session.add(ubble_fraud_check)
+    db.session.flush()
+
+
+def create_qf_fraud_check_mock(user: users_models.User, form: forms.QuotientFamilialConfigurationForm) -> None:
+    mock_type = form.mock_type.data
+    result_content = None
+    user_qf_person = bonus_schemas.BonusCreditPerson(
+        last_name=user.lastName,  # type: ignore [arg-type]
+        first_names=[user.firstName] if user.firstName else [],
+        birth_date=user.validatedBirthDate,  # type: ignore [arg-type]
+        gender=user.gender,  # type: ignore [arg-type]
+    )
+
+    if mock_type == forms.QFMockType.OK.value:
+        result_content = subscription_factories.QuotientFamilialBonusCreditContentFactory.build(
+            http_status_code=200,
+            quotient_familial=subscription_factories.QuotientFamilialContentFactory(
+                value=bonus_constants.QUOTIENT_FAMILIAL_THRESHOLD
+            ),
+            children=[user_qf_person],
+        ).model_dump()
+
+    elif mock_type == forms.QFMockType.HOUSEHOLDER_OK.value:
+        result_content = subscription_factories.QuotientFamilialBonusCreditContentFactory.build(
+            http_status_code=200,
+            quotient_familial=subscription_factories.QuotientFamilialContentFactory(
+                value=bonus_constants.QUOTIENT_FAMILIAL_THRESHOLD
+            ),
+            householders=[user_qf_person],
+            children=[],
+        ).model_dump()
+
+    elif mock_type == forms.QFMockType.NOT_IN_TAX_HOUSEHOLD.value:
+        result_content = subscription_factories.QuotientFamilialBonusCreditContentFactory.build(
+            http_status_code=200,
+            quotient_familial=subscription_factories.QuotientFamilialContentFactory(
+                value=bonus_constants.QUOTIENT_FAMILIAL_THRESHOLD
+            ),
+        ).model_dump()
+
+    elif mock_type == forms.QFMockType.QUOTIENT_FAMILIAL_TOO_HIGH.value:
+        result_content = subscription_factories.QuotientFamilialBonusCreditContentFactory.build(
+            http_status_code=200,
+            quotient_familial=subscription_factories.QuotientFamilialContentFactory(
+                value=bonus_constants.QUOTIENT_FAMILIAL_THRESHOLD + 1
+            ),
+            children=[user_qf_person],
+        ).model_dump()
+
+    elif mock_type == forms.QFMockType.APPLICATION_NOT_FOUND.value:
+        result_content = subscription_factories.QuotientFamilialBonusCreditContentFactory.build(
+            http_status_code=404,
+        ).model_dump()
+
+    elif mock_type == forms.QFMockType.PERSON_NOT_FOUND.value:
+        result_content = subscription_factories.QuotientFamilialBonusCreditContentFactory.build(
+            http_status_code=422,
+        ).model_dump()
+
+    elif mock_type == forms.QFMockType.DATA_PROVIDER_ERROR.value:
+        result_content = subscription_factories.QuotientFamilialBonusCreditContentFactory.build(
+            http_status_code=502,
+        ).model_dump()
+
+    quotient_familial_config_fraud_check = subscription_models.BeneficiaryFraudCheck(
+        user=user,
+        eligibilityType=user.eligibility,
+        type=subscription_models.FraudCheckType.QF_BONUS_CREDIT,
+        thirdPartyId=f"qf-bonus-credit-config-{user.id}",
+        status=subscription_models.FraudCheckStatus.MOCK_CONFIG,
+        resultContent=result_content,
+    )
+    db.session.add(quotient_familial_config_fraud_check)
+    db.session.flush()
+
+
+def create_disabled_adult_allowance_fraud_check_mock(
+    user: users_models.User, form: forms.DisabledAdultAllowanceConfigurationForm
+) -> None:
+    mock_type = form.mock_type.data
+    result_content = None
+
+    if mock_type == forms.DisabledAdultAllowanceMockType.RECIPIENT.value:
+        result_content = subscription_factories.AdultDisabilityBonusCreditContentFactory.build(
+            http_status_code=200,
+            is_disability_recipient=True,
+        ).model_dump()
+
+    elif mock_type == forms.DisabledAdultAllowanceMockType.NON_RECIPIENT.value:
+        result_content = subscription_factories.AdultDisabilityBonusCreditContentFactory.build(
+            http_status_code=200,
+            is_disability_recipient=False,
+        ).model_dump()
+
+    elif mock_type == forms.DisabledAdultAllowanceMockType.APPLICATION_NOT_FOUND.value:
+        result_content = subscription_factories.AdultDisabilityBonusCreditContentFactory.build(
+            http_status_code=404,
+        ).model_dump()
+
+    elif mock_type == forms.DisabledAdultAllowanceMockType.PERSON_NOT_FOUND.value:
+        result_content = subscription_factories.AdultDisabilityBonusCreditContentFactory.build(
+            http_status_code=422,
+        ).model_dump()
+
+    elif mock_type == forms.DisabledAdultAllowanceMockType.DATA_PROVIDER_ERROR.value:
+        result_content = subscription_factories.AdultDisabilityBonusCreditContentFactory.build(
+            http_status_code=502,
+        ).model_dump()
+
+    disabled_adult_allowance_config_fraud_check = subscription_models.BeneficiaryFraudCheck(
+        user=user,
+        eligibilityType=user.eligibility,
+        type=subscription_models.FraudCheckType.AAH_BONUS_CREDIT,
+        thirdPartyId=f"aah-bonus-credit-config-{user.id}",
+        status=subscription_models.FraudCheckStatus.MOCK_CONFIG,
+        resultContent=result_content,
+    )
+    db.session.add(disabled_adult_allowance_config_fraud_check)
+    db.session.flush()
+
+
+def create_disabled_child_education_allowance_fraud_check_mock(
+    user: users_models.User, form: forms.DisabledChildEducationAllowanceConfigurationForm
+) -> None:
+    mock_type = form.mock_type.data
+    result_content = None
+
+    if mock_type == forms.DisabledChildEducationAllowanceMockType.RECIPIENT.value:
+        result_content = subscription_factories.DisabledChildEducationBonusCreditContentFactory.build(
+            http_status_code=200,
+            disability_recipient_status=bonus_schemas.DisabledChildEducationRecipientStatus.RECIPIENT,
+        ).model_dump()
+
+    if mock_type == forms.DisabledChildEducationAllowanceMockType.RIGHT_OPENING.value:
+        result_content = subscription_factories.DisabledChildEducationBonusCreditContentFactory.build(
+            http_status_code=200,
+            disability_recipient_status=bonus_schemas.DisabledChildEducationRecipientStatus.RIGHT_OPENING,
+        ).model_dump()
+
+    elif mock_type == forms.DisabledChildEducationAllowanceMockType.NON_RECIPIENT.value:
+        result_content = subscription_factories.DisabledChildEducationBonusCreditContentFactory.build(
+            http_status_code=200,
+            disability_recipient_status=bonus_schemas.DisabledChildEducationRecipientStatus.NON_RECIPIENT,
+        ).model_dump()
+
+    elif mock_type == forms.DisabledChildEducationAllowanceMockType.APPLICATION_NOT_FOUND.value:
+        result_content = subscription_factories.DisabledChildEducationBonusCreditContentFactory.build(
+            http_status_code=404,
+        ).model_dump()
+
+    elif mock_type == forms.DisabledChildEducationAllowanceMockType.PERSON_NOT_FOUND.value:
+        result_content = subscription_factories.DisabledChildEducationBonusCreditContentFactory.build(
+            http_status_code=422,
+        ).model_dump()
+
+    elif mock_type == forms.DisabledChildEducationAllowanceMockType.DATA_PROVIDER_ERROR.value:
+        result_content = subscription_factories.DisabledChildEducationBonusCreditContentFactory.build(
+            http_status_code=502,
+        ).model_dump()
+
+    disabled_child_education_allowance_config_fraud_check = subscription_models.BeneficiaryFraudCheck(
+        user=user,
+        eligibilityType=user.eligibility,
+        type=subscription_models.FraudCheckType.AEEH_BONUS_CREDIT,
+        thirdPartyId=f"aeeh-bonus-credit-config-{user.id}",
+        status=subscription_models.FraudCheckStatus.MOCK_CONFIG,
+        resultContent=result_content,
+    )
+    db.session.add(disabled_child_education_allowance_config_fraud_check)
+    db.session.flush()
+
+
+@dev_blueprint.route("/components", methods=["GET"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def components() -> response_utils.BackofficeResponse:
+    if not settings.ENABLE_BO_COMPONENT_PAGE:
+        raise NotFound()
+
+    connect_as = get_connect_as(
+        object_type="user",
+        object_id=12,
+        pc_pro_path="/home",
+    )
+
+    return render_template(
+        "dev/components.html",
+        simple_form=forms.SimpleComponentsForm(),
+        rows={"pages": 5},
+        next_pages_urls=[(i, str(i)) for i in range(6)],
+        connect_as=connect_as,
+    )
+
+
+@dev_blueprint.route("/user-generator", methods=["GET"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def get_generated_user() -> response_utils.BackofficeResponse:
+    form = forms.UserGeneratorForm()
+    form.birth_date.default = forms.get_default_birth_date()
+    form.process()
+    user = _get_user_if_exists(request_utils.get_query_params().get("userId"))
+    token = request_utils.get_query_params().get("accessToken")
+    link_to_app = None
+    link_to_local_app = None
+    link_to_ubble_mock = None
+    if token:
+        path = "signup-confirmation"
+        universal_link_url = f"{settings.WEBAPP_V2_URL}/{path}"
+        params = {"token": token}
+        if expiration_timestamp := request_utils.get_query_params().get("expirationTimestamp"):
+            params["expiration_timestamp"] = expiration_timestamp
+        if user:
+            params["email"] = user.email
+        if set(params) == {"email", "expiration_timestamp", "token"}:
+            link_to_app = f"{universal_link_url}?{urlencode(params)}"
+
+            if settings.LOCAL_WEBAPP_URL:
+                link_to_local_app = f"{settings.LOCAL_WEBAPP_URL}/{path}?{urlencode(params)}"
+
+    if user and settings.UBBLE_MOCK_CONFIG_URL:
+        link_to_ubble_mock = f"{settings.UBBLE_MOCK_CONFIG_URL}?{urlencode({'userId': user.id})}"
+
+    if user:
+        birth_date = user.dateOfBirth.date() if user.dateOfBirth else None
+        id_document_number = f"{user.id:012}"
+        ubble_form = forms.UbbleConfigurationForm(birth_date=birth_date, id_document_number=id_document_number)
+    else:
+        ubble_form = forms.UbbleConfigurationForm()
+
+    return render_template(
+        "dev/users_generator.html",
+        link_to_app=link_to_app,
+        link_to_local_app=link_to_local_app,
+        link_to_ubble_mock=link_to_ubble_mock,
+        user=user,
+        form=form,
+        dst=url_for("backoffice.dev.generate_user"),
+        ubble_configuration_form=ubble_form,
+        quotient_familial_form=forms.QuotientFamilialConfigurationForm(),
+        disabled_adult_allowance_form=forms.DisabledAdultAllowanceConfigurationForm(),
+        disabled_child_education_allowance_form=forms.DisabledChildEducationAllowanceConfigurationForm(),
+    )
+
+
+@dev_blueprint.route("/user-generator", methods=["POST"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def generate_user() -> response_utils.BackofficeResponse:
+    form = forms.UserGeneratorForm()
+
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return redirect(url_for("backoffice.dev.get_generated_user"), code=303)
+
+    raw_date_created = form.date_created.data
+    user_data = users_generator.GenerateUserData(
+        age=form.age.data,
+        birth_date=form.birth_date.data,
+        credit=form.credit.data,
+        id_provider=users_generator.GeneratedIdProvider[form.id_provider.data],
+        step=users_generator.GeneratedSubscriptionStep[form.step.data],
+        date_created=datetime.datetime(raw_date_created.year, raw_date_created.month, raw_date_created.day),
+        postal_code=form.postal_code.data,
+    )
+
+    # >18yo user cannot be identified with Educonnect
+    age = user_data.get_age()
+    id_provider = form.id_provider.data
+    if age >= users_constants.ELIGIBILITY_AGE_18 and id_provider == users_generator.GeneratedIdProvider.EDUCONNECT.name:
+        mark_transaction_as_invalid()
+        flash("Un utilisateur de plus de 18 ans ne peut pas être identifié via Educonnect", "warning")
+        return redirect(url_for("backoffice.dev.get_generated_user"), code=303)
+
+    # <18yo user cannot validate phone number
+    step = form.step.data
+    if (
+        age < users_constants.ELIGIBILITY_AGE_18
+        and step == users_generator.GeneratedSubscriptionStep.PHONE_VALIDATION.name
+    ):
+        mark_transaction_as_invalid()
+        flash("Un utilisateur de moins de 18 ans ne peut pas valider son numéro de téléphone", "warning")
+        return redirect(url_for("backoffice.dev.get_generated_user"), code=303)
+
+    # 15 to 16 years old only validate their email and complete their profile
+    if age in users_constants.ELIGIBILITY_FREE_RANGE and step not in [
+        users_generator.GeneratedSubscriptionStep.EMAIL_VALIDATION.name,
+        users_generator.GeneratedSubscriptionStep.PROFILE_COMPLETION.name,
+        users_generator.GeneratedSubscriptionStep.BENEFICIARY.name,
+    ]:
+        mark_transaction_as_invalid()
+        flash(
+            "Un utilisateur de 15 à 16 ans ne peut que valider son email, compléter son profil ou être bénéficiaire",
+            "warning",
+        )
+        return redirect(url_for("backoffice.dev.get_generated_user"), code=303)
+
+    try:
+        user = users_generator.generate_user(user_data=user_data)
+    except users_exceptions.UserGenerationForbiddenException:
+        raise NotFound()
+
+    token = token_utils.Token.create(
+        token_utils.TokenType.SIGNUP_EMAIL_CONFIRMATION, users_constants.EMAIL_VALIDATION_TOKEN_LIFE_TIME, user.id
+    )
+    return redirect(
+        url_for(
+            "backoffice.dev.get_generated_user",
+            userId=user.id,
+            accessToken=token.encoded_token,
+            expirationTimestamp=get_token_expiration_timestamp(token),
+        ),
+        code=303,
+    )
+
+
+def _get_user_if_exists(user_id: str | None) -> users_models.User | None:
+    if user_id is None or not string_utils.is_numeric(user_id):
+        return None
+
+    return db.session.query(users_models.User).filter_by(id=int(user_id)).one_or_none()
+
+
+@dev_blueprint.route("/delete", methods=["GET"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def get_user_deletion_form() -> str:
+    form = forms.UserDeletionForm()
+    return render_template("dev/users_deletion.html", form=form)
+
+
+@dev_blueprint.route("/delete", methods=["POST"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def delete_user() -> response_utils.BackofficeResponse:
+    if not settings.ENABLE_TEST_USER_GENERATION:
+        raise NotFound()
+
+    form = forms.UserDeletionForm()
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return render_template("dev/users_deletion.html", form=form), 400
+
+    email = form.email.data
+    user = db.session.query(users_models.User).filter_by(email=email).one_or_none()
+    if not user:
+        mark_transaction_as_invalid()
+        flash(
+            Markup("L'adresse email <b>{email}</b> n'a pas été trouvée.").format(email=email),
+            "warning",
+        )
+        return render_template("dev/users_deletion.html", form=form), 400
+
+    try:
+        db.session.query(users_models.TrustedDevice).filter_by(userId=user.id).delete()
+        db.session.query(users_models.LoginDeviceHistory).filter_by(userId=user.id).delete()
+        db.session.query(users_models.GdprUserAnonymization).filter_by(userId=user.id).delete()
+        db.session.query(users_models.User).filter_by(id=user.id).delete()
+        db.session.flush()
+    except IntegrityError as e:
+        logger.info(e)
+        mark_transaction_as_invalid()
+        flash(
+            Markup("Le compte de l'utilisateur <b>{email}</b> n'a pas pu être supprimé.").format(email=email),
+            "warning",
+        )
+        return redirect(url_for("backoffice.dev.delete_user"), code=303)
+
+    flash(
+        Markup("Le compte de l'utilisateur <b>{email}</b> a été supprimé").format(email=email),
+        "success",
+    )
+    return redirect(url_for("backoffice.dev.delete_user"), code=303)
+
+
+@dev_blueprint.route("/<int:user_id>/ubble/configuration", methods=["POST"])
+@access_control.custom_login_required(redirect_to=".home")
+def configure_ubble_v2_response(user_id: int) -> response_utils.BackofficeResponse:
+    user = _get_user_if_exists(str(user_id))
+    if user is None:
+        mark_transaction_as_invalid()
+        flash(f"L'utilisateur {user_id} n'a pas été trouvé", "warning")
+        return redirect(url_for("backoffice.dev.get_generated_user"), code=404)
+
+    form = forms.UbbleConfigurationForm()
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.safe_redirect_back(request, url_for("backoffice.dev.get_generated_user"))
+
+    # Ubble response codes can be tested by inserting the ones we want in the external applicant id of the Ubble
+    # applicant. See https://docs.ubble.ai/#section/Testing/Declined-verification-on-retry-after-checks-inconclusive
+    create_ubble_fraud_check(user, form)
+
+    flash("La réponse d'Ubble v2 a été configurée pour cet utilisateur", "success")
+
+    token = token_utils.Token.get_token(token_utils.TokenType.SIGNUP_EMAIL_CONFIRMATION, user.id)
+    params: dict[str, typing.Any] = {}
+    if token:
+        params["accessToken"] = token.encoded_token
+        params["expirationTimestamp"] = str(get_token_expiration_timestamp(token))
+        params["email"] = user.email
+    return redirect(url_for("backoffice.dev.get_generated_user", userId=user.id, **params), code=303)
+
+
+@dev_blueprint.route("/<int:user_id>/api_particulier/quotient_familial/configuration", methods=["POST"])
+@access_control.custom_login_required(redirect_to=".home")
+def configure_api_quotient_familial_response(user_id: int) -> response_utils.BackofficeResponse:
+    user = _get_user_if_exists(str(user_id))
+    if user is None:
+        mark_transaction_as_invalid()
+        flash(f"L'utilisateur {user_id} n'a pas été trouvé", "warning")
+        return redirect(url_for("backoffice.dev.get_generated_user"), code=404)
+
+    form = forms.QuotientFamilialConfigurationForm()
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.safe_redirect_back(request, url_for("backoffice.dev.get_generated_user"))
+
+    create_qf_fraud_check_mock(user, form)
+
+    flash("La réponse de l'API Particulier a été configurée pour cet utilisateur", "success")
+
+    token = token_utils.Token.get_token(token_utils.TokenType.SIGNUP_EMAIL_CONFIRMATION, user.id)
+    params: dict[str, typing.Any] = {}
+    if token:
+        params["accessToken"] = token.encoded_token
+        params["expirationTimestamp"] = str(get_token_expiration_timestamp(token))
+        params["email"] = user.email
+    return redirect(url_for("backoffice.dev.get_generated_user", userId=user.id, **params), code=303)
+
+
+@dev_blueprint.route("/<int:user_id>/api_particulier/disabled_adult_allowance/configuration", methods=["POST"])
+@access_control.custom_login_required(redirect_to=".home")
+def configure_api_disabled_adult_allowance_response(user_id: int) -> response_utils.BackofficeResponse:
+    user = _get_user_if_exists(str(user_id))
+    if user is None:
+        mark_transaction_as_invalid()
+        flash(f"L'utilisateur {user_id} n'a pas été trouvé", "warning")
+        return redirect(url_for("backoffice.dev.get_generated_user"), code=404)
+
+    form = forms.DisabledAdultAllowanceConfigurationForm()
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.safe_redirect_back(request, url_for("backoffice.dev.get_generated_user"))
+
+    create_disabled_adult_allowance_fraud_check_mock(user, form)
+
+    flash("La réponse de l'API Particulier a été configurée pour cet utilisateur", "success")
+
+    token = token_utils.Token.get_token(token_utils.TokenType.SIGNUP_EMAIL_CONFIRMATION, user.id)
+    params: dict[str, typing.Any] = {}
+    if token:
+        params["accessToken"] = token.encoded_token
+        params["expirationTimestamp"] = str(get_token_expiration_timestamp(token))
+        params["email"] = user.email
+    return redirect(url_for("backoffice.dev.get_generated_user", userId=user.id, **params), code=303)
+
+
+@dev_blueprint.route(
+    "/<int:user_id>/api_particulier/disabled_child_education_allowance/configuration", methods=["POST"]
+)
+@access_control.custom_login_required(redirect_to=".home")
+def configure_api_disabled_child_education_allowance_response(user_id: int) -> response_utils.BackofficeResponse:
+    user = _get_user_if_exists(str(user_id))
+    if user is None:
+        mark_transaction_as_invalid()
+        flash(f"L'utilisateur {user_id} n'a pas été trouvé", "warning")
+        return redirect(url_for("backoffice.dev.get_generated_user"), code=404)
+
+    form = forms.DisabledChildEducationAllowanceConfigurationForm()
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return request_utils.safe_redirect_back(request, url_for("backoffice.dev.get_generated_user"))
+
+    create_disabled_child_education_allowance_fraud_check_mock(user, form)
+
+    flash("La réponse de l'API Particulier a été configurée pour cet utilisateur", "success")
+
+    token = token_utils.Token.get_token(token_utils.TokenType.SIGNUP_EMAIL_CONFIRMATION, user.id)
+    params: dict[str, typing.Any] = {}
+    if token:
+        params["accessToken"] = token.encoded_token
+        params["expirationTimestamp"] = str(get_token_expiration_timestamp(token))
+        params["email"] = user.email
+    return redirect(url_for("backoffice.dev.get_generated_user", userId=user.id, **params), code=303)
+
+
+@dev_blueprint.route("/offer-generator", methods=["POST"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def generate_offer() -> response_utils.BackofficeResponse:
+    if not settings.ENABLE_TEST_OFFER_GENERATION:
+        raise NotFound()
+
+    form = forms.OfferGeneratorForm()
+    if not form.validate():
+        mark_transaction_as_invalid()
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return redirect(url_for("backoffice.dev.get_generate_offer_form"), code=303)
+
+    offer = offers_generator.create_offer(
+        offer_name=form.name.data,
+        price=form.price.data,
+        subcategory_id=form.subcategory_id.data,
+        is_duo=form.is_duo.data,
+        timezone=form.timezone.data,
+    )
+
+    flash("Offre créée avec succès", "success")
+    assert offer is not None  # helps mypy
+    return redirect(url_for("backoffice.dev.get_generated_offer", offer_id=offer.id), code=303)
+
+
+@dev_blueprint.route("/offer-generator", methods=["GET"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def get_generate_offer_form() -> response_utils.BackofficeResponse:
+    form = forms.OfferGeneratorForm()
+    return render_template(
+        "dev/offers_generator.html",
+        form=form,
+        dst=url_for("backoffice.dev.generate_offer"),
+    )
+
+
+@dev_blueprint.route("/offer-generator/<int:offer_id>", methods=["GET"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def get_generated_offer(offer_id: int) -> response_utils.BackofficeResponse:
+    form = forms.OfferGeneratorForm()
+    offer = db.session.scalars(sa.select(offers_models.Offer).where(offers_models.Offer.id == offer_id)).one_or_none()
+
+    if offer is None:
+        flash("Offre non trouvée", "warning")
+        return redirect(url_for("backoffice.dev.get_generate_offer_form"), code=404)
+
+    return render_template(
+        "dev/offers_generator.html",
+        link_to_app=urls.offer_app_link(offer.id),
+        link_to_local_app=f"{settings.LOCAL_WEBAPP_URL}/offre/{offer_id}" if settings.LOCAL_WEBAPP_URL else None,
+        offer=offer,
+        form=form,
+        dst=url_for("backoffice.dev.generate_offer"),
+        deactivate_offer_form=empty_forms.EmptyForm(),
+        deactivate_offer_dst=url_for("backoffice.dev.deactivate_offer", offer_id=offer_id),
+    )
+
+
+@dev_blueprint.route("/offer-generator/<int:offer_id>/deactivate", methods=["POST"])
+@access_control.custom_login_required(redirect_to="backoffice.home")
+def deactivate_offer(offer_id: int) -> response_utils.BackofficeResponse:
+    if not settings.ENABLE_TEST_OFFER_GENERATION:
+        raise NotFound()
+
+    offer = db.session.scalars(sa.select(offers_models.Offer).where(offers_models.Offer.id == offer_id)).one_or_none()
+
+    if offer is None:
+        raise NotFound()
+
+    offers_generator.deactivate_offer(offer)
+
+    flash("Offre désactivée avec succès", "success")
+    return redirect(url_for("backoffice.dev.get_generated_offer", offer_id=offer.id), code=303)

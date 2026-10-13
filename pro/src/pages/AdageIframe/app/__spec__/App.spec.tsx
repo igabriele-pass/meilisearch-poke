@@ -1,0 +1,324 @@
+import {
+  screen,
+  waitFor,
+  waitForElementToBeRemoved,
+} from '@testing-library/react'
+import { useId } from 'react'
+import { Configure } from 'react-instantsearch'
+import { axe } from 'vitest-axe'
+
+import { AdageFrontRoles } from '@/apiClient/adage'
+import { apiAdage } from '@/apiClient/api'
+import { defaultAdageUser } from '@/commons/utils/factories/adageFactories'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+import { SnackBarContainer } from '@/components/SnackBarContainer/SnackBarContainer'
+
+import { App } from '../App'
+import { DEFAULT_GEO_RADIUS } from '../components/OffersInstantSearch/OffersInstantSearch'
+
+vi.mock(
+  '../components/OffersInstantSearch/OffersSearch/Autocomplete/Autocomplete',
+  () => {
+    return {
+      Autocomplete: ({ initialQuery }: { initialQuery: string }) => {
+        const autocompleteId = useId()
+        return (
+          <div>
+            <label htmlFor={`autocomplete-${autocompleteId}`}>
+              Autocomplete
+            </label>
+            <input
+              id={`autocomplete-${autocompleteId}`}
+              value={initialQuery}
+              onChange={() => vi.fn()}
+              aria-label="Autocomplete search"
+            />
+            <button onClick={() => vi.fn()}>Rechercher</button>
+          </div>
+        )
+      },
+    }
+  }
+)
+
+window.scrollTo = vi.fn().mockImplementation(() => {})
+
+vi.mock('react-instantsearch', async () => {
+  return {
+    ...(await vi.importActual('react-instantsearch')),
+    Configure: vi.fn(() => <div />),
+    InstantSearch: vi.fn(({ children }) => <div>{children}</div>),
+    useStats: () => ({ nbHits: 1 }),
+    useSearchBox: () => ({ refine: vi.fn() }),
+    useInfiniteHits: () => ({
+      currentPageHits: [],
+    }),
+    useInstantSearch: () => ({ scopedResults: [] }),
+    Index: vi.fn(({ children }) => children),
+    usePagination: () => ({ currentRefinement: 0, nbPages: 1 }),
+  }
+})
+
+vi.mock('@/commons/utils/config', async () => {
+  return {
+    ...(await vi.importActual('@/commons/utils/config')),
+    ALGOLIA_API_KEY: 'adage-api-key',
+    ALGOLIA_APP_ID: '1',
+    ALGOLIA_COLLECTIVE_OFFERS_INDEX: 'adage-collective-offers',
+    LOGS_DATA: true,
+  }
+})
+
+const venue = {
+  id: 1436,
+  name: 'Librairie de Paris',
+  publicName: "Lib de Par's",
+  relative: [],
+  departementCode: '75',
+}
+
+vi.mock('@/apiClient/api', () => ({
+  apiAdage: {
+    getVenueById: vi.fn(() => {
+      return venue
+    }),
+    authenticate: vi.fn(),
+    getVenueBySiret: vi.fn(() => {
+      return venue
+    }),
+    logSearchButtonClick: vi.fn(),
+    logCatalogView: vi.fn(),
+    logTrackingFilter: vi.fn(),
+    getCollectiveOffer: vi.fn(),
+    logHasSeenAllPlaylist: vi.fn(),
+    logOfferListViewSwitch: vi.fn(),
+  },
+  api: {
+    listEducationalDomains: vi.fn(() => [
+      { id: 1, name: 'Danse' },
+      { id: 2, name: 'Architecture' },
+    ]),
+  },
+}))
+
+vi.mock('@algolia/autocomplete-plugin-query-suggestions', () => {
+  return {
+    ...vi.importActual('@algolia/autocomplete-plugin-query-suggestions'),
+    createQuerySuggestionsPlugin: vi.fn(() => {
+      return {
+        name: 'querySuggestionName',
+        getSources: () => [
+          {
+            sourceId: '',
+            getItems: [],
+          },
+        ],
+      }
+    }),
+  }
+})
+
+const renderApp = (options?: RenderWithProvidersOptions) => {
+  return renderWithProviders(
+    <>
+      <App />
+      <SnackBarContainer />
+    </>,
+    {
+      initialRouterEntries:
+        options?.initialRouterEntries ?? options?.initialRouterEntries,
+      storeOverrides: options?.storeOverrides,
+    }
+  )
+}
+
+describe('app', () => {
+  describe('when is authenticated', () => {
+    beforeEach(() => {
+      vi.spyOn(apiAdage, 'authenticate').mockResolvedValue({
+        ...defaultAdageUser,
+        role: AdageFrontRoles.REDACTOR,
+        uai: 'uai',
+        departmentCode: '30',
+        institutionName: 'COLLEGE BELLEVUE',
+        institutionCity: 'ALES',
+      })
+    })
+
+    it('should render without accessibility violations', async () => {
+      const { container } = renderApp({
+        initialRouterEntries: ['/recherche?siret=123456789&venue=1436'],
+      })
+
+      await waitForElementToBeRemoved(() => screen.queryAllByTestId('spinner'))
+      expect(await axe(container)).toHaveNoViolations()
+    })
+
+    it('should display venue tag using public name when siret and venue are provided', async () => {
+      const mockLocation = {
+        ...window.location,
+        search: '?siret=123456789&venue=1436',
+      }
+
+      window.location = mockLocation as string & Location
+
+      renderApp({
+        initialRouterEntries: ['/recherche?siret=123456789&venue=1436'],
+      })
+
+      expect(
+        await screen.findByRole('button', { name: /Lieu : Lib de Par's/ })
+      ).toBeInTheDocument()
+    })
+
+    it('should display venue tag when venueId is provided and public name exists', async () => {
+      // When
+      renderApp({
+        initialRouterEntries: ['/recherche?venue=1436'],
+      })
+
+      expect(
+        await screen.findByRole('button', { name: /Lieu : Lib de Par's/ })
+      ).toBeInTheDocument()
+    })
+
+    it('should display venue when venueId is provided in url', async () => {
+      const mockLocation = {
+        ...window.location,
+        search: '?venue=1436',
+      }
+
+      window.location = mockLocation as string & Location
+
+      renderApp({
+        initialRouterEntries: ['/recherche?venue=1436'],
+      })
+
+      expect(
+        await screen.findByRole('button', { name: /Lieu : Lib de Par's/ })
+      ).toBeInTheDocument()
+    })
+
+    it('should add geo location filter when user has latitude and longitude', async () => {
+      vi.spyOn(apiAdage, 'authenticate').mockResolvedValueOnce({
+        ...defaultAdageUser,
+        role: AdageFrontRoles.REDACTOR,
+        uai: 'uai',
+        departmentCode: '30',
+        institutionName: 'COLLEGE BELLEVUE',
+        institutionCity: 'ALES',
+        lat: 48.856614,
+        lon: 2.3522219,
+      })
+      renderApp({
+        initialRouterEntries: ['/recherche'],
+      })
+
+      await screen.findByRole('button', { name: 'Rechercher' })
+
+      expect(Configure).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          aroundLatLng: '48.856614, 2.3522219',
+          aroundRadius: DEFAULT_GEO_RADIUS,
+        }),
+        undefined
+      )
+    })
+
+    it('should display the app for readonly users', async () => {
+      vi.spyOn(apiAdage, 'authenticate').mockResolvedValueOnce({
+        ...defaultAdageUser,
+        role: AdageFrontRoles.READONLY,
+      })
+
+      renderApp({ initialRouterEntries: ['/recherche'] })
+
+      expect(
+        await screen.findByRole('button', { name: 'Rechercher' })
+      ).toBeInTheDocument()
+    })
+
+    it('should show the loader while authentication is pending', () => {
+      vi.spyOn(apiAdage, 'authenticate').mockReturnValueOnce(
+        new Promise(() => {}) as never
+      )
+
+      renderApp()
+
+      expect(screen.getByRole('main')).toBeInTheDocument()
+      expect(screen.queryByRole('heading')).not.toBeInTheDocument()
+    })
+
+    it('should log a catalogue view when a venue is provided', async () => {
+      vi.mocked(apiAdage.logCatalogView).mockClear()
+
+      renderApp({
+        initialRouterEntries: ['/recherche?venue=1436'],
+      })
+
+      await waitFor(() => {
+        expect(apiAdage.logCatalogView).toHaveBeenCalledWith({
+          body: {
+            iframeFrom: '/recherche',
+            source: 'partnersMap',
+          },
+        })
+      })
+    })
+
+    it('should log a homepage catalogue view without venue or siret', async () => {
+      vi.mocked(apiAdage.logCatalogView).mockClear()
+
+      renderApp({ initialRouterEntries: ['/recherche'] })
+
+      await waitFor(() => {
+        expect(apiAdage.logCatalogView).toHaveBeenCalledWith({
+          body: {
+            iframeFrom: '/recherche',
+            source: 'homepage',
+          },
+        })
+      })
+    })
+
+    it('should show an error page for unsupported roles', async () => {
+      vi.spyOn(apiAdage, 'authenticate').mockResolvedValueOnce({
+        ...defaultAdageUser,
+        role: 'unsupported' as AdageFrontRoles,
+      })
+
+      renderApp()
+
+      expect(
+        await screen.findByRole('heading', {
+          name: 'Une erreur s’est produite',
+        })
+      ).toBeInTheDocument()
+    })
+  })
+
+  describe('when is not authenticated', () => {
+    beforeEach(() => {
+      vi.spyOn(apiAdage, 'authenticate').mockRejectedValue(
+        'Authentication failed'
+      )
+    })
+
+    it('should show error page', async () => {
+      // When
+      renderApp()
+
+      // Then
+      const contentTitle = await screen.findByText(
+        'Une erreur s’est produite',
+        { selector: 'h1' }
+      )
+      expect(contentTitle).toBeInTheDocument()
+      expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    })
+  })
+})

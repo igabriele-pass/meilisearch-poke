@@ -1,0 +1,38 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.field-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: var(--size-spacing-s);
+  margin-bottom: var(--size-spacing-xs);
+
+  &-right {
+    @include fonts.body-accent-xs;
+
+    color: var(--color-text-subtle);
+  }
+}
+
+.label {
+  display: block;
+  overflow-wrap: anywhere;
+
+  &-mandatory-symbol {
+    margin-left: var(--size-spacing-s);
+  }
+}
+
+//  DESCRIPTION
+.has-description {
+  .label {
+    margin-bottom: var(--size-spacing-xxs);
+  }
+}
+
+.description {
+  @include fonts.body-accent-xs;
+
+  color: var(--color-text-subtle);
+  overflow-wrap: anywhere;
+}

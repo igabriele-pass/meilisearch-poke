@@ -1,0 +1,172 @@
+services:
+  postgres:
+    platform: linux/amd64
+    image: postgis/postgis:18-3.6-alpine
+    container_name: pc-postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    env_file:
+      - env_file
+    networks:
+      - db_nw
+    ports:
+      - 5434:5432 # This port is used outside docker compose network (E2E tests and developers launching flask api on their local machines)
+    command: postgres -c logging_collector=on -c log_destination=stderr -c log_min_duration_statement=0 -c log_statement=all -c log_duration=on
+
+  postgres-test:
+    platform: linux/amd64
+    image: postgis/postgis:18-3.6-alpine
+    container_name: pc-postgres-pytest
+    volumes:
+      - postgres_data_test:/var/lib/postgresql-test
+    environment:
+      - POSTGRES_DB=pass_culture
+      - POSTGRES_USER=pytest
+      - POSTGRES_PASSWORD=pytest
+    command: postgres -c logging_collector=on -c log_destination=stderr -c log_min_duration_statement=0 -c log_statement=all -c log_duration=on
+    ports:
+      - 5433:5432
+    networks:
+      - db_nw
+
+  flask:
+    build:
+      context: ./api
+      target: api-flask
+      args:
+        - network_mode=${NETWORK_MODE:-default}
+    working_dir: /usr/src/app
+    container_name: pc-api
+    command: ["./entrypoint.sh"]
+    volumes:
+      - pcapi_prometheus_data:/tmp/prometheus
+      - ./api/documentation/static/openapi.json:/usr/src/app/documentation/static/openapi.json
+      - ./api/tests:/usr/src/app/tests
+      - ./api/src/pcapi/alembic/versions:/usr/src/app/src/pcapi/alembic/versions # Alembic migrations
+    develop:
+      watch:
+        - action: sync
+          path: ./api
+          target: /usr/src/app
+          ignore:
+            # Exclude the project virtual environment — it could be for a
+            # different platform in the container
+            - .venv/
+            # Exclude mounted volumes
+            - tests/
+            - documentation/static/openapi.json
+            - src/pcapi/alembic/versions
+    env_file:
+      - env_file
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1 # prevent .pyc sync loop
+      - FLASK_SERVER=${FLASK_SERVER:-1}
+      - GUNICORN_WORKER_TYPE=${GUNICORN_WORKER_TYPE:-gthread}
+    networks:
+      - db_nw
+      - web_nw
+    depends_on:
+      - postgres
+      - redis
+      - postgres-test
+    ports:
+      - 5001:5001
+      - :5002
+      - 5010:5010
+      - 10002:10002 # debugger port
+    stdin_open: true
+    tty: true
+
+  backoffice:
+    build:
+      context: ./api
+      target: api-flask
+    working_dir: /usr/src/app
+    container_name: pc-backoffice
+    command: ["./start-backoffice-when-api-is-ready.sh"]
+    volumes:
+      - ./api/tests:/usr/src/app/tests
+    develop:
+      watch:
+        - action: sync
+          path: ./api
+          target: /usr/src/app
+          ignore:
+            # Exclude the project virtual environment — it could be for a
+            # different platform in the container
+            - .venv/
+            # Exclude mounted volumes
+            - tests/
+    env_file:
+      - env_file
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1 # prevent .pyc sync loop
+    networks:
+      - db_nw
+      - web_nw
+    depends_on:
+      - postgres
+      - redis
+      - postgres-test
+    ports:
+      - 5002:5001
+      - 10004:10003 # debugger port
+    stdin_open: true
+    tty: true
+
+  celery:
+    build:
+      context: ./api
+      target: api-flask
+    working_dir: /usr/src/app
+    container_name: pc-celery-worker
+    command: ["./start-celery-worker.sh"]
+    env_file:
+      - env_file
+    networks:
+      - db_nw
+      - web_nw
+    depends_on:
+      - postgres
+      - redis
+      - postgres-test
+    ports:
+      - 10003:10003 # debugger port
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: pc-redis
+    command: redis-server
+    ports:
+      - 6379:6379
+    volumes:
+      - redis_data:/data
+    networks:
+      - db_nw
+
+  nginx:
+    build: nginx
+    container_name: pc-nginx
+    ports:
+      - 80:5005
+      - 443:443
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+      - ./certs:/etc/letsencrypt
+      - ./certs-data:/data/letsencrypt
+    networks:
+      - web_nw
+    depends_on:
+      - flask
+
+networks:
+  db_nw:
+    driver: bridge
+  web_nw:
+    driver: bridge
+
+volumes:
+  pcapi_prometheus_data:
+  postgres_data:
+  postgres_data_test:
+  redis_data:

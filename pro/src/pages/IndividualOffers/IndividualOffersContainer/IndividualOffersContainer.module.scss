@@ -1,0 +1,24 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+/* check-unused-css-disable-next-line */
+.offers-table {
+  &-callout {
+    margin-bottom: var(--size-spacing-l);
+  }
+
+  &-title {
+    display: flex;
+    align-items: center;
+    margin-bottom: var(--size-spacing-s);
+
+    &-heading {
+      @include fonts.title2;
+
+      margin-right: var(--size-spacing-l);
+    }
+  }
+}
+
+.select-filter {
+  width: 100%;
+}

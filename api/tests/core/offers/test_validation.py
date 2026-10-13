@@ -1,0 +1,1792 @@
+import datetime
+import pathlib
+import types
+from decimal import Decimal
+from unittest import mock
+from zoneinfo import ZoneInfo
+
+import pytest
+
+import pcapi.core.providers.factories as providers_factories
+from pcapi.core.artist import exceptions as artist_exceptions
+from pcapi.core.artist import models as artist_models
+from pcapi.core.bookings import factories as bookings_factories
+from pcapi.core.categories import subcategories
+from pcapi.core.educational import factories as educational_factories
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.offers import exceptions
+from pcapi.core.offers import factories as offers_factories
+from pcapi.core.offers import validation
+from pcapi.core.offers.models import OfferValidationStatus
+from pcapi.core.offers.models import WithdrawalTypeEnum
+from pcapi.core.providers.repository import get_provider_by_local_class
+from pcapi.models.api_errors import ApiErrors
+from pcapi.routes.serialization import artist_serialize
+from pcapi.utils import date as date_utils
+
+import tests
+
+
+IMAGES_DIR = pathlib.Path(tests.__path__[0]) / "files"
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+class CheckCanEditStockSynchronizedStockTest:
+    def test_allocine_offer(self):
+        provider = providers_factories.AllocineProviderFactory(localClass="AllocineStocks")
+        offer = offers_factories.OfferFactory(lastProvider=provider, idAtProvider="1")
+
+        validation.check_can_edit_synchronized_stock(offer)
+
+    def test_non_allocine_provider_offer(self):
+        offerer = providers_factories.PublicApiProviderFactory()
+        provider_offer = offers_factories.OfferFactory(lastProvider=offerer, idAtProvider="1")
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_can_edit_synchronized_stock(provider_offer)
+
+        assert error.value.errors["global"] == ["Les offres importées ne sont pas modifiables"]
+
+    def test_allowed_provider(self):
+        provider = providers_factories.PublicApiProviderFactory()
+        provider_offer = offers_factories.OfferFactory(lastProvider=provider, idAtProvider="1")
+
+        validation.check_can_edit_synchronized_stock(provider_offer, provider)
+
+    def test_synchronized_offer_stock_quantity(self):
+        provider = providers_factories.PublicApiProviderFactory()
+        provider_offer = offers_factories.OfferFactory(lastProvider=provider, idAtProvider="1")
+
+        validation.check_can_edit_synchronized_stock(provider_offer, None, {"quantity"})
+
+    @pytest.mark.parametrize(
+        "attribute",
+        ["price", "beginning_datetime", "booking_limit_datetime", "price_category", "id_at_provider"],
+    )
+    def test_non_allocine_provider_offer_stock_other_attribute(self, attribute):
+        offerer = providers_factories.PublicApiProviderFactory()
+        provider_offer = offers_factories.OfferFactory(lastProvider=offerer, idAtProvider="1")
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_can_edit_synchronized_stock(provider_offer, None, {attribute})
+
+        assert error.value.errors["global"] == ["Les offres importées ne sont pas modifiables"]
+
+
+class CheckArtistOfferLinksTest:
+    @mock.patch("pcapi.core.offers.validation.artist_api.check_artist_type_is_allowed_for_subcategory")
+    def test_check_subcategory_checker_is_called(self, mocked_check_artist_type):
+        links = [
+            artist_serialize.ArtistOfferLinkBodyModel(
+                artist_id="any-id", artist_type=artist_models.ArtistType.PERFORMER, artist_name="any"
+            ),
+        ]
+
+        validation.check_artist_offer_links(links, subcategories.CONCERT)
+
+        mocked_check_artist_type.assert_called_once_with(artist_models.ArtistType.PERFORMER, subcategories.CONCERT)
+
+    @mock.patch("pcapi.core.offers.validation.artist_api.check_artist_type_is_allowed_for_subcategory")
+    def test_raise_with_expected_error_message_when_subcategory_checker_raises(self, mocked_check_artist_type):
+        links = [
+            artist_serialize.ArtistOfferLinkBodyModel(
+                artist_id="any-id", artist_type=artist_models.ArtistType.PERFORMER, artist_name="any"
+            )
+        ]
+        mocked_check_artist_type.side_effect = artist_exceptions.ArtistException("the artist type is not allowed")
+
+        with pytest.raises(artist_exceptions.ArtistException) as error:
+            validation.check_artist_offer_links(links, subcategories.CONCERT)
+
+        assert error.value.message == "the artist type is not allowed"
+
+
+class CheckCanInputIdAtProviderTest:
+    def test_without_id_at_provider(self):
+        validation.check_can_input_id_at_provider(None, None)
+
+    def test_with_id_at_provider(self):
+        provider = providers_factories.PublicApiProviderFactory()
+        validation.check_can_input_id_at_provider(provider, "an id at provider")
+
+    def test_raise_when_id_at_provider_given_without_a_provider(self):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_can_input_id_at_provider(None, "an id at provider")
+
+        assert error.value.errors["idAtProvider"] == [
+            "Une offre ne peut être créée ou éditée avec un idAtProvider si elle n'a pas de provider"
+        ]
+
+
+class CheckCanInputIdAtProviderForThisVenueTest:
+    def test_without_id_at_provider(self):
+        venue = offerers_factories.VenueFactory()
+        validation.check_can_input_id_at_provider_for_this_venue(venue.id, None)
+
+    def test_with_id_at_provider(self):
+        venue = offerers_factories.VenueFactory()
+        validation.check_can_input_id_at_provider_for_this_venue(venue.id, "an id at provider")
+
+    def test_should_not_raise_when_id_at_provider_is_taken_by_offer(self):
+        provider = providers_factories.PublicApiProviderFactory()
+        offerer = offerers_factories.OffererFactory()
+        providers_factories.OffererProviderFactory(offerer=offerer, provider=provider)
+        venue = offerers_factories.VenueFactory()
+        id_at_provider = "tout_roule"
+
+        offer = offers_factories.OfferFactory(
+            lastProvider=provider,
+            name="Offer linked to a provider",
+            venue=venue,
+            idAtProvider=id_at_provider,
+        )
+
+        validation.check_can_input_id_at_provider_for_this_venue(venue.id, id_at_provider, offer_id=offer.id)
+
+    def test_raise_when_id_at_provider_already_taken_by_other_offer(self):
+        provider = providers_factories.PublicApiProviderFactory()
+        offerer = offerers_factories.OffererFactory()
+        providers_factories.OffererProviderFactory(offerer=offerer, provider=provider)
+        venue = offerers_factories.VenueFactory()
+        id_at_provider = "rolalala"
+
+        # existing offer with `id_at_provider`
+        offers_factories.OfferFactory(
+            lastProvider=provider,
+            name="Offer linked to a provider",
+            venue=venue,
+            idAtProvider=id_at_provider,
+        )
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_can_input_id_at_provider_for_this_venue(venue.id, id_at_provider)
+
+        assert error.value.errors["idAtProvider"] == ["`rolalala` is already taken by another venue offer"]
+
+
+class CheckPricesForStockTest:
+    def test_event_prices(self):
+        offer = offers_factories.EventOfferFactory()
+        validation.check_stock_price(0, offer)
+        validation.check_stock_price(1.5, offer)
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(310.5, offer)
+        assert error.value.errors["price300"] == ["Le prix d’une offre ne peut excéder 300 euros."]
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(-1.5, offer)
+        assert error.value.errors["price"] == ["Le prix doit être positif"]
+
+    def test_event_prices_for_nc(self):
+        venue = offerers_factories.CaledonianVenueFactory()
+        offer = offers_factories.EventOfferFactory.create(name="Offre calédonienne EVENT", venue=venue)
+
+        validation.check_stock_price(0, offer)
+        validation.check_stock_price(20, offer)
+        validation.check_stock_price(200, offer)  # limit
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(200.01, offer)
+        assert error.value.errors["price23865"] == ["Le prix d’une offre ne peut excéder 23865 francs Pacifique."]
+
+    def test_thing_prices(self):
+        offer = offers_factories.ThingOfferFactory()
+        validation.check_stock_price(0, offer)
+        validation.check_stock_price(1.5, offer)
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(310.5, offer)
+        assert error.value.errors["price300"] == ["Le prix d’une offre ne peut excéder 300 euros."]
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(-1.5, offer)
+        assert error.value.errors["price"] == ["Le prix doit être positif"]
+
+    def test_thing_prices_for_nc(self):
+        venue = offerers_factories.CaledonianVenueFactory()
+        offer = offers_factories.ThingOfferFactory.create(name="Offre calédonienne THING", venue=venue)
+
+        validation.check_stock_price(0, offer)
+        validation.check_stock_price(20, offer)
+        validation.check_stock_price(200, offer)  # limit
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(200.01, offer)
+        assert error.value.errors["price23865"] == ["Le prix d’une offre ne peut excéder 23865 francs Pacifique."]
+
+    def test_price_limitation_rule(self):
+        offers_factories.OfferPriceLimitationRuleFactory(
+            subcategoryId=subcategories.ACHAT_INSTRUMENT.id, rate=Decimal("0.5")
+        )
+        offer = offers_factories.ThingStockFactory(
+            price=100,
+            offer__subcategoryId=subcategories.ACHAT_INSTRUMENT.id,
+            offer__lastValidationPrice=Decimal("80.00"),
+        ).offer
+        validation.check_stock_price(90, offer)
+        validation.check_stock_price(65, offer)
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(121, offer)
+        assert error.value.errors["price"] == ["Prix invalide"]
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(39, offer)
+        assert error.value.errors["price"] == ["Prix invalide"]
+
+        assert offer.lastValidationPrice == Decimal(80)
+
+    def test_price_limitation_rule_ok_with_draft_offer(self):
+        offers_factories.OfferPriceLimitationRuleFactory(
+            subcategoryId=subcategories.ACHAT_INSTRUMENT.id, rate=Decimal("0.5")
+        )
+        offer = offers_factories.ThingStockFactory(
+            price=100,
+            offer__subcategoryId=subcategories.ACHAT_INSTRUMENT.id,
+            offer__lastValidationPrice=Decimal("80.00"),
+            offer__validation=OfferValidationStatus.DRAFT,
+        ).offer
+        validation.check_stock_price(90, offer)
+        validation.check_stock_price(130, offer)
+        validation.check_stock_price(15, offer)
+
+        assert offer.lastValidationPrice == Decimal(80)
+
+    def test_price_limitation_rule_with_no_last_validation_price(self):
+        offers_factories.OfferPriceLimitationRuleFactory(
+            subcategoryId=subcategories.ACHAT_INSTRUMENT.id, rate=Decimal("0.5")
+        )
+        offer = offers_factories.ThingOfferFactory(
+            subcategoryId=subcategories.ACHAT_INSTRUMENT.id, lastValidationPrice=None
+        )
+        offers_factories.ThingStockFactory(price=80, offer=offer)
+        offers_factories.ThingStockFactory(price=100, offer=offer)
+
+        validation.check_stock_price(119, offer)
+        validation.check_stock_price(41, offer)
+
+        assert offer.lastValidationPrice == Decimal(80)
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(121, offer)
+        assert error.value.errors["price"] == ["Prix invalide"]
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_price(39, offer)
+        assert error.value.errors["price"] == ["Prix invalide"]
+
+    def test_check_stocks_price_should_return_indexed_price_categories_error_key(self):
+        offer = offers_factories.EventOfferFactory(isActive=False, validation=OfferValidationStatus.DRAFT)
+        offers_factories.PriceCategoryFactory(offer=offer, price=20)
+        too_high_price_category = offers_factories.PriceCategoryFactory(offer=offer, price=310)
+
+        stock = types.SimpleNamespace(price_category_id=too_high_price_category.id)
+        expected_index = next(
+            index for index, pc in enumerate(offer.priceCategories) if pc.id == too_high_price_category.id
+        )
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stocks_price([stock], offer)
+
+        assert f"priceCategories.{expected_index}.price" in error.value.errors
+        assert error.value.errors[f"priceCategories.{expected_index}.price"] == [
+            "Le prix d’une offre ne peut excéder 300 euros."
+        ]
+
+
+class CheckRequiredDatesForStockTest:
+    def test_thing_offer_must_not_have_beginning(self):
+        offer = offers_factories.ThingOfferFactory()
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_required_dates_for_stock(
+                offer,
+                beginning=date_utils.get_naive_utc_now(),
+                booking_limit_datetime=None,
+            )
+
+        assert error.value.errors["global"] == [
+            "Impossible de mettre une date de début si l'offre ne porte pas sur un évènement"
+        ]
+
+    def test_thing_offer_ok_with_booking_limit_datetime(self):
+        offer = offers_factories.ThingOfferFactory()
+
+        validation.check_required_dates_for_stock(
+            offer,
+            beginning=None,
+            booking_limit_datetime=date_utils.get_naive_utc_now(),
+        )
+
+    def test_thing_offer_ok_without_booking_limit_datetime(self):
+        offer = offers_factories.ThingOfferFactory()
+
+        validation.check_required_dates_for_stock(
+            offer,
+            beginning=None,
+            booking_limit_datetime=None,
+        )
+
+    def test_event_offer_must_have_beginning(self):
+        offer = offers_factories.EventOfferFactory()
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_required_dates_for_stock(
+                offer,
+                beginning=None,
+                booking_limit_datetime=date_utils.get_naive_utc_now(),
+            )
+        assert error.value.errors["beginningDatetime"] == ["Ce paramètre est obligatoire"]
+
+    def test_event_offer_must_have_booking_limit_datetime(self):
+        offer = offers_factories.EventOfferFactory()
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_required_dates_for_stock(
+                offer,
+                beginning=date_utils.get_naive_utc_now(),
+                booking_limit_datetime=None,
+            )
+        assert error.value.errors["bookingLimitDatetime"] == ["Ce paramètre est obligatoire"]
+
+    def test_event_offer_ok_with_beginning_and_booking_limit_datetime(self):
+        offer = offers_factories.EventOfferFactory()
+
+        validation.check_required_dates_for_stock(
+            offer,
+            beginning=date_utils.get_naive_utc_now(),
+            booking_limit_datetime=date_utils.get_naive_utc_now(),
+        )
+
+
+class CheckStockCanBeCreatedForOfferTest:
+    def test_offer_from_provider(self, app):
+        provider = providers_factories.AllocineProviderFactory()
+        offer = offers_factories.OfferFactory(lastProvider=provider, idAtProvider="1")
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_provider_can_create_stock(offer)
+
+        assert error.value.errors["global"] == ["Les offres importées ne sont pas modifiables"]
+
+    def test_allowed_provider(self, app):
+        provider = providers_factories.PublicApiProviderFactory()
+        offer = offers_factories.OfferFactory(lastProvider=provider, idAtProvider="1")
+
+        validation.check_provider_can_create_stock(offer, provider)
+
+
+class CheckStockIsDeletableTest:
+    @pytest.mark.parametrize("validation_status", [OfferValidationStatus.PENDING, OfferValidationStatus.REJECTED])
+    def test_non_editable_offer(self, validation_status):
+        offer = offers_factories.OfferFactory(validation=validation_status)
+        stock = offers_factories.StockFactory(offer=offer)
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_stock_is_deletable(stock)
+
+        assert error.value.errors["global"] == [
+            "Les offres refusées ou en attente de validation ne sont pas modifiables"
+        ]
+
+    def test_recently_begun_event_stock(self):
+        recently = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        stock = offers_factories.EventStockFactory(beginningDatetime=recently)
+
+        validation.check_stock_is_deletable(stock)
+
+    def test_long_begun_event_stock(self):
+        too_long_ago = date_utils.get_naive_utc_now() - datetime.timedelta(days=3)
+        stock = offers_factories.EventStockFactory(beginningDatetime=too_long_ago)
+        bookings_factories.BookingFactory(stock=stock)
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_stock_is_deletable(stock)
+
+        assert error.value.errors["global"] == [
+            "L'évènement s'est terminé il y a plus de deux jours, la suppression est impossible."
+        ]
+
+
+class CheckStockIsUpdatableTest:
+    def test_approved_offer(self):
+        offer = offers_factories.OfferFactory()
+        stock = offers_factories.StockFactory(offer=offer)
+
+        validation.check_stock_is_updatable(stock)
+
+    def test_allocine_offer(self):
+        provider = providers_factories.AllocineProviderFactory(localClass="AllocineStocks")
+        offer = offers_factories.OfferFactory(lastProvider=provider, idAtProvider="1")
+        stock = offers_factories.StockFactory(offer=offer)
+
+        validation.check_stock_is_updatable(stock)
+
+    def test_cinema_provider_offer(self):
+        boost_provider = get_provider_by_local_class("BoostStocks")
+        offer = offers_factories.OfferFactory(lastProvider=boost_provider, idAtProvider="2")
+        stock = offers_factories.StockFactory(offer=offer)
+
+        validation.check_stock_is_updatable(stock)
+
+    @pytest.mark.parametrize("validation_status", [OfferValidationStatus.PENDING, OfferValidationStatus.REJECTED])
+    def test_non_editable_offer(self, validation_status):
+        offer = offers_factories.OfferFactory(validation=validation_status)
+        stock = offers_factories.StockFactory(offer=offer)
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_stock_is_updatable(stock)
+
+        assert error.value.errors["global"] == [
+            "Les offres refusées ou en attente de validation ne sont pas modifiables"
+        ]
+
+    def test_offer_from_non_allocine_provider(self):
+        provider = providers_factories.PublicApiProviderFactory()
+        offer = offers_factories.OfferFactory(lastProvider=provider, idAtProvider="1")
+        stock = offers_factories.StockFactory(offer=offer)
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_stock_is_updatable(stock)
+
+        assert error.value.errors["global"] == ["Les offres importées ne sont pas modifiables"]
+
+    def test_past_event_stock(self):
+        recently = date_utils.get_naive_utc_now() - datetime.timedelta(minutes=1)
+        stock = offers_factories.EventStockFactory(beginningDatetime=recently)
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_stock_is_updatable(stock)
+
+        assert error.value.errors["global"] == ["Les évènements passés ne sont pas modifiables"]
+
+    def test_past_event_draft_stock(self):
+        recently = date_utils.get_naive_utc_now() - datetime.timedelta(minutes=1)
+        stock = offers_factories.EventStockFactory(
+            beginningDatetime=recently, offer__validation=OfferValidationStatus.DRAFT
+        )
+        validation.check_stock_is_updatable(stock)
+
+
+class CheckPriceCategoryIsUpdatableTest:
+    def test_approved_offer(self):
+        price_category = offers_factories.PriceCategoryFactory()
+
+        validation.check_price_category_is_updatable(price_category)
+
+    @pytest.mark.parametrize("validation_status", [OfferValidationStatus.PENDING, OfferValidationStatus.REJECTED])
+    def test_non_editable_offer(self, validation_status):
+        offer = offers_factories.EventOfferFactory(validation=validation_status)
+        price_category = offers_factories.PriceCategoryFactory(offer=offer)
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_price_category_is_updatable(price_category)
+
+        assert error.value.errors["global"] == [
+            "Les offres refusées ou en attente de validation ne sont pas modifiables"
+        ]
+
+
+class CheckImageTest:
+    def test_ok(self):
+        image_as_bytes = (IMAGES_DIR / "mouette_full_size.jpg").read_bytes()
+        validation.check_image(
+            image_as_bytes,
+            accepted_types=("jpeg", "jpg"),
+            min_width=400,
+            min_height=400,
+        )
+
+    def test_ok_converted_mpo(self):
+        # This image is a MPO image file converted to JPEG
+        image_as_bytes = (IMAGES_DIR / "converted-mpo.jpg").read_bytes()
+        validation.check_image(
+            image_as_bytes,
+            accepted_types=("jpeg", "jpg", "mpo"),
+            min_width=400,
+            min_height=400,
+        )
+
+    def test_ok_converted_webp(self):
+        image_as_bytes = (IMAGES_DIR / "wrbp-type-image.webp").read_bytes()
+        validation.check_image(
+            image_as_bytes,
+            accepted_types=("jpeg", "jpg", "webp"),
+            min_width=400,
+            min_height=400,
+        )
+
+    def test_image_too_small_with_width_and_height_constraint(self):
+        image_as_bytes = (IMAGES_DIR / "mouette_portrait.jpg").read_bytes()
+        with pytest.raises(exceptions.ImageTooSmall) as error:
+            validation.check_image(
+                image_as_bytes,
+                accepted_types=("jpeg", "jpg"),
+                min_width=400,
+                min_height=400,
+            )
+        assert str(error.value) == "Utilisez une image plus grande (supérieure à 400px par 400px)"
+
+    def test_image_too_small_with_width_constraint(self):
+        image_as_bytes = (IMAGES_DIR / "mouette_portrait.jpg").read_bytes()
+        with pytest.raises(exceptions.ImageTooSmall) as error:
+            validation.check_image(
+                image_as_bytes,
+                accepted_types=("jpeg", "jpg"),
+                min_width=400,
+                min_height=None,
+            )
+        assert str(error.value) == "Utilisez une image plus grande (supérieure à 400px de large)"
+
+    def test_image_too_small_with_height_constraint(self):
+        image_as_bytes = (IMAGES_DIR / "mouette_portrait.jpg").read_bytes()
+        with pytest.raises(exceptions.ImageTooSmall) as error:
+            validation.check_image(
+                image_as_bytes,
+                accepted_types=("jpeg", "jpg"),
+                min_width=None,
+                min_height=1000,
+            )
+        assert str(error.value) == "Utilisez une image plus grande (supérieure à 1000px de haut)"
+
+    def test_image_too_small_with_no_min_constraint_should_not_raise(self):
+        image_as_bytes = (IMAGES_DIR / "mouette_portrait.jpg").read_bytes()
+        validation.check_image(
+            image_as_bytes,
+            accepted_types=("jpeg", "jpg"),
+            min_width=None,
+            min_height=None,
+        )
+
+    def test_fake_jpeg(self):
+        image_as_bytes = (IMAGES_DIR / "mouette_fake_jpg.jpg").read_bytes()
+        with pytest.raises(exceptions.UnidentifiedImage):
+            validation.check_image(
+                image_as_bytes,
+                accepted_types=("jpeg", "jpg"),
+                min_width=1,
+                min_height=1,
+            )
+
+    def test_wrong_format(self):
+        image_as_bytes = (IMAGES_DIR / "mouette_full_size.jpg").read_bytes()
+        with pytest.raises(exceptions.UnacceptedFileType):
+            validation.check_image(
+                image_as_bytes,
+                accepted_types=("png",),
+                min_width=1,
+                min_height=1,
+            )
+
+
+class CheckValidationStatusTest:
+    @pytest.mark.parametrize(
+        "validation_status",
+        [OfferValidationStatus.APPROVED, OfferValidationStatus.DRAFT],
+    )
+    def test_editable_offer(self, validation_status):
+        offer = offers_factories.OfferFactory(validation=validation_status)
+
+        validation.check_validation_status(offer)
+
+    @pytest.mark.parametrize("validation_status", [OfferValidationStatus.PENDING, OfferValidationStatus.REJECTED])
+    def test_non_editable_offer(self, validation_status):
+        offer = offers_factories.OfferFactory(validation=validation_status)
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_validation_status(offer)
+
+        assert error.value.errors["global"] == [
+            "Les offres refusées ou en attente de validation ne sont pas modifiables"
+        ]
+
+
+class CheckOfferWithdrawalTest:
+    def test_offer_can_have_no_withdrawal_informations(self):
+        assert not validation.check_offer_withdrawal(
+            withdrawal_type=None, withdrawal_delay=None, subcategory_id=None, booking_contact=None, provider=None
+        )
+
+    def test_withdrawable_event_offer_can_have_no_ticket_to_withdraw(self):
+        assert not validation.check_offer_withdrawal(
+            withdrawal_type=WithdrawalTypeEnum.NO_TICKET,
+            withdrawal_delay=None,
+            subcategory_id=subcategories.CONCERT.id,
+            booking_contact="booking@conta.ct",
+            provider=None,
+        )
+
+    def test_withdrawable_event_offer_with_no_ticket_to_withdraw_cant_have_delay(self):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_offer_withdrawal(
+                withdrawal_type=WithdrawalTypeEnum.NO_TICKET,
+                withdrawal_delay=60 * 30,
+                subcategory_id=subcategories.CONCERT.id,
+                booking_contact="booking@conta.ct",
+                provider=None,
+            )
+
+        assert error.value.errors["offer"] == [
+            "Il ne peut pas y avoir de délai de retrait lorsqu'il s'agit d'un évènement sans ticket"
+        ]
+
+    def test_non_withdrawable_event_offer_can_have_withdrawal(self):
+        provider = providers_factories.ProviderFactory(
+            bookingExternalUrl="https://toto.fr/book", cancelExternalUrl="https://toto.fr/cancel"
+        )
+        assert not validation.check_offer_withdrawal(
+            withdrawal_type=WithdrawalTypeEnum.IN_APP,
+            withdrawal_delay=None,
+            subcategory_id=subcategories.FESTIVAL_MUSIQUE.id,
+            booking_contact="toto@mail.fr",
+            provider=provider,
+        )
+
+    @pytest.mark.parametrize(
+        "withdrawal_type",
+        [
+            WithdrawalTypeEnum.BY_EMAIL,
+            WithdrawalTypeEnum.ON_SITE,
+        ],
+    )
+    def test_withdrawable_event_offer_with_withdrawal_with_a_delay(self, withdrawal_type):
+        assert not validation.check_offer_withdrawal(
+            withdrawal_type=withdrawal_type,
+            withdrawal_delay=60 * 30,
+            subcategory_id=subcategories.CONCERT.id,
+            booking_contact="booking@conta.ct",
+            provider=None,
+        )
+
+    @pytest.mark.parametrize(
+        "withdrawal_type",
+        [
+            WithdrawalTypeEnum.BY_EMAIL,
+            WithdrawalTypeEnum.ON_SITE,
+        ],
+    )
+    def test_withdrawable_event_offer_with_ticket_must_have_delay(self, withdrawal_type):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_offer_withdrawal(
+                withdrawal_type=withdrawal_type,
+                withdrawal_delay=None,
+                subcategory_id=subcategories.CONCERT.id,
+                booking_contact="booking@conta.ct",
+                provider=None,
+            )
+
+        assert error.value.errors["offer"] == ["Un évènement avec ticket doit avoir un délai de renseigné"]
+
+    @pytest.mark.parametrize(
+        "subcategory_id",
+        subcategories.WITHDRAWABLE_SUBCATEGORIES,
+    )
+    def test_withdrawable_event_offer_must_have_withdrawal_type(self, subcategory_id):
+        assert not validation.check_offer_withdrawal(
+            withdrawal_type=WithdrawalTypeEnum.NO_TICKET,
+            withdrawal_delay=None,
+            subcategory_id=subcategory_id,
+            booking_contact="booking@conta.ct",
+            provider=None,
+        )
+
+    def test_withdrawable_event_offer_must_have_withdrawal(self):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_offer_withdrawal(
+                withdrawal_type=None,
+                withdrawal_delay=None,
+                subcategory_id=subcategories.FESTIVAL_MUSIQUE.id,
+                booking_contact="booking@conta.ct",
+                provider=None,
+            )
+
+        assert error.value.errors["offer"] == [
+            "Une offre qui a un ticket retirable doit avoir un type de retrait renseigné",
+        ]
+
+    def test_withdrawable_event_offer_must_have_booking_contact(self):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_offer_withdrawal(
+                withdrawal_type=WithdrawalTypeEnum.NO_TICKET,
+                withdrawal_delay=None,
+                subcategory_id=subcategories.FESTIVAL_MUSIQUE.id,
+                booking_contact=None,
+                provider=None,
+            )
+
+        assert error.value.errors["offer"] == [
+            "Une offre qui a un ticket retirable doit avoir l'email du contact de réservation",
+        ]
+
+    def test_withdrawable_event_offer_with_ticketing_service_at_provider_level_can_be_in_app(self):
+        provider = providers_factories.PublicApiProviderFactory(name="Technical provider")
+
+        assert not validation.check_offer_withdrawal(
+            withdrawal_type=WithdrawalTypeEnum.IN_APP,
+            withdrawal_delay=None,
+            subcategory_id=subcategories.FESTIVAL_MUSIQUE.id,
+            booking_contact="booking@conta.ct",
+            provider=provider,
+        )
+
+    def test_withdrawable_event_offer_with_ticketing_service_at_venue_level_can_be_in_app(self):
+        provider = providers_factories.ProviderFactory(name="Technical provider")
+        venue_provider = providers_factories.VenueProviderFactory(provider=provider)
+        providers_factories.VenueProviderExternalUrlsFactory(venueProvider=venue_provider)
+
+        validation.check_offer_withdrawal(
+            withdrawal_type=WithdrawalTypeEnum.IN_APP,
+            withdrawal_delay=None,
+            subcategory_id=subcategories.FESTIVAL_MUSIQUE.id,
+            booking_contact="booking@conta.ct",
+            provider=provider,
+            venue_provider=venue_provider,
+        )
+
+    def test_withdrawable_event_offer_without_provider_cannot_be_in_app(self):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_offer_withdrawal(
+                withdrawal_type=WithdrawalTypeEnum.IN_APP,
+                withdrawal_delay=None,
+                subcategory_id=subcategories.FESTIVAL_MUSIQUE.id,
+                booking_contact="booking@conta.ct",
+                provider=None,
+            )
+        assert error.value.errors["offer"] == [
+            "Vous devez supporter l'interface de billeterie pour créer des offres avec billet",
+        ]
+
+    def test_withdrawable_event_offer_with_provider_without_a_ticketing_service_implementation_cannot_be_in_app(self):
+        # A provider without bookingExternalUrl or cancelExternalUrl
+        provider = providers_factories.ProviderFactory(name="Technical provider", localClass=None)
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_offer_withdrawal(
+                withdrawal_type=WithdrawalTypeEnum.IN_APP,
+                withdrawal_delay=None,
+                subcategory_id=subcategories.FESTIVAL_MUSIQUE.id,
+                booking_contact="booking@conta.ct",
+                provider=provider,
+            )
+
+        assert error.value.errors["offer"] == [
+            "Vous devez supporter l'interface de billeterie pour créer des offres avec billet",
+        ]
+
+
+class CheckOfferExtraDataTest:
+    def test_invalid_ean_extra_data(self):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_offer_extra_data(
+                subcategories.JEU_EN_LIGNE.id, {}, offerers_factories.VenueFactory(), False, ean=12345678
+            )
+        assert error.value.errors["ean"] == ["L'EAN doit être une chaîne de caractères"]
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_offer_extra_data(
+                subcategories.JEU_EN_LIGNE.id, {}, offerers_factories.VenueFactory(), False, ean="invalid ean"
+            )
+        assert error.value.errors["ean"] == ["L'EAN doit être composé de 13 chiffres"]
+
+    def test_valid_ean_extra_data(self):
+        assert (
+            validation.check_offer_extra_data(
+                subcategories.JEU_EN_LIGNE.id,
+                {},
+                offerers_factories.VenueFactory(),
+                False,
+                ean="1234567891234",
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "extra_data",
+        [
+            {"showType": "100", "showSubType": "101"},
+            {"showType": "-1", "showSubType": "-1"},
+        ],
+    )
+    def test_valid_show_types(self, extra_data):
+        assert (
+            validation.check_offer_extra_data(
+                subcategories.CONCERT.id,
+                extra_data,
+                offerers_factories.VenueFactory(),
+                True,
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "extra_data",
+        [
+            ({"musicType": "501", "musicSubType": "502"}),
+            ({"musicType": "-1", "musicSubType": "-1"}),
+        ],
+    )
+    def test_valid_music_types(self, extra_data):
+        assert (
+            validation.check_offer_extra_data(
+                subcategories.CONCERT.id,
+                extra_data,
+                offerers_factories.VenueFactory(),
+                False,
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "extra_data, expected_error",
+        [
+            ({"showType": 1.5}, "should be an int or a string"),
+            ({"showType": "00200"}, "should be an int or an int string"),
+            ({"showType": "99999"}, "should be in allowed values"),
+        ],
+    )
+    def test_invalid_show_type(self, extra_data, expected_error):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_offer_extra_data(
+                subcategories.JEU_EN_LIGNE.id, extra_data, offerers_factories.VenueFactory(), False
+            )
+
+        assert error.value.errors["showType"] == [expected_error]
+
+    @pytest.mark.parametrize(
+        "extra_data, expected_error",
+        [
+            ({"musicType": [100]}, "should be an int or a string"),
+            ({"musicType": "+530"}, "should be an int or an int string"),
+            ({"musicType": "99999"}, "should be in allowed values"),
+        ],
+    )
+    def test_invalid_music_type(self, extra_data, expected_error):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_offer_extra_data(
+                subcategories.JEU_EN_LIGNE.id, extra_data, offerers_factories.VenueFactory(), False
+            )
+
+        assert error.value.errors["musicType"] == [expected_error]
+
+    @pytest.mark.parametrize(
+        "extra_data",
+        [
+            {"gtl_id": "01000000"},  # present both in the GTL taxonomy and the music mapping
+            {"gtl_id": "01050000"},  # present only in the GTL taxonomy
+            {"gtl_id": "14000000"},  # present only in the music mapping (Country/Folk)
+        ],
+    )
+    def test_valid_gtl_id(self, extra_data):
+        assert (
+            validation.check_offer_extra_data(
+                subcategories.CONCERT.id,
+                extra_data,
+                offerers_factories.VenueFactory(),
+                True,
+            )
+            is None
+        )
+
+    @pytest.mark.parametrize(
+        "extra_data, expected_error",
+        [
+            ({"gtl_id": 1000000}, "should be a string"),
+            ({"gtl_id": "99999999"}, "should be a valid GTL id"),
+        ],
+    )
+    def test_invalid_gtl_id(self, extra_data, expected_error):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_offer_extra_data(
+                subcategories.CONCERT.id, extra_data, offerers_factories.VenueFactory(), True
+            )
+
+        assert error.value.errors["gtl_id"] == [expected_error]
+
+    def test_ean_already_exists(self):
+        offer = offers_factories.OfferFactory(ean="1234567891234")
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_offer_extra_data(
+                subcategories.LIVRE_PAPIER.id, {}, offer.venue, False, ean="1234567891234"
+            )
+
+        assert error.value.errors["ean"] == [
+            "Une offre avec cet EAN existe déjà. Vous pouvez la retrouver dans l'onglet Offres."
+        ]
+
+    def test_allow_creation_with_inactive_ean(self):
+        offer = offers_factories.OfferFactory(ean="1234567891234", isActive=False)
+        assert (
+            validation.check_offer_extra_data(
+                subcategories.LIVRE_PAPIER.id, {}, offer.venue, False, ean="1234567891234"
+            )
+            is None
+        )
+
+
+class CheckBookingLimitDatetimeTest:
+    @pytest.mark.parametrize(
+        "stock_factory, offer_factory",
+        [
+            (
+                educational_factories.CollectiveStockFactory,
+                educational_factories.CollectiveOfferFactory,
+            ),
+            (
+                offers_factories.StockFactory,
+                offers_factories.DigitalOfferFactory,
+            ),
+            (offers_factories.StockFactory, offers_factories.OfferFactory),
+        ],
+    )
+    def test_check_booking_limit_datetime_should_raise_because_booking_limit_is_one_hour_after(
+        self, stock_factory, offer_factory
+    ):
+        venue = offerers_factories.VenueFactory()
+        offer = offer_factory(venueId=venue.id)
+        if stock_factory == educational_factories.CollectiveStockFactory:
+            stock = stock_factory(collectiveOfferId=offer.id)
+        else:
+            stock = stock_factory(offerId=offer.id)
+
+        beginning_date = datetime.datetime(2024, 7, 19, 8)
+        booking_limit_date = beginning_date + datetime.timedelta(hours=1)
+        with pytest.raises(exceptions.BookingLimitDatetimeTooLate):
+            validation.check_booking_limit_datetime(
+                stock, beginning=beginning_date, booking_limit_datetime=booking_limit_date
+            )
+
+    def test_check_booking_limit_datetime_should_raise(self):
+        stock = offers_factories.StockFactory()
+        collective_stock = educational_factories.CollectiveStockFactory()
+
+        beginning_date = datetime.datetime(2024, 7, 19, 8)
+        booking_limit_date = beginning_date + datetime.timedelta(days=1)
+
+        # with stock
+        with pytest.raises(exceptions.BookingLimitDatetimeTooLate):
+            validation.check_booking_limit_datetime(
+                stock, beginning=beginning_date, booking_limit_datetime=booking_limit_date
+            )
+
+        # with collective stock
+        with pytest.raises(exceptions.BookingLimitDatetimeTooLate):
+            validation.check_booking_limit_datetime(
+                collective_stock, beginning=beginning_date, booking_limit_datetime=booking_limit_date
+            )
+
+        with pytest.raises(exceptions.BookingLimitDatetimeTooLate):
+            validation.check_booking_limit_datetime(
+                None, beginning=beginning_date, booking_limit_datetime=booking_limit_date
+            )
+
+    @pytest.mark.parametrize(
+        "stock_factory", [offers_factories.StockFactory, educational_factories.CollectiveStockFactory]
+    )
+    def test_check_booking_limit_datetime_should_not_raise_because_a_date_is_missing(self, stock_factory):
+        stock = stock_factory()
+
+        beginning_date = datetime.datetime(2024, 7, 19, 8)
+        booking_limit_date = beginning_date + datetime.timedelta(days=1)
+
+        validation.check_booking_limit_datetime(stock, beginning=None, booking_limit_datetime=booking_limit_date)
+        validation.check_booking_limit_datetime(stock, beginning=beginning_date, booking_limit_datetime=None)
+
+    @pytest.mark.parametrize(
+        "offer_factory",
+        [offers_factories.OfferFactory, offers_factories.EventOfferFactory, offers_factories.DigitalOfferFactory],
+    )
+    def test_check_booking_limit_datetime_should_not_raise_with_timezone(self, offer_factory):
+        oa = offerers_factories.OfferLocationFactory(address__departmentCode="974")
+        offer = offer_factory(offererAddress=oa)
+        stock = offers_factories.StockFactory(offer=offer)
+
+        beginning_date = datetime.datetime(2024, 7, 19, 8, tzinfo=datetime.UTC)
+        booking_limit_date = beginning_date - datetime.timedelta(hours=1)
+
+        try:
+            validation.check_booking_limit_datetime(
+                stock, beginning=beginning_date, booking_limit_datetime=booking_limit_date
+            )
+        except exceptions.BookingLimitDatetimeTooLate as e:
+            assert False, f"Should not raise exception {e}"
+
+    @pytest.mark.parametrize(
+        "time_zone_expected",
+        [
+            ZoneInfo("Indian/Reunion"),  # "offer.offerer_address.address.timezone",
+            ZoneInfo("America/Guadeloupe"),  #  "offer.venue.offererAddress.address.timezone",
+        ],
+    )
+    def test_check_booking_limit_datetime_priorisation_order(self, time_zone_expected):
+        oa = (
+            offerers_factories.OfferLocationFactory(address__departmentCode="974", address__inseeCode="97410")
+            if time_zone_expected == ZoneInfo("Indian/Reunion")
+            else None
+        )
+        venue = offerers_factories.VenueFactory(
+            offererAddress__address__departmentCode="971",
+            offererAddress__address__inseeCode="97103",
+            offererAddress__address__timezone="America/Guadeloupe",
+        )  # oa guadeloupe venue#france
+        offer = offers_factories.OfferFactory(offererAddress=oa, venue=venue)  # reunion
+        stock = offers_factories.StockFactory(offer=offer)
+        beginning_date = datetime.datetime(2024, 7, 19, 8, tzinfo=datetime.UTC)
+        booking_limit_date = beginning_date - datetime.timedelta(hours=1)
+
+        # It's ok to ignore the tuple unpacking warning here because we are testing the value of beginning
+        # and it should fails if check_booking_limit_datetime returns an empty list
+        beginning, booking_limit_datetime = validation.check_booking_limit_datetime(
+            stock, beginning=beginning_date, booking_limit_datetime=booking_limit_date
+        )
+        assert beginning.tzinfo == time_zone_expected
+        assert booking_limit_datetime.tzinfo == time_zone_expected
+
+
+class CheckOfferIsBookableBeforeStockBookingLimitDatetimeTest:
+    @pytest.mark.parametrize(
+        "offer_publication_datetime,offer_booking_allowed_datetime,stocks_datetime,expected_errors",
+        [
+            (
+                datetime.datetime(2025, 6, 27),
+                None,
+                datetime.datetime(2025, 6, 26),
+                {
+                    "bookingLimitDatetime": [
+                        "the stock will not be published before its `bookingLimitDatetime`. Either change `bookingLimitDatetime` to a later date, or update the offer `publicationDatetime`"
+                    ]
+                },
+            ),
+            (
+                None,
+                datetime.datetime(2025, 6, 27),
+                datetime.datetime(2025, 6, 26),
+                {
+                    "bookingLimitDatetime": [
+                        "the stock will not be bookable before its `bookingLimitDatetime`. Either change `bookingLimitDatetime` to a later date, or update the offer `bookingAllowedDatetime`"
+                    ]
+                },
+            ),
+            (
+                datetime.datetime(2025, 6, 29),
+                datetime.datetime(2025, 6, 27),
+                datetime.datetime(2025, 6, 26),
+                {
+                    "bookingLimitDatetime": [
+                        "the stock will not be published before its `bookingLimitDatetime`. Either change `bookingLimitDatetime` to a later date, or update the offer `publicationDatetime`",
+                        "the stock will not be bookable before its `bookingLimitDatetime`. Either change `bookingLimitDatetime` to a later date, or update the offer `bookingAllowedDatetime`",
+                    ],
+                },
+            ),
+        ],
+    )
+    def test_should_raise(
+        self,
+        offer_publication_datetime,
+        offer_booking_allowed_datetime,
+        stocks_datetime,
+        expected_errors,
+    ):
+        with pytest.raises(exceptions.OfferException) as exc:
+            offer = offers_factories.OfferFactory(
+                publicationDatetime=offer_publication_datetime,
+                bookingAllowedDatetime=offer_booking_allowed_datetime,
+            )
+            validation.check_offer_is_bookable_before_stock_booking_limit_datetime(offer, stocks_datetime)
+
+        assert exc.value.errors == expected_errors
+
+    @pytest.mark.parametrize(
+        "offer_publication_datetime,offer_booking_allowed_datetime,stocks_datetime",
+        [
+            (datetime.datetime(2025, 6, 23), None, datetime.datetime(2025, 6, 26)),
+            (None, datetime.datetime(2025, 6, 24), datetime.datetime(2025, 6, 26)),
+        ],
+    )
+    def test_should_NOT_raise(
+        self,
+        offer_publication_datetime,
+        offer_booking_allowed_datetime,
+        stocks_datetime,
+    ):
+        offer = offers_factories.OfferFactory(
+            publicationDatetime=offer_publication_datetime,
+            bookingAllowedDatetime=offer_booking_allowed_datetime,
+        )
+        validation.check_offer_is_bookable_before_stock_booking_limit_datetime(offer, stocks_datetime)
+
+
+class CheckPublicationDateTest:
+    def test_check_publication_date_should_raise(self):
+        with pytest.raises(exceptions.OfferException):
+            validation.check_publication_date(date_utils.get_naive_utc_now() + datetime.timedelta(days=750))
+
+    def test_check_publication_date_should_raise_not_raise(self):
+        for i in [0, 15, 30, 45]:
+            publication_date = date_utils.get_naive_utc_now().replace(minute=0) + datetime.timedelta(hours=1, minutes=i)
+            assert validation.check_publication_date(publication_date) is None
+
+
+class CheckOfferIsEligibleForHeadlineOffersTest:
+    def test_offer_with_mediation_is_eligible(self):
+        offerer = offerers_factories.OffererFactory()
+        permanent_venue = offerers_factories.VenueFactory(isPermanent=True, managingOfferer=offerer)
+        offer = offers_factories.ThingOfferFactory(venue=permanent_venue)
+        offers_factories.StockFactory(offer=offer)
+        offers_factories.MediationFactory(offer=offer)
+        offer_without_image = offers_factories.OfferFactory(venue=permanent_venue)
+        offers_factories.StockFactory(offer=offer_without_image)
+
+        assert validation.check_offer_is_eligible_to_be_headline(offer) is None
+
+        with pytest.raises(exceptions.OfferWithoutImageCanNotBeHeadline) as exc:
+            validation.check_offer_is_eligible_to_be_headline(offer_without_image)
+            msg = "Offers without images can not be set to the headline"
+            assert exc.value.errors["headlineOffer"] == [msg]
+
+    def test_offer_with_product_mediation_is_eligible(self):
+        permanent_venue = offerers_factories.VenueFactory(isPermanent=True)
+        product = offers_factories.ProductFactory()
+        offers_factories.ProductMediationFactory(product=product)
+        offer = offers_factories.OfferFactory(venue=permanent_venue, product=product)
+        offers_factories.StockFactory(offer=offer)
+
+        assert validation.check_offer_is_eligible_to_be_headline(offer) is None
+
+    def test_check_offer_without_any_mediation_is_not_eligible(self):
+        offerer = offerers_factories.OffererFactory()
+        permanent_venue = offerers_factories.VenueFactory(isPermanent=True, managingOfferer=offerer)
+        offer_without_image = offers_factories.OfferFactory(venue=permanent_venue)
+        offers_factories.StockFactory(offer=offer_without_image)
+
+        with pytest.raises(exceptions.OfferWithoutImageCanNotBeHeadline) as exc:
+            validation.check_offer_is_eligible_to_be_headline(offer_without_image)
+            msg = "Offers without images can not be set to the headline"
+            assert exc.value.errors["headlineOffer"] == [msg]
+
+    def test_offer_with_product_thumb_is_not_eligible(self):
+        permanent_venue = offerers_factories.VenueFactory(isPermanent=True)
+        offer = offers_factories.OfferFactory(
+            venue=permanent_venue, product=offers_factories.ProductFactory(thumbCount=1)
+        )
+        offers_factories.StockFactory(offer=offer)
+
+        with pytest.raises(exceptions.OfferWithoutImageCanNotBeHeadline):
+            validation.check_offer_is_eligible_to_be_headline(offer)
+
+    def test_offer_with_inactive_mediation_is_not_eligible(self):
+        permanent_venue = offerers_factories.VenueFactory(isPermanent=True)
+        offer = offers_factories.OfferFactory(venue=permanent_venue)
+        offers_factories.StockFactory(offer=offer)
+        offers_factories.MediationFactory(offer=offer, isActive=False)
+
+        with pytest.raises(exceptions.OfferWithoutImageCanNotBeHeadline):
+            validation.check_offer_is_eligible_to_be_headline(offer)
+
+
+class CheckOfferNameDoesNotContainEanTest:
+    @pytest.mark.parametrize(
+        "offer_name",
+        [
+            "Mon offre de filou - 3759217254634",
+            "4759217254634",
+            "[3759217254634] J'essaye de mettre mon offre en avant",
+        ],
+    )
+    def test_check_offer_name_does_not_contain_ean_should_raise(self, offer_name):
+        with pytest.raises(exceptions.OfferException):
+            validation.check_offer_name_does_not_contain_ean(offer_name)
+
+
+class CheckOfferCanHaveActivationCodesTest:
+    def test_check_offer_can_have_activation_codes_should_not_raise(self):
+        digital_offer = offers_factories.DigitalOfferFactory()
+        validation.check_offer_can_have_activation_codes(digital_offer)
+
+    def test_check_offer_can_have_activation_codes_should_raise(self):
+        physical_offer = offers_factories.OfferFactory()
+
+        with pytest.raises(ApiErrors) as exc:
+            validation.check_offer_can_have_activation_codes(physical_offer)
+
+        assert exc.value.errors == {
+            "global": ["Impossible de créer des codes d'activation sur une offre qui n'est pas un bien numérique"]
+        }
+
+        digital_event_offer = offers_factories.DigitalOfferFactory(subcategoryId=subcategories.RENCONTRE_EN_LIGNE.id)
+
+        with pytest.raises(ApiErrors) as exc:
+            validation.check_offer_can_have_activation_codes(digital_event_offer)
+
+        assert exc.value.errors == {
+            "global": ["Impossible de créer des codes d'activation sur une offre qui n'est pas un bien numérique"]
+        }
+
+
+class CheckActivationCodesExpirationDatetimeTest:
+    @pytest.mark.parametrize(
+        "activation_codes_expiration_datetime, booking_limit_datetime",
+        [
+            (None, None),
+            (None, datetime.datetime.now()),
+            (datetime.datetime.now() + datetime.timedelta(days=8), datetime.datetime.now()),
+            (datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=8), datetime.datetime.now()),
+            (datetime.datetime.now() + datetime.timedelta(days=8), datetime.datetime.now(datetime.UTC)),
+            (
+                datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=8),
+                datetime.datetime.now(datetime.UTC),
+            ),
+        ],
+    )
+    def test_check_activation_codes_expiration_datetime_should_not_raise(
+        self, activation_codes_expiration_datetime, booking_limit_datetime
+    ):
+        validation.check_activation_codes_expiration_datetime(
+            activation_codes_expiration_datetime, booking_limit_datetime
+        )
+
+    def test_check_activation_codes_expiration_datetime_should_raise_when_expiration_without_booking_limit(self):
+        with pytest.raises(ApiErrors) as exc:
+            validation.check_activation_codes_expiration_datetime(datetime.datetime.now(), None)
+
+        assert exc.value.errors == {
+            "bookingLimitDatetime": [
+                "Une date limite de validité a été renseignée. Dans ce cas, il faut également renseigner une date limite de réservation qui doit être antérieure d'au moins 7 jours.",
+            ],
+        }
+
+    def test_check_activation_codes_expiration_datetime_should_raise_when_expiration_not_7_days_after_booking_limit(
+        self,
+    ):
+        booking_limit_datetime = datetime.datetime.now()
+        activation_codes_expiration_datetime = booking_limit_datetime + datetime.timedelta(days=6)
+
+        with pytest.raises(ApiErrors) as exc:
+            validation.check_activation_codes_expiration_datetime(
+                activation_codes_expiration_datetime, booking_limit_datetime
+            )
+
+        assert exc.value.errors == {
+            "activationCodesExpirationDatetime": [
+                "La date limite de validité des codes d'activation doit être ultérieure d'au moins 7 jours à la date limite de réservation"
+            ]
+        }
+
+
+class CheckAccessibilityComplianceTest:
+    @pytest.mark.parametrize(
+        "missing_field",
+        [
+            "audio_disability_compliant",
+            "mental_disability_compliant",
+            "motor_disability_compliant",
+            "visual_disability_compliant",
+        ],
+    )
+    def test_should_raise_when_any_single_field_is_none(self, missing_field):
+        fields = {
+            "audio_disability_compliant": True,
+            "mental_disability_compliant": True,
+            "motor_disability_compliant": True,
+            "visual_disability_compliant": True,
+        }
+        fields[missing_field] = None
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_accessibility_compliance(**fields)
+
+        assert error.value.errors == {"global": ["L’accessibilité de l’offre doit être définie"]}
+
+
+class CheckIsDuoComplianceTest:
+    @pytest.mark.parametrize("is_duo", [False, None])
+    def test_should_accept_a_falsy_value_on_a_category_that_refuses_duo(self, is_duo):
+        assert not subcategories.ABO_BIBLIOTHEQUE.can_be_duo
+
+        validation.check_is_duo_compliance(is_duo, subcategories.ABO_BIBLIOTHEQUE)
+
+    def test_should_accept_duo_on_a_category_that_allows_it(self):
+        assert subcategories.SEANCE_CINE.can_be_duo
+
+        validation.check_is_duo_compliance(True, subcategories.SEANCE_CINE)
+
+    def test_should_raise_on_a_category_that_refuses_duo(self):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_is_duo_compliance(True, subcategories.ABO_BIBLIOTHEQUE)
+
+        assert error.value.errors == {"enableDoubleBookings": ["the category chosen does not allow double bookings"]}
+
+
+class CheckDurationMinutesTest:
+    @pytest.mark.parametrize("duration_minutes", [None, 0, 1439])
+    @pytest.mark.parametrize("is_from_private_api", [True, False])
+    def test_should_accept_a_duration_under_24_hours(self, duration_minutes, is_from_private_api):
+        validation.check_duration_minutes(duration_minutes, is_from_private_api)
+
+    def test_should_raise_in_french_for_the_private_api(self):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_duration_minutes(1440, True)
+
+        assert list(error.value.errors) == ["durationMinutes"]
+
+    def test_should_raise_in_english_for_the_public_api(self):
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_duration_minutes(1440, False)
+
+        assert error.value.errors == {
+            "eventDuration": [
+                (
+                    "The duration must be under 1440 minutes (24 hours). For events lasting 24 hours or more "
+                    "(e.g., a 3-day festival pass), please leave this field empty."
+                )
+            ]
+        }
+
+
+class CheckUrlIsCoherentWithSubcategoryTest:
+    @pytest.mark.parametrize("url", [None, ""])
+    def test_should_accept_an_offline_only_subcategory_without_url(self, url):
+        assert subcategories.SEANCE_CINE.is_offline_only
+
+        validation.check_url_is_coherent_with_subcategory(subcategories.SEANCE_CINE, url)
+
+    def test_should_raise_when_an_offline_only_subcategory_has_a_url(self):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_url_is_coherent_with_subcategory(
+                subcategories.SEANCE_CINE, "https://cinema.example.com/en-ligne"
+            )
+
+        assert error.value.errors == {
+            "url": ['Une offre de sous-catégorie "Séance de cinéma" ne peut contenir un champ `url`']
+        }
+
+    def test_should_accept_an_online_only_subcategory_with_a_url(self):
+        assert subcategories.LIVESTREAM_MUSIQUE.is_online_only
+
+        validation.check_url_is_coherent_with_subcategory(
+            subcategories.LIVESTREAM_MUSIQUE, "https://concert.example.com/live"
+        )
+
+    @pytest.mark.parametrize("url", [None, ""])
+    def test_should_raise_when_an_online_only_subcategory_has_no_url(self, url):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_url_is_coherent_with_subcategory(subcategories.LIVESTREAM_MUSIQUE, url)
+
+        assert error.value.errors == {
+            "url": ['Une offre de catégorie "Livestream musical" doit contenir un champ `url`']
+        }
+
+    @pytest.mark.parametrize("url", [None, "https://jeu.example.com"])
+    def test_should_accept_both_ways_when_the_subcategory_is_neither(self, url):
+        subcategory = subcategories.JEU_SUPPORT_PHYSIQUE
+        assert not subcategory.is_offline_only and not subcategory.is_online_only
+
+        validation.check_url_is_coherent_with_subcategory(subcategory, url)
+
+
+class CheckUrlAndOffererAddressAreNotBothSetTest:
+    def test_should_accept_a_digital_offer(self):
+        validation.check_url_and_offererAddress_are_not_both_set("https://cinema.example.com/en-ligne", None)
+
+    def test_should_accept_a_physical_offer(self):
+        offerer_address = offerers_factories.OfferLocationFactory()
+
+        validation.check_url_and_offererAddress_are_not_both_set(None, offerer_address)
+
+    def test_should_raise_when_both_are_set(self):
+        offerer_address = offerers_factories.OfferLocationFactory()
+
+        with pytest.raises(ApiErrors) as error:
+            validation.check_url_and_offererAddress_are_not_both_set(
+                "https://cinema.example.com/en-ligne", offerer_address
+            )
+
+        assert error.value.errors == {"offererAddress": ["Une offre numérique ne peut pas avoir d'adresse"]}
+
+    @pytest.mark.parametrize("url", [None, ""])
+    def test_should_raise_when_neither_is_set(self, url):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_url_and_offererAddress_are_not_both_set(url, None)
+
+        assert error.value.errors == {"offererAddress": ["Une offre physique doit avoir une adresse"]}
+
+
+class FormatExtraDataTest:
+    def test_should_keep_only_the_filled_conditional_fields_of_the_subcategory(self):
+        extra_data = {
+            "musicType": "-1",  # applicable and filled
+            "musicSubType": "100",  # applicable and filled
+            "gtl_id": "19000000",  # applicable and filled in deserializer
+            "other": "value",  # not applicable field
+            "performer": "",  # applicable but empty
+        }
+
+        assert validation.format_extra_data(subcategories.FESTIVAL_MUSIQUE.id, extra_data) == {
+            "musicType": "-1",
+            "musicSubType": "100",
+            "gtl_id": "19000000",
+        }
+
+    def test_should_return_none_when_there_is_no_extra_data(self):
+        assert validation.format_extra_data(subcategories.FESTIVAL_MUSIQUE.id, None) is None
+
+
+class CheckFieldsAreEditableTest:
+    def test_should_accept_everything_when_unrestricted(self):
+        validation.check_fields_are_editable({"name", "isDuo"})
+
+    def test_should_reject_what_is_outside_the_editable_fields(self):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_fields_are_editable({"name", "isDuo"}, editable_fields={"name"})
+
+        assert error.value.errors == {"isDuo": ["Vous ne pouvez pas modifier ce champ"]}
+
+    def test_should_reject_what_is_inside_the_not_editable_fields(self):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_fields_are_editable({"name", "isDuo"}, not_editable_fields={"isDuo"})
+
+        assert error.value.errors == {"isDuo": ["Vous ne pouvez pas modifier ce champ"]}
+
+    def test_should_report_every_rejected_field(self):
+        with pytest.raises(ApiErrors) as error:
+            validation.check_fields_are_editable({"name", "isDuo"}, editable_fields=set())
+
+        assert error.value.errors == {
+            "isDuo": ["Vous ne pouvez pas modifier ce champ"],
+            "name": ["Vous ne pouvez pas modifier ce champ"],
+        }
+
+
+class CheckCanUpdateOfferTest:
+    SUBCATEGORY = subcategories.SEANCE_CINE
+
+    def build_offer(self, **overrides):
+        """approved, provider-less, physical offer that passes every check."""
+        defaults = {
+            "subcategoryId": self.SUBCATEGORY.id,
+            "validation": OfferValidationStatus.APPROVED,
+            "ean": "9782070100002",
+            "lastProvider": None,
+            "withdrawalType": None,
+            "withdrawalDelay": None,
+            "name": "Les Quatre Cents Coups",
+            "description": "Antoine Doinel, treize ans, fugue dans les rues de Paris.",
+            "url": None,
+            "audioDisabilityCompliant": True,
+            "mentalDisabilityCompliant": False,
+            "motorDisabilityCompliant": True,
+            "visualDisabilityCompliant": False,
+            "isDuo": False,
+            "idAtProvider": None,
+            "extraData": {"stageDirector": "François Truffaut"},
+            "durationMinutes": 99,
+            "bookingContact": "contact@example.com",
+            "withdrawalDetails": "À retirer à la caisse",
+        }
+        # `overrides` always wins, including when it passes `None`
+        return offers_factories.OfferFactory(**{**defaults, **overrides})
+
+    @pytest.fixture(name="venue_provider")
+    def venue_provider_fixture(self):
+        return providers_factories.VenueProviderFactory()
+
+    def test_should_accept_a_draft_offer(self, venue_provider):
+        offer = self.build_offer(validation=OfferValidationStatus.DRAFT)
+
+        validation.check_can_update_offer(
+            offer, {"name": "Jules et Jim"}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+        )
+
+    @mock.patch("pcapi.core.offers.validation.check_validation_status")
+    def test_should_delegate_the_status_check(self, check_validation_status, venue_provider):
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(offer, {}, mandatory_extra_data_fields=set(), venue_provider=venue_provider)
+
+        check_validation_status.assert_called_once_with(offer)
+
+    def test_should_return_early_when_there_is_no_update(self, venue_provider):
+        offer = self.build_offer(offererAddress=None)
+
+        validation.check_can_update_offer(offer, {}, mandatory_extra_data_fields=set(), venue_provider=venue_provider)
+
+    @pytest.mark.parametrize(
+        "changed_field,expected_key",
+        [
+            ("audioDisabilityCompliant", "audio_disability_compliant"),
+            ("mentalDisabilityCompliant", "mental_disability_compliant"),
+            ("motorDisabilityCompliant", "motor_disability_compliant"),
+            ("visualDisabilityCompliant", "visual_disability_compliant"),
+        ],
+    )
+    @mock.patch("pcapi.core.offers.validation.check_accessibility_compliance")
+    def test_should_check_accessibility_when_any_of_its_four_fields_changes(
+        self, check_accessibility_compliance, changed_field, expected_key, venue_provider
+    ):
+        offer = self.build_offer()
+        new_value = not getattr(offer, changed_field)
+
+        validation.check_can_update_offer(
+            offer, {changed_field: new_value}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+        )
+
+        expected = {
+            "audio_disability_compliant": offer.audioDisabilityCompliant,
+            "mental_disability_compliant": offer.mentalDisabilityCompliant,
+            "motor_disability_compliant": offer.motorDisabilityCompliant,
+            "visual_disability_compliant": offer.visualDisabilityCompliant,
+        }
+        expected[expected_key] = new_value
+        check_accessibility_compliance.assert_called_once_with(**expected)
+
+    @mock.patch("pcapi.core.offers.validation.check_accessibility_compliance")
+    def test_should_not_check_accessibility_when_none_of_its_fields_changes(
+        self, check_accessibility_compliance, venue_provider
+    ):
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(
+            offer,
+            {"description": "Une autre description."},
+            mandatory_extra_data_fields=set(),
+            venue_provider=venue_provider,
+        )
+
+        check_accessibility_compliance.assert_not_called()
+
+    @mock.patch("pcapi.core.offers.validation.format_extra_data")
+    @mock.patch("pcapi.core.offers.validation.check_extra_data")
+    def test_should_check_extra_data_against_the_offer_own_ean(
+        self, check_extra_data, format_extra_data, venue_provider
+    ):
+        offer = self.build_offer()
+        new_extra_data = {"stageDirector": "Jean Renoir"}
+
+        validation.check_can_update_offer(
+            offer,
+            {"extraData": new_extra_data},
+            mandatory_extra_data_fields={"stageDirector"},
+            venue_provider=venue_provider,
+        )
+
+        format_extra_data.assert_called_once_with(self.SUBCATEGORY.id, new_extra_data)
+        check_extra_data.assert_called_once_with(
+            format_extra_data.return_value,
+            offer.venue,
+            {"stageDirector"},
+            offer=offer,
+            ean=offer.ean,
+        )
+
+    @mock.patch("pcapi.core.offers.validation.check_extra_data")
+    def test_should_pass_an_empty_dict_when_the_extra_data_is_cleared(self, check_extra_data, venue_provider):
+        # `format_extra_data` answers `None` on a null input, and the check expects a dict
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(
+            offer, {"extraData": None}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+        )
+
+        assert check_extra_data.call_args.args[0] == {}
+
+    @mock.patch("pcapi.core.offers.validation.check_is_duo_compliance")
+    def test_should_check_duo_compliance_against_the_offer_subcategory(self, check_is_duo_compliance, venue_provider):
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(
+            offer, {"isDuo": True}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+        )
+
+        check_is_duo_compliance.assert_called_once_with(True, self.SUBCATEGORY)
+
+    @mock.patch("pcapi.core.offers.validation.check_can_input_id_at_provider")
+    @mock.patch("pcapi.core.offers.validation.check_can_input_id_at_provider_for_this_venue")
+    def test_should_check_the_id_at_provider_against_the_provider_and_the_venue(
+        self, check_can_input_id_at_provider_for_this_venue, check_can_input_id_at_provider, venue_provider
+    ):
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(
+            offer, {"idAtProvider": "seance-du-soir"}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+        )
+
+        check_can_input_id_at_provider.assert_called_once_with(offer.lastProvider, "seance-du-soir")
+        check_can_input_id_at_provider_for_this_venue.assert_called_once_with(offer.venueId, "seance-du-soir", offer.id)
+
+    @mock.patch("pcapi.core.offers.validation.check_offer_name_does_not_contain_ean")
+    def test_should_check_the_name_does_not_contain_an_ean(self, check_offer_name_does_not_contain_ean, venue_provider):
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(
+            offer, {"name": "Jules et Jim"}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+        )
+
+        check_offer_name_does_not_contain_ean.assert_called_once_with("Jules et Jim")
+
+    @mock.patch("pcapi.core.offers.validation.check_offer_name_does_not_contain_ean")
+    def test_should_refuse_a_null_name(self, check_offer_name_does_not_contain_ean, venue_provider):
+        offer = self.build_offer()
+
+        with pytest.raises(exceptions.OfferException) as error:
+            validation.check_can_update_offer(
+                offer, {"name": None}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+            )
+
+        assert error.value.errors == {"name": ["cannot be null"]}
+        check_offer_name_does_not_contain_ean.assert_not_called()
+
+    @pytest.mark.parametrize("changed_field", ["withdrawalDetails", "bookingContact"])
+    @mock.patch("pcapi.core.offers.validation.check_offer_withdrawal")
+    def test_should_check_withdrawal_against_the_type_and_delay_stored_on_the_offer(
+        self, check_offer_withdrawal, changed_field, venue_provider
+    ):
+        offer = self.build_offer()
+        venue_provider = providers_factories.VenueProviderFactory()
+
+        validation.check_can_update_offer(
+            offer, {changed_field: "nouvelle valeur"}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+        )
+
+        expected_contact = "nouvelle valeur" if changed_field == "bookingContact" else offer.bookingContact
+        check_offer_withdrawal.assert_called_once_with(
+            withdrawal_type=offer.withdrawalType,
+            withdrawal_delay=offer.withdrawalDelay,
+            subcategory_id=self.SUBCATEGORY.id,
+            booking_contact=expected_contact,
+            provider=offer.lastProvider,
+            venue_provider=venue_provider,
+        )
+
+    def test_should_check_extra_data_when_only_the_ean_changes(self, venue_provider):
+        offer = self.build_offer(ean="9782070100002")
+
+        with mock.patch("pcapi.core.offers.validation.check_extra_data") as check_extra_data:
+            validation.check_can_update_offer(
+                offer, {"ean": "9782070100003"}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+            )
+
+        check_extra_data.assert_called_once()
+        assert check_extra_data.call_args.kwargs["ean"] == "9782070100003"
+
+    @mock.patch("pcapi.core.offers.validation.check_offer_duration")
+    def test_should_check_the_resulting_duration(self, check_offer_duration, venue_provider):
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(
+            offer, {"durationMinutes": 1440}, mandatory_extra_data_fields=set(), venue_provider=venue_provider
+        )
+
+        check_offer_duration.assert_called_once_with(1440)
+
+    @mock.patch("pcapi.core.offers.validation.check_url_is_coherent_with_subcategory")
+    @mock.patch("pcapi.core.offers.validation.check_url_and_offererAddress_are_not_both_set")
+    def test_should_skip_location_coherence_on_a_draft_offer(
+        self, check_url_and_offererAddress_are_not_both_set, check_url_is_coherent_with_subcategory, venue_provider
+    ):
+        offer = self.build_offer(validation=OfferValidationStatus.DRAFT, url=None)
+
+        validation.check_can_update_offer(
+            offer,
+            {"description": "Une autre description."},
+            mandatory_extra_data_fields=set(),
+            venue_provider=venue_provider,
+        )
+
+        check_url_is_coherent_with_subcategory.assert_not_called()
+        check_url_and_offererAddress_are_not_both_set.assert_not_called()
+
+    @mock.patch("pcapi.core.offers.validation.check_fields_are_editable")
+    def test_should_check_the_changed_fields_against_what_the_caller_allows(
+        self, check_fields_are_editable, venue_provider
+    ):
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(
+            offer,
+            {"name": "Jules et Jim", "durationMinutes": 120, "description": "Deux amis."},
+            mandatory_extra_data_fields=set(),
+            editable_fields={"name"},
+            not_editable_fields={"description"},
+            venue_provider=venue_provider,
+        )
+
+        check_fields_are_editable.assert_called_once_with(
+            {"name", "durationMinutes", "description"}, {"name"}, {"description"}
+        )
+
+    @mock.patch("pcapi.core.offers.validation.check_offer_withdrawal")
+    def test_should_check_withdrawal_against_the_requested_type_and_delay(self, check_offer_withdrawal, venue_provider):
+        offer = self.build_offer(withdrawalType=None, withdrawalDelay=None)
+
+        validation.check_can_update_offer(
+            offer,
+            {"withdrawalType": WithdrawalTypeEnum.ON_SITE, "withdrawalDelay": 3600},
+            mandatory_extra_data_fields=set(),
+            venue_provider=venue_provider,
+        )
+
+        check_offer_withdrawal.assert_called_once_with(
+            withdrawal_type=WithdrawalTypeEnum.ON_SITE,
+            withdrawal_delay=3600,
+            subcategory_id=self.SUBCATEGORY.id,
+            booking_contact=offer.bookingContact,
+            provider=offer.lastProvider,
+            venue_provider=venue_provider,
+        )
+
+    def test_should_accept_a_subcategory_change_on_a_draft_offer(self, venue_provider):
+        offer = self.build_offer(validation=OfferValidationStatus.DRAFT)
+
+        validation.check_can_update_offer(
+            offer,
+            {"subcategoryId": subcategories.SPECTACLE_REPRESENTATION.id},
+            mandatory_extra_data_fields=set(),
+            venue_provider=venue_provider,
+        )
+
+    def test_should_refuse_a_subcategory_change_on_a_published_offer(self, venue_provider):
+        offer = self.build_offer()
+
+        with pytest.raises(exceptions.UnallowedUpdate):
+            validation.check_can_update_offer(
+                offer,
+                {"subcategoryId": subcategories.SPECTACLE_REPRESENTATION.id},
+                mandatory_extra_data_fields=set(),
+                venue_provider=venue_provider,
+            )
+
+    @mock.patch("pcapi.core.offers.validation.check_url_is_coherent_with_subcategory")
+    @mock.patch("pcapi.core.offers.validation.check_url_and_offererAddress_are_not_both_set")
+    def test_should_check_location_coherence_on_a_published_offer(
+        self, check_url_and_offererAddress_are_not_both_set, check_url_is_coherent_with_subcategory, venue_provider
+    ):
+        offer = self.build_offer()
+
+        validation.check_can_update_offer(
+            offer,
+            {"description": "Une autre description."},
+            mandatory_extra_data_fields=set(),
+            venue_provider=venue_provider,
+        )
+
+        check_url_is_coherent_with_subcategory.assert_called_once_with(self.SUBCATEGORY, offer.url)
+        check_url_and_offererAddress_are_not_both_set.assert_called_once_with(offer.url, offer.offererAddress)
+
+    @mock.patch("pcapi.core.offers.validation.check_url_is_coherent_with_subcategory")
+    @mock.patch("pcapi.core.offers.validation.check_url_and_offererAddress_are_not_both_set")
+    def test_should_check_location_coherence_on_the_resulting_values(
+        self, check_url_and_offererAddress_are_not_both_set, check_url_is_coherent_with_subcategory, venue_provider
+    ):
+        offer = self.build_offer(url="https://cinema.example.com/en-ligne")
+        new_offerer_address = offerers_factories.OfferLocationFactory()
+
+        validation.check_can_update_offer(
+            offer,
+            {"url": None, "offererAddress": new_offerer_address},
+            mandatory_extra_data_fields=set(),
+            venue_provider=venue_provider,
+        )
+
+        check_url_is_coherent_with_subcategory.assert_called_once_with(self.SUBCATEGORY, None)
+        check_url_and_offererAddress_are_not_both_set.assert_called_once_with(None, new_offerer_address)

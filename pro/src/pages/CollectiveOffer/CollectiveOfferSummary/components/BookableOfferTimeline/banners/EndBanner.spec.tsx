@@ -1,0 +1,35 @@
+import { screen } from '@testing-library/react'
+import { renderWithProviders } from 'commons/utils/renderWithProviders'
+import { axe } from 'vitest-axe'
+
+import { EndBanner } from './EndBanner'
+
+describe('EndBanner', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderWithProviders(
+      <EndBanner offerId={123} canEditDiscount={true} />
+    )
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should show edit link when canEditDiscount is true', () => {
+    renderWithProviders(<EndBanner offerId={123} canEditDiscount={true} />)
+
+    const link = screen.getByRole('link', {
+      name: "Modifier à la baisse le prix ou le nombre d'élèves",
+    })
+
+    expect(link).toHaveAttribute('href', '/offre/123/collectif/stocks/edition')
+  })
+
+  it('should not show edit link when canEditDiscount is true', () => {
+    renderWithProviders(<EndBanner offerId={123} canEditDiscount={false} />)
+
+    const link = screen.queryByText(
+      "Modifier à la baisse le prix ou le nombre d'élèves"
+    )
+
+    expect(link).not.toBeInTheDocument()
+  })
+})

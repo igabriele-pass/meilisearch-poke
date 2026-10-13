@@ -1,0 +1,138 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+
+$info-box-width: clamp(rem.torem(240px), 29vw, rem.torem(316px));
+$info-box-margin-left: rem.torem(24px);
+
+.form-layout {
+  background-color: var(--color-background-default);
+
+  &.full-width-actions {
+    @media (min-width: size.$tablet) {
+      & > * {
+        width: rem.torem(486px);
+      }
+    }
+  }
+
+  &.medium-width-actions {
+    @media (min-width: size.$tablet) {
+      & > * {
+        max-width: rem.torem(826px);
+      }
+    }
+  }
+
+  &.medium-width-form {
+    max-width: rem.torem(400px);
+  }
+
+  &-section {
+    margin-bottom: var(--size-spacing-xxl);
+    min-width: auto;
+    max-width: 100%;
+
+    &-title {
+      @include fonts.title2;
+    }
+
+    // Legend spacing variant when no description follows
+    &-legend--spaced {
+      margin-bottom: var(--size-spacing-l);
+    }
+
+    &-header {
+      margin-bottom: var(--size-spacing-l);
+    }
+
+    &-description-content {
+      margin-top: var(--size-spacing-s);
+    }
+  }
+
+  &-sub-section {
+    margin-bottom: var(--size-spacing-xxl);
+
+    &-title-wrapper {
+      display: flex;
+      align-items: center;
+      gap: var(--size-spacing-s);
+      margin-bottom: var(--size-spacing-l);
+    }
+
+    &-title {
+      @include fonts.title3;
+    }
+  }
+
+  &-sub-sub-section {
+    margin-bottom: var(--size-spacing-xxl);
+  }
+
+  &-row {
+    max-width: 100%;
+
+    &.small-space-after {
+      margin-bottom: var(--size-spacing-xs);
+    }
+
+    &.medium-space-after {
+      margin-bottom: var(--size-spacing-l);
+    }
+
+    &.large-space-after {
+      margin-bottom: var(--size-spacing-xl);
+    }
+
+    &.inline-group {
+      display: flex;
+      align-items: start;
+      flex-flow: row wrap;
+      flex-direction: row;
+      gap: var(--size-spacing-l);
+    }
+  }
+
+  &-row-info {
+    position: relative;
+
+    &-field {
+      width: 100%;
+    }
+
+    &-info {
+      margin: var(--size-spacing-s) 0 var(--size-spacing-l) 0;
+      width: 100%;
+    }
+  }
+}
+
+.mandatory-info {
+  @include fonts.body-xs;
+
+  margin-bottom: var(--size-spacing-xxl);
+  color: var(--color-text-subtle);
+}
+
+@media (min-width: size.$laptop) {
+  .form-layout {
+    &-row.inline-group {
+      flex-wrap: unset;
+    }
+
+    &-row-info-info {
+      margin: 0;
+      width: $info-box-width;
+      position: absolute;
+      top: 0;
+      right: calc(
+        -#{$info-box-margin-left} - $info-box-width
+      ); // calc(-margin-left - width)
+
+      &-inner {
+        position: absolute;
+      }
+    }
+  }
+}

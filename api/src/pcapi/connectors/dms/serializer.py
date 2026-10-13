@@ -1,0 +1,440 @@
+import logging
+import re
+from datetime import datetime
+from datetime import timedelta
+from textwrap import shorten
+from typing import Any
+from typing import Literal
+from typing import Self
+
+from dateutil import parser as date_parser
+from pydantic import BaseModel
+from pydantic import Field
+from pydantic import field_validator
+
+from pcapi import settings
+from pcapi.connectors.dms import models as dms_models
+from pcapi.core.finance import constants as finance_constants
+from pcapi.core.finance import models as finance_models
+from pcapi.core.finance.api import mark_bank_account_without_continuation
+from pcapi.core.finance.utils import format_raw_iban
+from pcapi.core.subscription import fraud_check_api
+from pcapi.core.subscription.dms import schemas as dms_schemas
+from pcapi.core.users import models as users_models
+from pcapi.serialization.utils import without_timezone
+from pcapi.utils import date as date_utils
+from pcapi.utils.date import FrenchParserInfo
+
+
+logger = logging.getLogger(__name__)
+
+
+DMS_ACTIVITY_ENUM_MAPPING = {
+    "Collégien": users_models.ActivityEnum.MIDDLE_SCHOOL_STUDENT.value,
+    "Lycéen": users_models.ActivityEnum.HIGH_SCHOOL_STUDENT.value,
+    "Étudiant": users_models.ActivityEnum.STUDENT.value,
+    "Etudiant": users_models.ActivityEnum.STUDENT.value,
+    "Employé": users_models.ActivityEnum.EMPLOYEE.value,
+    "En recherche d'emploi ou chômeur": users_models.ActivityEnum.UNEMPLOYED.value,
+    "Chômeur, En recherche d'emploi": users_models.ActivityEnum.UNEMPLOYED.value,
+    "Inactif (ni en emploi ni au chômage), En incapacité de travailler": users_models.ActivityEnum.INACTIVE.value,
+    "Apprenti": users_models.ActivityEnum.APPRENTICE.value,
+    "Alternant": users_models.ActivityEnum.APPRENTICE_STUDENT.value,
+    "Volontaire en service civique rémunéré": users_models.ActivityEnum.VOLUNTEER.value,
+}
+
+DMS_BACKEND_ANNOTATION_SLUG = "AN_001"
+DMS_INSTRUCTOR_ANNOTATION_SLUG = "AN_002"
+UBBLE_ID_ANNOTATION_SLUG = "AN_003"
+UBBLE_STATUS_ANNOTATION_SLUG = "AN_004"
+
+
+def _sanitize_id_piece_number(id_piece_number: str) -> str:
+    """
+    Replaces double spaces by single spaces.
+    This is to avoid errors when parsing the ID piece number.
+    """
+    return re.sub(" +", " ", id_piece_number)
+
+
+def parse_beneficiary_information_graphql(
+    application_detail: dms_models.DmsApplicationResponse,
+) -> dms_schemas.DMSContent:
+    application_number = application_detail.number
+    civility = application_detail.applicant.civility
+    email = application_detail.applicant.email or application_detail.profile.email
+    first_name = application_detail.applicant.first_name
+    last_name = application_detail.applicant.last_name
+    registration_datetime = application_detail.draft_date
+    processed_datetime = application_detail.processed_datetime
+
+    # Fields that may be filled
+    activity = None
+    address = None
+    birth_date = None
+    birth_place = None
+    city = None
+    department = None
+    id_piece_number = None
+    phone = None
+    postal_code = None
+    annotation = None
+    instructor_annotation = None
+    ubble_identification_id_annotation = None
+    ubble_status_annotation = None
+
+    field_errors: list[dms_schemas.DmsFieldErrorDetails] = []
+
+    if not fraud_check_api.is_subscription_name_valid(first_name):
+        field_errors.append(
+            dms_schemas.DmsFieldErrorDetails(key=dms_schemas.DmsFieldErrorKeyEnum.first_name, value=first_name)
+        )
+
+    if not fraud_check_api.is_subscription_name_valid(last_name):
+        field_errors.append(
+            dms_schemas.DmsFieldErrorDetails(key=dms_schemas.DmsFieldErrorKeyEnum.last_name, value=last_name)
+        )
+
+    for field in application_detail.fields:
+        label = field.label.lower()
+        value = field.value or ""
+
+        if dms_models.FieldLabelKeyword.ACTIVITY.value in label:
+            activity = DMS_ACTIVITY_ENUM_MAPPING.get(value) if value else None
+            if activity is None:
+                logger.error("Unknown activity value for application %s: %s", application_number, value)
+
+        elif dms_models.FieldLabelKeyword.ADDRESS.value in label:
+            address = value
+
+        elif dms_models.FieldLabelKeyword.BIRTH_DATE.value in label:
+            try:
+                birth_date = date_parser.parse(value, FrenchParserInfo())
+            except date_parser.ParserError:
+                field_errors.append(
+                    dms_schemas.DmsFieldErrorDetails(key=dms_schemas.DmsFieldErrorKeyEnum.birth_date, value=value)
+                )
+                logger.error("Could not parse birth date %s for DMS application %s", value, application_number)
+
+        elif (
+            dms_models.FieldLabelKeyword.BIRTH_PLACE.value in label
+            or dms_models.FieldLabelKeyword.BIRTH_CITY.value in label
+        ):
+            birth_place = value
+
+        elif (
+            dms_models.FieldLabelKeyword.ID_PIECE_NUMBER_1.value in label
+            or dms_models.FieldLabelKeyword.ID_PIECE_NUMBER_2.value in label
+        ):
+            value = _sanitize_id_piece_number(value.strip())
+            if not fraud_check_api.validate_id_piece_number_format_fraud_item(
+                value, application_detail.procedure.number
+            ):
+                field_errors.append(
+                    dms_schemas.DmsFieldErrorDetails(key=dms_schemas.DmsFieldErrorKeyEnum.id_piece_number, value=value)
+                )
+            else:
+                id_piece_number = value
+
+        elif dms_models.FieldLabelKeyword.TELEPHONE.value in label:
+            phone = value.replace(" ", "")
+
+        # The order between POSTAL_CODE and CITY check is important. Postal code needs to happen first.
+        # If we check CITY first, we will get a false positive for the postal code,
+        # because both labels match the 'commune de résidence' keyword
+        elif dms_models.FieldLabelKeyword.POSTAL_CODE.value in label:
+            space_free_value = str(value).strip().replace(" ", "")
+            match = re.search("^[0-9]{5}", space_free_value)
+            if match is None:
+                field_errors.append(
+                    dms_schemas.DmsFieldErrorDetails(key=dms_schemas.DmsFieldErrorKeyEnum.postal_code, value=value)
+                )
+                continue
+            postal_code = match.group(0)
+
+        elif dms_models.FieldLabelKeyword.CITY_1.value in label or dms_models.FieldLabelKeyword.CITY_2.value in label:
+            city = value
+
+    for remote_annotation in application_detail.annotations:
+        if DMS_BACKEND_ANNOTATION_SLUG in remote_annotation.label:
+            annotation = dms_schemas.DmsAnnotation(
+                id=remote_annotation.id, label=remote_annotation.label, text=remote_annotation.value
+            )
+        elif remote_annotation.label.startswith(DMS_INSTRUCTOR_ANNOTATION_SLUG):
+            if remote_annotation_value := remote_annotation.value.strip() if remote_annotation.value else None:
+                split_values = remote_annotation_value.split(", ")
+                try:
+                    instructor_annotation = dms_schemas.DmsInstructorAnnotation(
+                        value=[dms_schemas.DmsInstructorAnnotationEnum(v) for v in split_values],
+                        updated_datetime=remote_annotation.updated_datetime,
+                    )
+                except ValueError:
+                    # A new value has probably been added in the dropdown list, but not in the code
+                    logger.error(
+                        "Unknown value for instructor annotation %s: %s",
+                        remote_annotation.label,
+                        remote_annotation_value,
+                        extra={"procedure_id": application_detail.procedure.number},
+                    )
+        elif remote_annotation.label.startswith(UBBLE_ID_ANNOTATION_SLUG):
+            ubble_identification_id_annotation = dms_schemas.DmsAnnotation(
+                id=remote_annotation.id, label=remote_annotation.label, text=remote_annotation.value
+            )
+        elif remote_annotation.label.startswith(UBBLE_STATUS_ANNOTATION_SLUG):
+            ubble_status_annotation = dms_schemas.DmsAnnotation(
+                id=remote_annotation.id, label=remote_annotation.label, text=remote_annotation.value
+            )
+
+    return dms_schemas.DMSContent(
+        activity=activity,
+        address=address,
+        annotation=annotation,
+        application_number=application_number,
+        birth_date=birth_date,
+        birth_place=birth_place,
+        city=city,
+        civility=_parse_dms_civility(civility),
+        department=department,
+        email=email,
+        field_errors=field_errors,
+        first_name=first_name,
+        id_piece_number=id_piece_number,
+        instructor_annotation=instructor_annotation,
+        last_name=last_name,
+        latest_modification_datetime=application_detail.latest_modification_datetime,
+        latest_user_fields_modification_datetime=application_detail.latest_user_fields_modification_datetime,
+        phone=phone,
+        postal_code=postal_code,
+        procedure_number=application_detail.procedure.number,
+        processed_datetime=processed_datetime,
+        registration_datetime=registration_datetime,
+        state=application_detail.state.value,
+        ubble_identification_id_annotation=ubble_identification_id_annotation,
+        ubble_status_annotation=ubble_status_annotation,
+    )
+
+
+def _parse_dms_civility(civility: dms_models.Civility) -> users_models.GenderEnum | None:
+    if civility == dms_models.Civility.M:
+        return users_models.GenderEnum.M
+    if civility == dms_models.Civility.MME:
+        return users_models.GenderEnum.F
+    return None
+
+
+class ApplicationDetail(BaseModel):
+    procedure_version: int
+    application_id: int
+    dossier_id: str
+    modification_date: datetime
+    siren: str | None = None
+    iban: str
+    obfuscatedIban: str
+    siret: str | None = None
+    dms_token: str | None = None
+    error_annotation_id: str
+    error_annotation_value: str | None = None
+    venue_url_annotation_id: str | None = None
+    venue_url_annotation_value: str | None = None
+    status: finance_models.BankAccountApplicationStatus
+    label: str | None = None
+
+    @field_validator("label")
+    def truncate_label(cls, label: str) -> str:
+        return shorten(label, width=100, placeholder="...")
+
+    @property
+    def is_accepted(self) -> bool:
+        return self.status == finance_models.BankAccountApplicationStatus.ACCEPTED
+
+    @classmethod
+    def build(cls, **kwargs: Any) -> Self:
+        status = finance_models.BankAccountApplicationStatus(kwargs["status"])
+        if status == finance_models.BankAccountApplicationStatus.DRAFT and kwargs["last_pending_correction_date"]:
+            status = finance_models.BankAccountApplicationStatus.WITH_PENDING_CORRECTIONS
+
+        offerer_kwargs = {}
+        if kwargs["application_type"] in (
+            finance_constants.DN_PROCEDURE_V5_VERSION,
+            finance_constants.DN_PROCEDURE_NC_VERSION,
+        ):
+            offerer_kwargs["siret"] = kwargs["siret"]
+            offerer_kwargs["siren"] = kwargs["siret"][:9]
+            offerer_kwargs["label"] = kwargs["label"]
+        else:
+            offerer_kwargs["siren"] = kwargs["siren"]
+
+        iban = format_raw_iban(kwargs["iban"])
+        obfuscated_iban = f"""XXXX XXXX XXXX {iban[-4:]}"""
+
+        return cls(
+            procedure_version=kwargs["application_type"],
+            application_id=kwargs["application_id"],
+            dossier_id=kwargs["dossier_id"],
+            iban=iban,
+            obfuscatedIban=obfuscated_iban,
+            dms_token=kwargs.get("dms_token") if kwargs.get("application_type") == 4 else None,
+            modification_date=(datetime.fromisoformat(kwargs["updated_at"]).astimezone().replace(tzinfo=None)),
+            error_annotation_id=kwargs["error_annotation_id"],
+            error_annotation_value=kwargs.get("error_annotation_value"),
+            venue_url_annotation_id=kwargs["venue_url_annotation_id"],
+            venue_url_annotation_value=kwargs.get("venue_url_annotation_value"),
+            status=status,
+            **offerer_kwargs,
+        )
+
+
+class Annotation(BaseModel):
+    """
+    BaseModel for DS application annotations
+    """
+
+    id: str
+    label: str
+    updated_at: datetime = Field(alias="updatedAt")
+    string_value: str = Field(alias="stringValue")
+
+    @field_validator("updated_at", mode="after")
+    def strip_timezone(cls, value: datetime) -> datetime:
+        return without_timezone(value)
+
+
+class FieldAnnotation(Annotation):
+    """
+    Text field annotation
+    """
+
+
+class CheckBoxAnnotation(Annotation):
+    """
+    Checkbox annotation
+    """
+
+    checked: bool
+
+
+class ProcessingErrorPassCulture(FieldAnnotation):
+    label: Literal["Erreur traitement pass Culture"]
+
+    @field_validator("string_value")
+    def lower_string_value(cls, string_value: str) -> str:
+        return string_value.lower()
+
+
+class WaitingForOffererValidation(CheckBoxAnnotation):
+    label: Literal["En attente de validation de structure"]
+
+
+class WaitingForAdageValidation(CheckBoxAnnotation):
+    label: Literal["En attente de validation ADAGE"]
+
+
+class MarkWithoutContinuationApplicationDetail(BaseModel):
+    id: str
+    number: int
+    state: dms_models.GraphQLApplicationStates
+    updated_at: datetime
+    updated_by_user_at: datetime
+    last_message_sent_by_instructor_at: datetime | None = None
+    processing_error_pc: ProcessingErrorPassCulture | None = None
+    waiting_for_offerer_validation: WaitingForOffererValidation | None = None
+    waiting_for_adage_validation: WaitingForAdageValidation | None = None
+
+    @field_validator("updated_at", "updated_by_user_at", "last_message_sent_by_instructor_at", mode="after")
+    def strip_timezone(cls, value: datetime | None) -> datetime | None:
+        return without_timezone(value) if value else None
+
+    @classmethod
+    def build(cls, **kwargs: Any) -> Self:
+        user_actions_dates = [kwargs["dateDerniereModificationChamps"]] + [
+            message["createdAt"]
+            for message in kwargs.get("messages", [])
+            if message["email"] == kwargs["usager"]["email"]
+        ]
+        instructor_messages_dates = [
+            message["createdAt"]
+            for message in kwargs.get("messages", [])
+            if message["email"].endswith("@passculture.app")
+        ]
+        annotation_kwargs: dict[str, Any] = {}
+        for annotation in kwargs["annotations"]:
+            match annotation["label"]:
+                case "Erreur traitement pass Culture":
+                    annotation_kwargs["processing_error_pc"] = ProcessingErrorPassCulture(**annotation)
+                case "En attente de validation de structure":
+                    annotation_kwargs["waiting_for_offerer_validation"] = WaitingForOffererValidation(**annotation)
+                case "En attente de validation ADAGE":
+                    annotation_kwargs["waiting_for_adage_validation"] = WaitingForAdageValidation(**annotation)
+        return cls(
+            id=kwargs["id"],
+            number=kwargs["number"],
+            state=kwargs["state"],
+            updated_at=kwargs["dateDerniereModification"],
+            updated_by_user_at=max(user_actions_dates),
+            last_message_sent_by_instructor_at=(max(instructor_messages_dates) if instructor_messages_dates else None),
+            **annotation_kwargs,
+        )
+
+    @property
+    def is_draft(self) -> bool:
+        return self.state == dms_models.GraphQLApplicationStates.draft
+
+    @property
+    def should_be_marked_without_continuation(self) -> bool:
+        dead_line_application = date_utils.get_naive_utc_now() - timedelta(
+            days=int(settings.DS_MARK_WITHOUT_CONTINUATION_APPLICATION_DEADLINE)
+        )
+        dead_line_annotation = date_utils.get_naive_utc_now() - timedelta(
+            days=int(settings.DS_MARK_WITHOUT_CONTINUATION_ANNOTATION_DEADLINE)
+        )
+
+        if self.updated_at < dead_line_application and self.state in (
+            dms_models.GraphQLApplicationStates.draft,
+            dms_models.GraphQLApplicationStates.on_going,
+        ):
+            if self.processing_error_pc is not None:
+                logger.info(
+                    "[DS] application is older than the dead line application", extra={"application_id": self.number}
+                )
+                if (
+                    "adage" not in self.processing_error_pc.string_value
+                    and "rct" not in self.processing_error_pc.string_value
+                ):
+                    logger.info("[DS] application is not about adage nor rct", extra={"application_id": self.number})
+                    return True
+                if (
+                    "rct" in self.processing_error_pc.string_value
+                    and self.processing_error_pc.updated_at < dead_line_annotation
+                ):
+                    logger.info(
+                        "[DS] application is about `rct` but older than the dead line annotation",
+                        extra={"application_id": self.number},
+                    )
+                    return True
+            elif self.waiting_for_offerer_validation is not None and self.waiting_for_adage_validation is not None:
+                if (
+                    self.waiting_for_offerer_validation.checked is True
+                    and self.waiting_for_offerer_validation.updated_at < dead_line_annotation
+                ) and self.waiting_for_adage_validation.checked is False:
+                    logger.info(
+                        "[DS] application is waiting for offerer validation for too long",
+                        extra={"application_id": self.number},
+                    )
+                    return True
+                if (
+                    self.waiting_for_offerer_validation.checked is False
+                    and self.waiting_for_adage_validation.checked is False
+                    and self.last_message_sent_by_instructor_at is not None
+                    and self.updated_by_user_at < self.last_message_sent_by_instructor_at < dead_line_annotation
+                ):
+                    logger.info(
+                        "[DS] application is not waiting for validation of any kind",
+                        extra={"application_id": self.number},
+                    )
+                    return True
+
+        return False
+
+    def mark_without_continuation(self) -> None:
+        """Mark without continuation our internal representation of the DS application (BankAccount)"""
+        mark_bank_account_without_continuation(self.number)

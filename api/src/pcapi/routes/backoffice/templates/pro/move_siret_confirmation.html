@@ -1,0 +1,85 @@
+{% extends "layouts/connected.html" %}
+{% from "components/badges.html" import build_venue_badges with context %}
+{% macro build_venue_card(venue, yearly_revenue) %}
+  <div class="card shadow">
+    <div class="card-body">
+      <h5 class="mb-3">{{ build_venue_badges(venue) }}</h5>
+      <h5 class="card-title">{{ venue.name | upper }}</h5>
+      <h6 class="card-subtitle mt-4 mb-3 text-muted">Venue ID : {{ venue.id }}</h6>
+      <h6 class="card-subtitle mb-4 text-muted">SIRET : {{ venue.siret | empty_string_if_null }}</h6>
+      <div class="row pt3">
+        {% if venue.publicName and venue.publicName != venue.name %}
+          <p>
+            <span class="fw-bold">Nom d'usage :</span> {{ venue.publicName }}
+          </p>
+        {% endif %}
+        <p>
+          <span class="fw-bold">Entité juridique :</span> {{ venue.managingOfferer.name }}
+        </p>
+        <p>
+          {% if yearly_revenue is not false %}
+            <span class="fw-bold">Revenu de l'année :</span>
+            {{ yearly_revenue | format_amount(target=venue) }}
+          {% else %}
+            &nbsp;
+          {% endif %}
+        </p>
+      </div>
+      <a href="{{ url_for('backoffice.venue.get', venue_id=venue.id) }}"
+         target="_blank"
+         class="btn btn-md btn-outline-primary fw-bold mt-1">
+        CONSULTER LE PROFIL <i class="bi bi-arrow-up-right"></i>
+      </a>
+    </div>
+  </div>
+{% endmacro %}
+{% block page %}
+  <div class="pt-3 px-5">
+    <h1>Déplacer un SIRET d’un partenaire culturel à un autre</h1>
+    <div class="row mt-4">
+      <div class="col-6">
+        <p class="fw-bold">Source :</p>
+        {{ build_venue_card(source_venue, False) }}
+      </div>
+      <div class="col-6">
+        <p class="fw-bold">Cible :</p>
+        {{ build_venue_card(target_venue, target_yearly_revenue) }}
+      </div>
+    </div>
+    {% if has_active_or_future_custom_reimbursement_rule %}
+      <div class="alert alert-warning mt-3 py-3 text-center fs-3"
+           role="alert">
+        <div class="d-flex flex-row justify-content-around align-items-center w-100">
+          <i class="bi bi-exclamation-triangle-fill fs-1 align-middle"></i>
+          <div>
+            Le partenaire culturel source est associé à au moins un
+            <a href="{{ url_for('backoffice.reimbursement_rules.list_custom_reimbursement_rules', venue=source_venue.id) }}"
+               target="_blank">tarif dérogatoire</a>
+            actif ou futur.
+            <br />
+            <span class="fw-bold">Confirmer l'action mettra automatiquement fin à ce tarif dérogatoire.</span>
+          </div>
+          <i class="bi bi-exclamation-triangle-fill fs-1"></i>
+        </div>
+      </div>
+    {% endif %}
+    <div class="d-flex justify-content-end py-4">
+      <a href="{{ url_for('.move_siret') }}"
+         class="btn btn-outline-primary mx-4"
+         role="button">Annuler</a>
+      <div>
+        <form action="{{ dst }}"
+              name="{{ dst | action_to_name }}"
+              method="post">
+          {% for form_field in form %}
+            <input type="hidden"
+                   name="{{ form_field.name }}"
+                   value="{{ form_field.data }}" />
+          {% endfor %}
+          <button type="submit"
+                  class="btn btn-primary">Confirmer</button>
+        </form>
+      </div>
+    </div>
+  </div>
+{% endblock page %}

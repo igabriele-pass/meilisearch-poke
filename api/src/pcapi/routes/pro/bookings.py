@@ -1,0 +1,377 @@
+import math
+from datetime import date
+from typing import cast
+from zoneinfo import ZoneInfo
+
+from flask_login import current_user
+from flask_login import login_required
+
+import pcapi.core.bookings.repository as booking_repository
+import pcapi.core.offerers.models as offerers_models
+import pcapi.core.offerers.repository as offerers_repository
+import pcapi.utils.rest as rest_utils
+from pcapi.core.bookings import api as bookings_api
+from pcapi.core.bookings import constants as bookings_constants
+from pcapi.core.bookings import exceptions as bookings_exceptions
+from pcapi.core.bookings import exports as bookings_exports
+from pcapi.core.bookings import models as bookings_models
+from pcapi.core.bookings import repository as bookings_repository
+from pcapi.core.bookings import validation as bookings_validation
+from pcapi.core.bookings.models import BookingExportType
+from pcapi.core.offers.models import Offer
+from pcapi.core.offers.models import Stock
+from pcapi.core.users import repository as users_repository
+from pcapi.models import api_errors
+from pcapi.models import db
+from pcapi.models.utils import get_or_404
+from pcapi.routes.pro.auth_utils import TOKEN_NOT_FOUND_ERROR_MESSAGE
+from pcapi.routes.pro.auth_utils import check_user_can_validate_bookings_v2
+from pcapi.routes.pro.blueprint import pro_blueprint
+from pcapi.routes.serialization import bookings as serialization_bookings
+from pcapi.routes.serialization.bookings_recap_serialize import BookingsExportQueryModel
+from pcapi.routes.serialization.bookings_recap_serialize import BookingsExportStatusFilter
+from pcapi.routes.serialization.bookings_recap_serialize import DownloadBookingsQueryModel
+from pcapi.routes.serialization.bookings_recap_serialize import EventDateScheduleAndPriceCategoriesCountModel
+from pcapi.routes.serialization.bookings_recap_serialize import EventDatesInfos
+from pcapi.routes.serialization.bookings_recap_serialize import GetBookingsProQueryModel
+from pcapi.routes.serialization.bookings_recap_serialize import GetBookingsProResponseModel
+from pcapi.routes.serialization.bookings_recap_serialize import UserHasBookingResponse
+from pcapi.routes.serialization.bookings_recap_serialize import serialize_bookings
+from pcapi.serialization.decorator import spectree_serialize
+from pcapi.serialization.spec_tree import ExtendResponse
+from pcapi.utils.rest import check_user_has_access_to_offerer
+from pcapi.utils.transaction_manager import atomic
+
+from . import blueprint
+
+
+@pro_blueprint.route("/bookings/pro", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(response_model=GetBookingsProResponseModel, api=blueprint.pro_schema)
+def get_bookings_pro(query: GetBookingsProQueryModel) -> GetBookingsProResponseModel:
+    user = current_user._get_current_object()
+    if not users_repository.has_access_to_venues(user, [query.venue_id]):
+        raise api_errors.ResourceNotFoundError()
+
+    page = query.page
+    per_page_limit = bookings_constants.BOOKINGS_PER_PAGE_LIMIT
+    booking_period = None
+    if query.booking_period_beginning_date and query.booking_period_ending_date:
+        booking_period = (
+            query.booking_period_beginning_date,
+            query.booking_period_ending_date,
+        )
+
+    bookings_query, total = booking_repository.find_by_venue(
+        pro_user_id=user.id,
+        venue_id=query.venue_id,
+        booking_period=booking_period,
+        status_filter=query.booking_status_filter,
+        event_date=query.event_date,
+        offer_id=query.offer_id,
+        offerer_address_id=query.offerer_address_id,
+        page=int(page),
+        per_page_limit=per_page_limit,
+    )
+
+    return GetBookingsProResponseModel(
+        bookingsRecap=[serialize_bookings(booking) for booking in bookings_query],
+        page=page,
+        pages=math.ceil(total / per_page_limit),
+        total=total,
+    )
+
+
+@pro_blueprint.route("/bookings/pro/userHasBookings", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(response_model=UserHasBookingResponse, api=blueprint.pro_schema)
+def get_user_has_bookings() -> UserHasBookingResponse:
+    user = current_user._get_current_object()
+    return UserHasBookingResponse(has_bookings=booking_repository.user_has_bookings(user))
+
+
+@pro_blueprint.route("/bookings/offer/<int:offer_id>/csv", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(
+    json_format=False,
+    response_headers={
+        "Content-Type": "text/csv; charset=utf-8;",
+        "Content-Disposition": "attachment; filename=reservations_pass_culture.csv",
+    },
+    api=blueprint.pro_schema,
+)
+def export_bookings_for_offer_as_csv(offer_id: int, query: BookingsExportQueryModel) -> bytes:
+    user = current_user._get_current_object()
+    offer = get_or_404(Offer, offer_id)
+
+    check_user_has_access_to_offerer(user, offer.venue.managingOffererId)
+
+    if query.status == BookingsExportStatusFilter.VALIDATED:
+        return cast(
+            str,
+            bookings_exports.export_validated_bookings_by_offer_id(
+                offer_id, event_beginning_date=query.event_date, export_type=BookingExportType.CSV
+            ),
+        ).encode("utf-8-sig")
+    return cast(
+        str,
+        bookings_exports.export_bookings_by_offer_id(
+            offer_id, event_beginning_date=query.event_date, export_type=BookingExportType.CSV
+        ),
+    ).encode("utf-8-sig")
+
+
+@pro_blueprint.route("/bookings/offer/<int:offer_id>/excel", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(
+    json_format=False,
+    response_headers={
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": "attachment; filename=reservations_pass_culture.xlsx",
+    },
+    api=blueprint.pro_schema,
+)
+def export_bookings_for_offer_as_excel(offer_id: int, query: BookingsExportQueryModel) -> bytes:
+    user = current_user._get_current_object()
+    offer = get_or_404(Offer, offer_id)
+
+    check_user_has_access_to_offerer(user, offer.venue.managingOffererId)
+
+    if query.status == BookingsExportStatusFilter.VALIDATED:
+        return cast(
+            bytes,
+            bookings_exports.export_validated_bookings_by_offer_id(
+                offer_id, event_beginning_date=query.event_date, export_type=BookingExportType.EXCEL
+            ),
+        )
+    return cast(
+        bytes,
+        bookings_exports.export_bookings_by_offer_id(
+            offer_id, event_beginning_date=query.event_date, export_type=BookingExportType.EXCEL
+        ),
+    )
+
+
+@pro_blueprint.route("/bookings/csv", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(
+    json_format=False,
+    response_headers={
+        "Content-Type": "text/csv; charset=utf-8;",
+        "Content-Disposition": "attachment; filename=reservations_pass_culture.csv",
+    },
+    api=blueprint.pro_schema,
+)
+def get_bookings_csv(query: DownloadBookingsQueryModel) -> bytes:
+    return _create_booking_export_file(query, BookingExportType.CSV)
+
+
+@pro_blueprint.route("/bookings/excel", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(
+    json_format=False,
+    response_headers={
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": "attachment; filename=reservations_pass_culture.xlsx",
+    },
+    api=blueprint.pro_schema,
+)
+def get_bookings_excel(query: DownloadBookingsQueryModel) -> bytes:
+    return _create_booking_export_file(query, BookingExportType.EXCEL)
+
+
+@pro_blueprint.route("/bookings/dates/<int:offer_id>", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(response_model=EventDatesInfos, api=blueprint.pro_schema)
+def get_offer_price_categories_and_schedules_by_dates(offer_id: int) -> EventDatesInfos:
+    user = current_user._get_current_object()
+    offer = get_or_404(Offer, offer_id)
+
+    check_user_has_access_to_offerer(user, offer.venue.managingOffererId)
+
+    stocks = (
+        db.session.query(Stock)
+        .join(bookings_models.Booking)
+        .filter(
+            Stock.offerId == offer_id,
+            Stock.isSoftDeleted == False,
+            Stock.beginningDatetime.isnot(None),
+        )
+        .order_by(Stock.beginningDatetime)
+        .all()
+    )
+    stocks_by_date: dict[date, dict[str, list]] = {}
+
+    offer_timezone = offerers_repository.get_offer_timezone(offer_id)
+    for stock in stocks:
+        if stock.beginningDatetime is None:
+            continue
+        local_datetime = stock.beginningDatetime.astimezone(ZoneInfo(offer_timezone))
+        stock_date = local_datetime.date()
+        stock_time = local_datetime.time()
+        stock_price_category = stock.priceCategoryId
+        if stock_date not in stocks_by_date:
+            stocks_by_date[stock_date] = {
+                "price_categories": [stock.priceCategoryId],
+                "schedules": [stock_time],
+            }
+        else:
+            if stock_price_category not in stocks_by_date[stock_date]["price_categories"]:
+                stocks_by_date[stock_date]["price_categories"].append(stock_price_category)
+            if stock_time not in stocks_by_date[stock_date]["schedules"]:
+                stocks_by_date[stock_date]["schedules"].append(stock_time)
+
+    return EventDatesInfos(
+        [
+            EventDateScheduleAndPriceCategoriesCountModel(
+                event_date=date,
+                schedule_count=len(schedule_and_price_categories_count["schedules"]),
+                price_categories_count=len(schedule_and_price_categories_count["price_categories"]),
+            )
+            for date, schedule_and_price_categories_count in stocks_by_date.items()
+        ]
+    )
+
+
+def _create_booking_export_file(query: DownloadBookingsQueryModel, export_type: BookingExportType) -> bytes:
+    user = current_user._get_current_object()
+    check_user_has_access_to_offerer(user, query.offerer_id)
+
+    venue_ids = _resolve_venue_ids_for_offerer(offerer_id=query.offerer_id, venue_id=query.venue_id)
+
+    booking_period = None
+    if query.booking_period_beginning_date and query.booking_period_ending_date:
+        booking_period = (
+            query.booking_period_beginning_date,
+            query.booking_period_ending_date,
+        )
+    booking_status = query.booking_status_filter
+
+    export_data = bookings_exports.get_export(
+        pro_user_id=user.id,
+        venue_ids=venue_ids,
+        booking_period=booking_period,
+        status_filter=booking_status,
+        event_date=query.event_date,
+        export_type=export_type,
+        offerer_address_id=query.offerer_address_id,
+    )
+
+    if export_type == BookingExportType.CSV:
+        return cast(str, export_data).encode("utf-8-sig")
+    return cast(bytes, export_data)
+
+
+def _resolve_venue_ids_for_offerer(*, offerer_id: int, venue_id: int | None) -> list[int]:
+    if venue_id is not None:
+        venue = get_or_404(offerers_models.Venue, venue_id)
+        if venue.managingOffererId != offerer_id:
+            raise api_errors.resource_not_found_error()
+        return [venue_id]
+    return offerers_repository.get_venue_ids_by_offerer_ids([offerer_id])
+
+
+def _get_booking_by_token_or_404(token: str) -> bookings_models.Booking:
+    booking = bookings_repository.get_booking_by_token(token, load_options=["offerer", "venue", "offer", "address"])
+    if not booking:
+        raise api_errors.ResourceNotFoundError(errors={"global": [TOKEN_NOT_FOUND_ERROR_MESSAGE]})
+
+    return booking
+
+
+_BASE_CODE_DESCRIPTIONS = {
+    "HTTP_401": (None, "Authentification nécessaire"),
+    # To avoid giving more information than necessary to potential attackers,
+    # we use the same error message for 403 and 404 errors related to booking tokens.
+    "HTTP_404": (None, TOKEN_NOT_FOUND_ERROR_MESSAGE),
+    "HTTP_410": (
+        None,
+        "Cette contremarque a été validée.\n En l’invalidant vous indiquez qu’elle n’a pas été utilisée et vous ne serez pas remboursé.",
+    ),
+}
+
+
+@pro_blueprint.route("/bookings/token/<token>", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(
+    api=blueprint.pro_schema,
+    response_model=serialization_bookings.GetBookingResponse,
+    resp=ExtendResponse(
+        **(
+            _BASE_CODE_DESCRIPTIONS
+            | {
+                "HTTP_200": (serialization_bookings.GetBookingResponse, "La contremarque existe et n’est pas validée"),
+            }
+        )
+    ),
+)
+def get_booking_by_token(token: str) -> serialization_bookings.GetBookingResponse:
+    booking = _get_booking_by_token_or_404(token)
+    check_user_can_validate_bookings_v2(current_user, booking.offererId)
+    bookings_validation.check_is_usable(booking)
+    return serialization_bookings.get_booking_response(booking)
+
+
+@pro_blueprint.route("/bookings/use/token/<token>", methods=["PATCH"])
+@atomic()
+@login_required
+@spectree_serialize(
+    api=blueprint.pro_schema,
+    on_success_status=204,
+    resp=ExtendResponse(
+        **(
+            _BASE_CODE_DESCRIPTIONS
+            | {
+                "HTTP_204": (None, "La contremarque a bien été validée"),
+            }
+        )
+    ),
+)
+def patch_booking_use_by_token(token: str) -> None:
+    booking = _get_booking_by_token_or_404(token)
+    check_user_can_validate_bookings_v2(current_user, booking.offererId)
+    rest_utils.check_venue_is_opened(booking.venue)
+    bookings_api.mark_as_used(booking, bookings_models.BookingValidationAuthorType.OFFERER)
+
+
+@pro_blueprint.route("/bookings/keep/token/<token>", methods=["PATCH"])
+@atomic()
+@login_required
+@spectree_serialize(
+    api=blueprint.pro_schema,
+    on_success_status=204,
+    resp=ExtendResponse(
+        **(
+            _BASE_CODE_DESCRIPTIONS
+            | {
+                "HTTP_204": (None, "L'annulation de la validation de la contremarque a bien été effectuée"),
+                "HTTP_410": (
+                    None,
+                    "La requête est refusée car la contremarque n'a pas encore été validée, a été annulée, ou son remboursement a été initié",
+                ),
+            }
+        )
+    ),
+)
+def patch_booking_keep_by_token(token: str) -> None:
+    booking = _get_booking_by_token_or_404(token)
+    check_user_can_validate_bookings_v2(current_user, booking.offererId)
+    rest_utils.check_venue_is_opened(booking.venue)
+    try:
+        bookings_api.mark_as_unused(booking)
+    except bookings_exceptions.BookingIsAlreadyCancelled:
+        raise api_errors.ResourceGoneError({"booking": ["Cette réservation a été annulée"]})
+    except bookings_exceptions.BookingIsNotUsed:
+        raise api_errors.ResourceGoneError({"booking": ["Cette réservation n'a pas encore été validée"]})
+    except bookings_exceptions.BookingHasActivationCode:
+        raise api_errors.ForbiddenError({"booking": ["Cette réservation ne peut pas être marquée comme inutilisée"]})
+    except bookings_exceptions.BookingIsAlreadyRefunded:
+        raise api_errors.ResourceGoneError({"payment": ["Le remboursement est en cours de traitement"]})

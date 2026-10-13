@@ -1,0 +1,405 @@
+import datetime
+import logging
+import re
+import typing
+
+from pcapi import settings
+from pcapi.core.finance import exceptions
+from pcapi.core.finance import models as finance_models
+from pcapi.core.finance import utils as finance_utils
+from pcapi.core.finance.backend.base import BaseFinanceBackend
+from pcapi.core.finance.backend.base import InvoicePayload
+from pcapi.core.finance.backend.base import SettlementPayload
+from pcapi.core.finance.backend.base import SettlementType
+from pcapi.utils import cache as cache_utils
+from pcapi.utils import date as date_utils
+from pcapi.utils import requests
+
+
+logger = logging.getLogger(__name__)
+
+TOKEN_CACHE_DURATION = 3600  # in seconds = 1h
+REDIS_TOKEN_CACHE_KEY = "cache:cegid:token"
+
+INVENTORY_IDS = {
+    "ORINDGRANT_18": "ORIND18P0000",
+    "OCINDGRANT_18": "CTIND18P0000",
+    "CGINDGRANT_18": "CGIND18P0000",
+    "ORINDGRANT_15_17": "ORIND18M0000",
+    "OCINDGRANT_15_17": "CTIND18M0000",
+    "CGINDGRANT_15_17": "CGIND18M0000",
+    "ORINDGRANT_18_V3": "ORIND18PPR00",
+    "OCINDGRANT_18_V3": "CTIND18PPR00",
+    "CGINDGRANT_18_V3": "CGIND18PPR00",
+    "ORINDGRANT_17_V3": "ORIND18MPR00",
+    "OCINDGRANT_17_V3": "CTIND18MPR00",
+    "CGINDGRANT_17_V3": "CGIND18MPR00",
+    "ORINDGRANT_FREE": "ORFREE000000",
+    "OCINDGRANT_FREE": "CTFREE000000",
+    "ORCOLEDUC_NAT": "ORCOLEDU0000",
+    "OCCOLEDUC_NAT": "CTCOLEDU0000",
+    "CGCOLEDUC_NAT": "CGCOLEDU0000",
+    "ORCOLAGRI": "ORCOLAGR0000",
+    "OCCOLAGRI": "CTCOLAGR0000",
+    "CGCOLAGRI": "CGCOLAGR0000",
+    "ORCOLARMEES": "ORCOLARM0000",
+    "OCCOLARMEES": "CTCOLARM0000",
+    "CGCOLARMEES": "CGCOLARM0000",
+    "ORCOLMER": "ORCOLMER0000",
+    "OCCOLMER": "CTCOLMER0000",
+    "CGCOLMER": "CGCOLMER0000",
+    "ORCOLMEG": "ORCOLMEG0000",
+    "OCCOLMEG": "CTCOLMEG0000",
+    "CGCOLMEG": "CGCOLMEG0000",
+}
+
+
+class CegidFinanceBackend(BaseFinanceBackend):
+    timeout = 20  # seconds
+
+    def __init__(self) -> None:
+        self._base_url = settings.CEGID_URL
+        self._interface = settings.CEGID_ENDPOINT
+
+    def _authenticate(self) -> str:
+        username = settings.CEGID_USERNAME
+        password = settings.CEGID_PASSWORD
+        client_id = settings.CEGID_CLIENT_ID
+        client_secret = settings.CEGID_CLIENT_SECRET
+
+        response = requests.post(
+            f"{self._base_url}/identity/connect/token",
+            headers={
+                "cache-control": "no-cache",
+                "content-type": "application/x-www-form-urlencoded",
+            },
+            data={
+                "username": username,
+                "password": password,
+                "grant_type": "password",
+                "scope": "api",
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+        )
+
+        if response.status_code != 200:
+            raise exceptions.FinanceBackendInvalidCredentials(response, "Couldn't authenticate")
+
+        response_json = response.json()
+        if response_json.get("token_type") != "Bearer" or not response_json.get("access_token"):
+            raise exceptions.FinanceBackendInvalidCredentials(response, "Unexpected authentication response")
+
+        return response_json["access_token"]
+
+    def _request(self, method: str, url: str, *args: typing.Any, **kwargs: typing.Any) -> requests.Response:
+        """
+        Private method to operate requests:
+        - Automatically reconnects in case of token expiration
+        - Use previously fetched cookies to authenticate requests
+        """
+        force_cache_update = False
+        for _ in range(2):  # In case the token expires, delete the stored one and re-authenticate
+            try:
+                headers = kwargs.pop("headers", {})
+                token = self._get_token(force_cache_update)
+                headers["Authorization"] = f"Bearer {token}"
+                timeout = kwargs.pop("timeout", 60)
+                response = requests.request(method, url, *args, headers=headers, timeout=timeout, **kwargs)
+                if response.status_code != 200:
+                    logger.info(
+                        "Cegid answered %s's call to url %s with status code %s", method, url, response.status_code
+                    )
+            except requests.exceptions.RequestException as exc:
+                raise exceptions.FinanceBackendApiError(f"Network error on Cegid API: {url}") from exc
+            if response.status_code == 422:
+                raise exceptions.FinanceBackendBadRequest(response, "Invalid data body")
+            if response.status_code != 401:
+                return response
+            force_cache_update = True
+
+        raise exceptions.FinanceBackendUnauthorized(response, "Unauthorized request")
+
+    def _get_token(self, force_cache_update: bool) -> str:
+        token = cache_utils.get_from_cache(
+            retriever=self._authenticate,
+            key_template=REDIS_TOKEN_CACHE_KEY,
+            expire=TOKEN_CACHE_DURATION,
+            force_update=force_cache_update,
+        )
+        return str(token)  # Cast as string here to help mypy
+
+    def get_bank_account(self, bank_account_id: int) -> dict:
+        url = f"{self._base_url}/{self._interface}/Vendor/{bank_account_id}"
+        params = {"$expand": "MainContact/Address,PrimaryContact,Attributes,PaymentInstructions"}
+        response = self._request("GET", url, params=params)
+
+        if self._get_exception_type(response) == "PX.Api.ContractBased.NoEntitySatisfiesTheConditionException":
+            raise exceptions.FinanceBackendBankAccountNotFound(
+                response, f"Couldn't find Vendor for BankAccount #{bank_account_id}"
+            )
+        if response.status_code != 200:
+            raise exceptions.FinanceBackendUnexpectedResponse(
+                response, f"Unexpected response when getting Vendor related to BankAccount #{bank_account_id}"
+            )
+
+        response_json = response.json()
+
+        return response_json
+
+    def push_bank_account(self, bank_account: finance_models.BankAccount) -> dict:
+        """
+        Create or update a bank account in Flex.
+        """
+        url_vendor = f"{self._base_url}/{self._interface}/Vendor"
+        params = {"$expand": "PaymentInstructions"}
+
+        body = {
+            "CashAccount": {"value": "BCI" if bank_account.offerer.is_caledonian else "CD512000"},
+            "CurrencyID": {"value": "EUR"},
+            "LegalName": {"value": finance_utils.clean_names_for_SEPA(bank_account.offerer.name)[:70]},
+            "LocationName": {"value": "Emplacement principal"},
+            "MainContact": {
+                "Address": {
+                    "AddressID": {"value": "PRINCIPAL"},
+                    "Country": {"value": "FR"},
+                    "City": {"value": ""},
+                    "PostalCode": {"value": ""},
+                    "AddressLine1": {"value": ""},
+                    "State": {"value": ""},
+                },
+            },
+            "NatureEco": {"value": "Exempt operations"},
+            "PaymentMethod": {"value": "VSEPA"},
+            "PaymentInstructions": [
+                {
+                    "Description": {"value": "IBAN"},
+                    "PaymentInstructionsID": {"value": "IBAN"},
+                    "PaymentMethod": {"value": "VSEPA"},
+                    "Value": {"value": bank_account.iban},
+                    "custom": {},
+                },
+            ],
+            "Siret": {"value": bank_account.offerer.siren},
+            "Status": {"value": "Active"},
+            "TaxZone": {"value": "EXO"},
+            "Terms": {"value": "30J"},
+            "VendorClass": {"value": "ACTEURCULT"},
+            "VendorID": {"value": str(bank_account.id)},
+            "VendorName": {"value": bank_account.label},
+        }
+
+        response = self._request("PUT", url_vendor, params=params, json=body)
+        if response.status_code != 200:
+            raise exceptions.FinanceBackendUnexpectedResponse(
+                response, f"Couldn't create Vendor for BankAccount #{bank_account.id}"
+            )
+
+        response_json = response.json()
+        return response_json
+
+    @staticmethod
+    def _format_amount(amount_in_cent: int, is_debit_note: bool) -> str:
+        """Convert from amount in cents (integer) to formatted unsigned string in full unit"""
+        amount = finance_utils.cents_to_full_unit(amount_in_cent)
+        if is_debit_note:
+            return str(amount)
+        return str(-amount)
+
+    def check_can_push_invoice(self) -> bool:
+        """We only push invoices out of work hours so as not to impact Cegid perfs during its work hours usage"""
+        allowed_hours = [19, 20, 21, 22, 23, 0, 1, 2, 3, 4, 5, 6, 7]  # "night" hours
+        allowed_weekdays = [5, 6]  # saturday and sunday
+        now = datetime.datetime.now(finance_utils.ACCOUNTING_TIMEZONE)
+        return now.weekday() in allowed_weekdays or now.hour in allowed_hours
+
+    def push_invoice(self, invoice_payload: InvoicePayload) -> dict:
+        """
+        Create a new invoice.
+        """
+        url = f"{self._base_url}/{self._interface}/Bill"
+        params = {"$expand": "Details"}
+
+        is_debit_note = invoice_payload.reference.startswith("A")
+        invoice_lines = self.get_invoice_lines(invoice_payload.invoice_id)
+        lines = [
+            {
+                "Amount": {"value": self._format_amount(line["amount"], is_debit_note)},
+                "Branch": {"value": "PASSCULT"},
+                "InventoryID": {"value": INVENTORY_IDS[line["product_id"]]},
+                "TransactionDescription": {"value": line["title"]},
+                "Description": {"value": line["title"]},
+                "Qty": {"value": 1},
+                "UnitCost": {"value": self._format_amount(line["amount"], is_debit_note)},
+                "UOM": {"value": "UNITE"},
+            }
+            for line in invoice_lines
+        ]
+
+        total_amount_str = self._format_amount(sum(e["amount"] for e in invoice_lines), is_debit_note)
+
+        body = {
+            "Amount": {"value": total_amount_str},
+            "ApprovedForPayment": {"value": False},
+            "Balance": {"value": total_amount_str},
+            "BranchID": {"value": "PASSCULT"},
+            "CurrencyID": {"value": "EUR"},
+            "Date": {"value": self.format_datetime(invoice_payload.invoice_date)},
+            "Description": {"value": invoice_payload.description},
+            "Details": lines,
+            "Hold": {"value": False},
+            "PostPeriod": {"value": f"{invoice_payload.invoice_date:%m%Y}"},
+            # "ReferenceNbr": {"value": invoice.reference},  # This has no effect because XRP generates an incremental ID that cannot be overriden
+            "RefNbr": {"value": invoice_payload.reference},
+            "Status": {"value": "Open"},
+            "TaxTotal": {"value": "0"},
+            "Terms": {"value": "30J"},
+            "Type": {"value": invoice_payload.invoice_external_type},
+            "Vendor": {"value": invoice_payload.bank_account_id},
+            "VendorRef": {"value": invoice_payload.reference},
+        }
+
+        response = self._request("PUT", url, params=params, json=body)
+
+        if (
+            response.status_code == 500
+            and self._get_exception_type(response) == "PX.Api.ContractBased.OutcomeEntityHasErrorsException"
+        ):
+            # If the invoice is already pushed, we might be in a retry due to a timeout from the first PUT query
+            # We thus get the id necessary for the POST
+            logger.warning(
+                "Invoice '%s' already pushed",
+                invoice_payload.reference,
+                extra={"invoice_id": invoice_payload.invoice_id},
+            )
+            response_json = self.get_invoice(invoice_payload.reference)
+
+        elif response.status_code != 200:
+            raise exceptions.FinanceBackendBadRequest(response, "Error in invoice creation payload")
+
+        else:
+            response_json = response.json()
+
+        if response_json.get("Status", {}).get("value") == "Balanced":
+            # Set invoice to Open in Cegid
+            logger.info(
+                "Set %s invoice to Open", invoice_payload.reference, extra={"invoice_id": invoice_payload.invoice_id}
+            )
+            set_open_url = f"{self._base_url}/{self._interface}/Bill/ReleaseBill"
+            set_open_response = self._request("POST", set_open_url, json={"Entity": {"id": response_json["id"]}})
+
+            if set_open_response.status_code // 100 != 2:
+                raise exceptions.FinanceBackendBadRequest(set_open_response, "Error in setting invoice to Open")
+        else:
+            # Debug: try to understand why it sometimes does not push everything
+            logger.warning(
+                "Invoice %s is not set to Open",
+                invoice_payload.reference,
+                extra={"invoice_id": invoice_payload.invoice_id, "data": response_json},
+            )
+
+        return response_json
+
+    def format_datetime(self, source_datetime: datetime.datetime) -> str:
+        utc_source_datetime = date_utils.make_timezone_aware_utc(source_datetime)
+
+        return utc_source_datetime.strftime("%Y-%m-%dT%H:%M:%S%:z")
+
+    def get_invoice(self, reference: str) -> dict:
+        url = f"{self._base_url}/{self._interface}/Bill"
+        # Search by using VendorRef instead of ReferenceNbr because ReferenceNbr is automatically generated by
+        # XRP Flex when creating the invoice and it's an incremental ID.
+        # We keep using VendorRef to represent the backend's reference eg. F24xxxx
+        response = self._request("GET", url, params={"$filter": f"VendorRef eq '{reference}'", "$expand": "Details"})
+
+        if response.status_code != 200:
+            raise exceptions.FinanceBackendUnexpectedResponse(
+                response, f"Unexpected response for Bill query of invoice '{reference}'"
+            )
+
+        response_json = response.json()
+
+        if len(response_json) < 1:
+            raise exceptions.FinanceBackendInvoiceNotFound(
+                response, f"Couldn't find invoice with reference: '{reference}'"
+            )
+
+        if len(response_json) > 1:
+            raise exceptions.FinanceBackendInconsistentDistantData(
+                response, f"Found multiple invoices with the same reference: '{reference}'"
+            )
+
+        return response_json[0]
+
+    def get_settlements(
+        self, from_date: datetime.date | None, to_date: datetime.date | None
+    ) -> list[SettlementPayload]:
+        url = f"{self._base_url}/{self._interface}/PaymentStatus"
+        # Date filters transaction dates older or equal to value
+        # EndDate filters transaction dates earlier or equal to value
+        from_date_filter = from_date.strftime("%Y-%m-%d") if from_date else ""
+        to_date_filter = to_date.strftime("%Y-%m-%d") if to_date else ""
+        response = self._request(
+            "PUT",
+            url,
+            params={"$expand": "PaymentStatusDetails"},
+            json={"Date": {"value": from_date_filter}, "EndDate": {"value": to_date_filter}},
+            timeout=180,  # Cegid takes time to collect all lines, a longer timeout is safer.
+        )
+
+        if response.status_code != 200:
+            raise exceptions.FinanceBackendUnexpectedResponse(response, "Unexpected response for PaymentStatus query")
+
+        response_json = response.json()
+
+        settlements = []
+        for settlement_data in response_json["PaymentStatusDetails"]:
+            if settlement_data["AdjgDocType"]["value"] in ("Payment", "Voided Payment", "Refund"):
+                ref_fourn_fact = settlement_data["RefFournFact"].get("value")
+                if not ref_fourn_fact:
+                    continue
+                try:
+                    payload = SettlementPayload(
+                        bank_account_id=int(settlement_data["VendorID"]["value"]),
+                        external_settlement_id=settlement_data["adjgRefNbr"]["value"],
+                        invoice_external_reference=re.sub(r"(_R)*$", "", ref_fourn_fact),
+                        settlement_type=SettlementType(settlement_data["AdjgDocType"]["value"]),
+                        settlement_batch_external_id=settlement_data.get("BatchNbr", {}).get("value"),
+                        settlement_batch_name=settlement_data.get("RefLot", {}).get("value"),
+                        settlement_batch_label=settlement_data.get("DescLot", {}).get("value"),
+                        settlement_date=datetime.date.fromisoformat(settlement_data["Date"]["value"].split("T")[0]),
+                        amount=(1 if settlement_data["AdjgDocType"]["value"] == "Refund" else -1)
+                        * int(float(settlement_data["Amount"]["value"]) * 100),
+                    )
+                    settlements.append(payload)
+                except Exception as exc:
+                    logger.exception("Unsupported settlement data", exc_info=exc, extra={"data": settlement_data})
+                    raise
+
+        return settlements
+
+    @property
+    def is_configured(self) -> bool:
+        return all(
+            bool(e)
+            for e in (
+                settings.CEGID_URL,
+                settings.CEGID_ENDPOINT,
+                settings.CEGID_USERNAME,
+                settings.CEGID_PASSWORD,
+                settings.CEGID_CLIENT_ID,
+                settings.CEGID_CLIENT_SECRET,
+            )
+        )
+
+    @property
+    def time_to_sleep_between_two_sync_requests(self) -> int:
+        """
+        Time in seconds to sleep between two requests to avoid rate limit errors
+        """
+        return 5
+
+    def _get_exception_type(self, response: requests.Response) -> str | None:
+        if response.status_code == 500 and ("application/json" in response.headers.get("content-type", "")):
+            return response.json().get("exceptionType")
+        return None

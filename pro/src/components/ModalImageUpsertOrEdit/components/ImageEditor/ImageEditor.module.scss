@@ -1,0 +1,44 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+
+.image-editor {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: fit-content;
+  margin: 0 auto;
+
+  &-label {
+    @include fonts.body;
+
+    padding-top: var(--size-spacing-xl);
+  }
+
+  &-scale {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    padding: var(--size-spacing-s) var(--size-spacing-l);
+    justify-content: center;
+    gap: var(--size-spacing-s);
+
+    &-label {
+      @include fonts.body-accent-xs;
+
+      color: var(--color-text-subtle);
+    }
+
+    &-input {
+      display: flex;
+      flex-grow: 1;
+      max-width: rem.torem(200px);
+    }
+
+    &-disabled {
+      @include fonts.body-xs;
+
+      padding: 0 rem.torem(16px);
+      text-align: center;
+    }
+  }
+}

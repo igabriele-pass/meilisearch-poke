@@ -1,0 +1,101 @@
+from datetime import timedelta
+
+import pytest
+
+import pcapi.core.mails.testing as mails_testing
+import pcapi.core.users.factories as users_factories
+from pcapi.core.bookings.factories import BookingFactory
+from pcapi.core.bookings.factories import CancelledBookingFactory
+from pcapi.core.bookings.models import BookingCancellationReasons
+from pcapi.core.categories import subcategories
+from pcapi.core.mails.transactional.bookings.booking_expiration_to_beneficiary import (
+    get_expired_bookings_to_beneficiary_data,
+)
+from pcapi.core.mails.transactional.bookings.booking_expiration_to_beneficiary import (
+    send_expired_bookings_to_beneficiary_email,
+)
+from pcapi.core.mails.transactional.brevo_template_ids import TransactionalEmail
+from pcapi.core.offers.factories import ProductFactory
+from pcapi.utils import date as date_utils
+
+
+@pytest.mark.usefixtures("db_session")
+class SendExpiredBookingsEmailToBeneficiaryBrevoTest:
+    def test_should_send_email_to_beneficiary_when_expired_book_booking_cancelled(self):
+        amnesiac_user = users_factories.BeneficiaryGrant18Factory(email="dory@example.com")
+        expired_today_book_booking = BookingFactory(
+            user=amnesiac_user, stock__offer__subcategoryId=subcategories.LIVRE_PAPIER.id
+        )
+        send_expired_bookings_to_beneficiary_email(amnesiac_user, [expired_today_book_booking])
+
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["template"] == TransactionalEmail.EXPIRED_BOOKING_TO_BENEFICIARY.value.__dict__
+        assert mails_testing.outbox[0]["params"]["WITHDRAWAL_PERIOD"] == 10
+
+    def test_should_send_email_to_beneficiary_when_expired_others_bookings_cancelled(self):
+        amnesiac_user = users_factories.BeneficiaryGrant18Factory(email="dory@example.com")
+        expired_today_dvd_booking = BookingFactory(
+            user=amnesiac_user, stock__offer__subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id
+        )
+        expired_today_cd_booking = BookingFactory(
+            user=amnesiac_user, stock__offer__subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id
+        )
+        send_expired_bookings_to_beneficiary_email(amnesiac_user, [expired_today_cd_booking, expired_today_dvd_booking])
+
+        assert len(mails_testing.outbox) == 1
+        assert mails_testing.outbox[0]["template"] == TransactionalEmail.EXPIRED_BOOKING_TO_BENEFICIARY.value.__dict__
+        assert mails_testing.outbox[0]["params"]["WITHDRAWAL_PERIOD"] == 30
+
+    def test_should_send_two_emails_to_beneficiary_when_expired_books_and_other_bookings_cancelled(self):
+        amnesiac_user = users_factories.BeneficiaryGrant18Factory(email="dory@example.com")
+        expired_today_book_booking = BookingFactory(
+            user=amnesiac_user, stock__offer__subcategoryId=subcategories.LIVRE_PAPIER.id
+        )
+        expired_today_cd_booking = BookingFactory(
+            user=amnesiac_user, stock__offer__subcategoryId=subcategories.SUPPORT_PHYSIQUE_FILM.id
+        )
+        send_expired_bookings_to_beneficiary_email(
+            amnesiac_user, [expired_today_cd_booking, expired_today_book_booking]
+        )
+
+        assert len(mails_testing.outbox) == 2
+        assert mails_testing.outbox[0]["params"]["WITHDRAWAL_PERIOD"] == 10
+        assert mails_testing.outbox[1]["params"]["WITHDRAWAL_PERIOD"] == 30
+
+    def test_should_get_correct_data_when_expired_bookings_cancelled(self):
+        now = date_utils.get_naive_utc_now()
+        amnesiac_user = users_factories.BeneficiaryGrant18Factory(email="dory@example.com", firstName="Dory")
+        long_ago = now - timedelta(days=31)
+        dvd = ProductFactory(name="Memento", subcategoryId=subcategories.SUPPORT_PHYSIQUE_MUSIQUE_VINYLE.id)
+        expired_today_dvd_booking = CancelledBookingFactory(
+            stock__offer__product=dvd,
+            stock__offer__name="Memento",
+            stock__offer__venue__name="Mnémosyne",
+            dateCreated=long_ago,
+            cancellationReason=BookingCancellationReasons.EXPIRED,
+            user=amnesiac_user,
+        )
+
+        cd = ProductFactory(name="Random Access Memories", subcategoryId=subcategories.SUPPORT_PHYSIQUE_MUSIQUE_CD.id)
+        expired_today_cd_booking = CancelledBookingFactory(
+            stock__offer__product=cd,
+            stock__offer__name="Random Access Memories",
+            stock__offer__venue__name="Virgin Megastore",
+            dateCreated=long_ago,
+            cancellationReason=BookingCancellationReasons.EXPIRED,
+            user=amnesiac_user,
+        )
+
+        email_data = get_expired_bookings_to_beneficiary_data(
+            amnesiac_user, [expired_today_dvd_booking, expired_today_cd_booking], 30
+        )
+
+        assert email_data.template == TransactionalEmail.EXPIRED_BOOKING_TO_BENEFICIARY.value
+        assert email_data.params == {
+            "FIRSTNAME": "Dory",
+            "BOOKINGS": [
+                {"offer_name": "Memento", "venue_name": "Mnémosyne"},
+                {"offer_name": "Random Access Memories", "venue_name": "Virgin Megastore"},
+            ],
+            "WITHDRAWAL_PERIOD": 30,
+        }

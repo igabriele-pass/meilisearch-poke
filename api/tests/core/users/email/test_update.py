@@ -1,0 +1,182 @@
+from unittest.mock import patch
+
+import pytest
+
+import pcapi.core.users.constants as users_constants
+import pcapi.core.users.email.update as email_update
+import pcapi.core.users.exceptions as users_exceptions
+from pcapi.core import token as token_utils
+from pcapi.core.users import factories as users_factories
+from pcapi.core.users.models import EmailHistoryEventTypeEnum
+from pcapi.core.users.models import User
+from pcapi.models import db
+from pcapi.utils.jwt import encode_jwt_payload
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+def _initialize_token(user, new_email=None, app=None):
+    data = {"new_email": new_email} if new_email else None
+    return token_utils.Token.create(
+        type_=token_utils.TokenType.EMAIL_CHANGE_CONFIRMATION,
+        ttl=users_constants.EMAIL_CHANGE_TOKEN_LIFE_TIME,
+        user_id=user.id,
+        data=data,
+    ).encoded_token
+
+
+class RequestEmailUpdateTest:
+    def test_request_email_update_history(self):
+        user = users_factories.UserFactory()
+
+        email_update.request_email_update(user, author=user)
+
+        reloaded_user = db.session.get(User, user.id)
+        assert len(reloaded_user.email_history) == 1
+
+        history = reloaded_user.email_history[0]
+        assert history.oldEmail == user.email
+        assert history.newUserEmail is None
+        assert history.newDomainEmail is None
+        assert history.eventType == EmailHistoryEventTypeEnum.UPDATE_REQUEST
+        assert history.author == user
+        assert history.id is not None
+
+
+class EmailUpdateConfirmationTest:
+    def test_email_update_confirmation(self):
+        user = users_factories.UserFactory()
+        token = _initialize_token(user)
+
+        returned_user = email_update.confirm_email_update_request(token)
+
+        assert user == returned_user
+        assert len(user.email_history) == 1
+        assert user.email_history[0].eventType == EmailHistoryEventTypeEnum.CONFIRMATION
+        assert user.email_history[0].author == user
+
+        assert not token_utils.Token.token_exists(token_utils.TokenType.EMAIL_CHANGE_CONFIRMATION, user.id)
+
+    def test_email_update_confirmation_with_invalid_token(self):
+        user = users_factories.UserFactory()
+        _initialize_token(user)
+
+        with pytest.raises(users_exceptions.InvalidToken):
+            email_update.confirm_email_update_request("invalid token")
+
+        assert not user.email_history
+        assert token_utils.Token.token_exists(token_utils.TokenType.EMAIL_CHANGE_CONFIRMATION, user.id)
+
+
+class EmailUpdateCancellationTest:
+    def test_email_update_cancellation(self, app):
+        # Given
+        user = users_factories.UserFactory()
+        email_update_request = users_factories.EmailUpdateEntryFactory(user=user)
+        token = _initialize_token(user, email_update_request.newEmail, app)
+
+        # When
+        email_update.cancel_email_update_request(token)
+
+        # Then
+        # Email history is updated
+        email_history = user.email_history
+        assert len(email_history) == 2
+        assert email_history[0].eventType == EmailHistoryEventTypeEnum.UPDATE_REQUEST
+        assert email_history[1].eventType == EmailHistoryEventTypeEnum.CANCELLATION
+        assert email_history[1].author == user
+
+        # Account is suspended
+        assert user.is_active is False
+
+        # Token is deleted
+        assert not token_utils.Token.token_exists(token_utils.TokenType.EMAIL_CHANGE_CONFIRMATION, user.id)
+
+    def test_email_update_cancellation_with_invalid_token(self, app):
+        # Given
+        user = users_factories.UserFactory()
+        email_update_request = users_factories.EmailUpdateEntryFactory(user=user)
+
+        _initialize_token(user, email_update_request.newEmail, app)
+
+        invalid_token = encode_jwt_payload({"current_email": user.email, "new_email": "new@e.mail"})
+
+        # When
+        with pytest.raises(users_exceptions.InvalidToken):
+            email_update.cancel_email_update_request(invalid_token)
+
+        # Then
+        # Email history is not updated
+        email_history = user.email_history
+        assert len(email_history) == 1
+        assert email_history[0].eventType == EmailHistoryEventTypeEnum.UPDATE_REQUEST
+
+        # Account is not suspended
+        assert user.is_active is True
+
+        # Token is not deleted
+        assert token_utils.Token.token_exists(token_utils.TokenType.EMAIL_CHANGE_CONFIRMATION, user.id)
+
+    def test_email_update_cancellation_suspend_account_failed(self, app):
+        # Given
+        user = users_factories.UserFactory()
+        email_update_request = users_factories.EmailUpdateEntryFactory(user=user)
+        token = _initialize_token(user, email_update_request.newEmail, app)
+
+        with pytest.raises(ValueError):
+            with patch(
+                "pcapi.core.users.api.suspend_account",
+                side_effect=ValueError("Something went wrong"),
+            ):
+                email_update.cancel_email_update_request(token)
+
+        # Then
+        # Email history is not updated
+        email_history = user.email_history
+        assert len(email_history) == 1
+
+        # Account is not suspended
+        assert user.is_active is True
+
+        # Token is not deleted
+        assert token_utils.Token.token_exists(token_utils.TokenType.EMAIL_CHANGE_CONFIRMATION, user.id)
+
+
+class RequestEmailUpdateFromAdminTest:
+    def test_history_is_authored_by_the_admin(self):
+        user = users_factories.UserFactory(email="old@example.com")
+        admin = users_factories.AdminFactory()
+
+        email_update.request_email_update_from_admin(user, author=admin, email="new@example.com")
+
+        assert user.email == "new@example.com"
+        assert len(user.email_history) == 1
+        assert user.email_history[0].eventType == EmailHistoryEventTypeEnum.ADMIN_UPDATE_REQUEST
+        assert user.email_history[0].author == admin
+
+
+class FullEmailUpdateByAdminTest:
+    def test_history_is_authored_by_the_admin(self):
+        user = users_factories.UserFactory(email="old@example.com")
+        admin = users_factories.AdminFactory()
+
+        email_update.full_email_update_by_admin(user, author=admin, email="new@example.com")
+
+        assert user.email == "new@example.com"
+        assert len(user.email_history) == 1
+        assert user.email_history[0].eventType == EmailHistoryEventTypeEnum.ADMIN_UPDATE
+        assert user.email_history[0].author == admin
+
+
+class ClearEmailByAdminTest:
+    def test_history_is_authored_by_the_admin(self):
+        user = users_factories.UserFactory(email="old@example.com")
+        admin = users_factories.AdminFactory()
+
+        email_update.clear_email_by_admin(user, author=admin)
+
+        assert user.email == f"{user.id}@email.supprime"
+        assert len(user.email_history) == 1
+        assert user.email_history[0].eventType == EmailHistoryEventTypeEnum.ADMIN_UPDATE
+        assert user.email_history[0].author == admin

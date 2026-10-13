@@ -1,0 +1,290 @@
+import { screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { vi } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import * as analyticsHook from '@/app/App/analytics/firebase'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import { GET_DATA_ERROR_MESSAGE } from '@/commons/core/shared/constants'
+import * as useSnackBar from '@/commons/hooks/useSnackBar'
+import { downloadFile } from '@/commons/utils/downloadFile'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { DOWNLOAD_REIMBURSEMENTS_LABEL } from '../constants'
+import {
+  InvoiceDownloadActionsBar,
+  MAX_ITEMS_DOWNLOAD,
+} from './InvoiceDownloadActionsBar'
+
+vi.mock('@/app/App/analytics/firebase', () => ({
+  useAnalytics: vi.fn(),
+}))
+
+vi.mock('@/commons/utils/downloadFile', () => ({
+  downloadFile: vi.fn(),
+}))
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getReimbursementsCsvV2: vi.fn(),
+    getCombinedInvoices: vi.fn(),
+  },
+}))
+
+const snackBarError = vi.fn()
+const mockLogEvent = vi.fn()
+
+describe('<InvoiceDownloadActionsBar />', () => {
+  beforeEach(() => {
+    vi.spyOn(useSnackBar, 'useSnackBar').mockImplementation(() => ({
+      success: vi.fn(),
+      error: snackBarError,
+    }))
+
+    vi.spyOn(analyticsHook, 'useAnalytics').mockReturnValue({
+      logEvent: mockLogEvent,
+    })
+  })
+
+  it('should render without accessibility violations when displayed', async () => {
+    const { container } = renderWithProviders(
+      <InvoiceDownloadActionsBar
+        description="1 justificatif sélectionné"
+        invoiceReferences={['INV-1']}
+      />
+    )
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  describe('InvoiceDownloadActionsBar', () => {
+    it('should render without accessibility violations', async () => {
+      const { container } = renderWithProviders(
+        <InvoiceDownloadActionsBar
+          invoiceReferences={[]}
+          description="0 justificatif sélectionné"
+        />
+      )
+
+      expect(await axe(container)).toHaveNoViolations()
+    })
+
+    it('should not render the actions bar when no invoice is checked', () => {
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description="0 justificatif sélectionné"
+          invoiceReferences={[]}
+        />
+      )
+
+      expect(
+        screen.queryByText('Télécharger les justificatifs (.pdf)')
+      ).not.toBeInTheDocument()
+    })
+
+    it('should display the default count with a singular label when only one invoice is checked', () => {
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description="1 justificatif sélectionné"
+          invoiceReferences={['INV-1']}
+        />
+      )
+
+      expect(screen.getByText('1 justificatif sélectionné')).toBeInTheDocument()
+    })
+
+    it('should display the default count with a plural label when several invoices are checked', () => {
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description="2 justificatifs sélectionnés"
+          invoiceReferences={['INV-1', 'INV-2']}
+        />
+      )
+
+      expect(
+        screen.getByText('2 justificatifs sélectionnés')
+      ).toBeInTheDocument()
+    })
+
+    it('should display a custom description when provided', () => {
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          invoiceReferences={['INV-1', 'INV-2']}
+          description="2 justificatifs pour un total de 150,00 €"
+        />
+      )
+
+      expect(
+        screen.getByText('2 justificatifs pour un total de 150,00 €')
+      ).toBeInTheDocument()
+    })
+
+    it('should download the PDF justificatifs and log the event on success', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getCombinedInvoices).mockResolvedValueOnce(
+        'pdf-blob' as never
+      )
+
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description="2 justificatifs sélectionnés"
+          invoiceReferences={['INV-1', 'INV-2']}
+        />
+      )
+
+      await user.click(
+        screen.getByRole('button', {
+          name: 'Télécharger les justificatifs (.pdf)',
+        })
+      )
+
+      expect(api.getCombinedInvoices).toHaveBeenCalledWith({
+        query: { invoiceReferences: ['INV-1', 'INV-2'] },
+      })
+      expect(downloadFile).toHaveBeenCalledWith(
+        'pdf-blob',
+        'justificatif_remboursement_pass_culture.pdf'
+      )
+      expect(mockLogEvent).toHaveBeenCalledWith(
+        Events.CLICKED_INVOICES_DOWNLOAD,
+        {
+          fileType: 'justificatif',
+          filesCount: 2,
+          buttonType: 'multiple',
+        }
+      )
+      expect(snackBarError).not.toHaveBeenCalled()
+    })
+
+    it('should show a generic error when downloading the PDF justificatifs fails', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getCombinedInvoices).mockRejectedValueOnce(
+        new Error('boom')
+      )
+
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description="1 justificatif sélectionné"
+          invoiceReferences={['INV-1']}
+        />
+      )
+
+      await user.click(
+        screen.getByRole('button', {
+          name: 'Télécharger les justificatifs (.pdf)',
+        })
+      )
+
+      expect(snackBarError).toHaveBeenCalledWith(GET_DATA_ERROR_MESSAGE)
+      expect(downloadFile).not.toHaveBeenCalled()
+    })
+
+    it('should show error when downloading more than MAX_ITEMS_DOWNLOAD invoices for justificatifs', async () => {
+      const user = userEvent.setup()
+      const manyInvoices = Array.from(
+        { length: MAX_ITEMS_DOWNLOAD + 1 },
+        (_, i) => `INV-${i + 1}`
+      )
+
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description={`${manyInvoices.length} justificatifs sélectionnés`}
+          invoiceReferences={manyInvoices}
+        />
+      )
+
+      await user.click(
+        screen.getByRole('button', {
+          name: 'Télécharger les justificatifs (.pdf)',
+        })
+      )
+
+      expect(snackBarError).toHaveBeenCalledWith(
+        `Vous ne pouvez pas télécharger plus de ${MAX_ITEMS_DOWNLOAD} documents en une fois.`
+      )
+      expect(api.getCombinedInvoices).not.toHaveBeenCalled()
+    })
+
+    it('should download the CSV details and log the event on success', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getReimbursementsCsvV2).mockResolvedValueOnce(
+        'csv-blob' as never
+      )
+
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description="2 justificatifs sélectionnés"
+          invoiceReferences={['INV-1', 'INV-2']}
+        />
+      )
+
+      await user.click(
+        screen.getByRole('button', { name: DOWNLOAD_REIMBURSEMENTS_LABEL })
+      )
+
+      expect(api.getReimbursementsCsvV2).toHaveBeenCalledWith({
+        query: { invoicesReferences: ['INV-1', 'INV-2'] },
+        parseAs: 'blob',
+      })
+      expect(downloadFile).toHaveBeenCalledWith(
+        'csv-blob',
+        'remboursements_pass_culture.csv'
+      )
+      expect(mockLogEvent).toHaveBeenCalledWith(
+        Events.CLICKED_INVOICES_DOWNLOAD,
+        {
+          fileType: 'details',
+          filesCount: 2,
+          buttonType: 'multiple',
+        }
+      )
+      expect(snackBarError).not.toHaveBeenCalled()
+    })
+
+    it('should show a generic error when downloading the CSV details fails', async () => {
+      const user = userEvent.setup()
+      vi.mocked(api.getReimbursementsCsvV2).mockRejectedValueOnce(
+        new Error('boom')
+      )
+
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description="1 justificatif sélectionné"
+          invoiceReferences={['INV-1']}
+        />
+      )
+
+      await user.click(
+        screen.getByRole('button', { name: DOWNLOAD_REIMBURSEMENTS_LABEL })
+      )
+
+      expect(snackBarError).toHaveBeenCalledWith(GET_DATA_ERROR_MESSAGE)
+      expect(downloadFile).not.toHaveBeenCalled()
+    })
+
+    it('should show error when downloading more than MAX_ITEMS_DOWNLOAD invoices for details', async () => {
+      const user = userEvent.setup()
+      const manyInvoices = Array.from(
+        { length: MAX_ITEMS_DOWNLOAD + 1 },
+        (_, i) => `INV-${i + 1}`
+      )
+
+      renderWithProviders(
+        <InvoiceDownloadActionsBar
+          description={`${manyInvoices.length} justificatifs sélectionnés`}
+          invoiceReferences={manyInvoices}
+        />
+      )
+
+      await user.click(
+        screen.getByRole('button', { name: DOWNLOAD_REIMBURSEMENTS_LABEL })
+      )
+
+      expect(snackBarError).toHaveBeenCalledWith(
+        `Vous ne pouvez pas télécharger plus de ${MAX_ITEMS_DOWNLOAD} documents en une fois.`
+      )
+      expect(api.getReimbursementsCsvV2).not.toHaveBeenCalled()
+    })
+  })
+})

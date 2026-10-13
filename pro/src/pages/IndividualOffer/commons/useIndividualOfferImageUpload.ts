@@ -1,0 +1,120 @@
+import { useCallback, useState } from 'react'
+
+import { api } from '@/apiClient/api'
+import type { CreateThumbnailResponseModel } from '@/apiClient/v1'
+import type { IndividualOfferImage } from '@/commons/core/Offers/types'
+import type { OnImageUploadArgs } from '@/components/ModalImageUpsertOrEdit/ModalImageUpsertOrEdit'
+
+type IndividualImageOfferContextValues = {
+  displayedImage?: IndividualOfferImage | OnImageUploadArgs
+  hasUpsertedImage: boolean
+  onImageUpload: (args: OnImageUploadArgs) => void
+  onImageDelete: () => void
+  handleEanImage: (imageUrl?: string) => void
+  handleImageOnSubmit: (
+    offerId: number
+  ) => Promise<CreateThumbnailResponseModel | undefined>
+}
+
+export const useIndividualOfferImageUpload = (
+  initialImageOffer?: IndividualOfferImage
+): IndividualImageOfferContextValues => {
+  const [hasUpsertedImage, setHasUpsertedImage] = useState(false)
+  const [imageOffer, setImageOffer] = useState<
+    IndividualOfferImage | undefined
+  >(initialImageOffer)
+  const [imageToUpsert, setImageToUpsert] = useState<
+    OnImageUploadArgs | undefined
+  >(undefined)
+  const displayedImage = hasUpsertedImage ? imageToUpsert : imageOffer
+
+  const handleEanImage = useCallback((imageUrl?: string) => {
+    if (imageUrl) {
+      // There is nothing to upload, since the same image
+      // will be used by offer based on a shared EAN.
+      // We still need to set the image offer to be able to
+      // display it as preview.
+      setImageOffer({
+        url: imageUrl,
+        // Credit isn't defined in Product - images property,
+        // is not needed for the preview anyway.
+        credit: null,
+        alternativeText: null,
+      })
+    } else {
+      setImageOffer(undefined)
+    }
+  }, [])
+
+  const handleImageOnSubmit = useCallback(
+    async (offerId: number) => {
+      const shouldUploadThumbnail = hasUpsertedImage && !!imageToUpsert
+      const shouldDeleteThumbnail = hasUpsertedImage && !imageToUpsert
+
+      if (shouldUploadThumbnail) {
+        const {
+          imageFile: thumb,
+          credit,
+          cropParams,
+          alternativeText,
+        } = imageToUpsert
+        const {
+          height: croppingRectHeight,
+          width: croppingRectWidth,
+          x: croppingRectX,
+          y: croppingRectY,
+        } = cropParams ?? {}
+
+        const thumbnail = {
+          thumb,
+          credit: credit ?? '',
+          alternativeText: alternativeText ?? '',
+          croppingRectHeight,
+          croppingRectWidth,
+          croppingRectX,
+          croppingRectY,
+          offerId,
+        }
+
+        const result = await api.createThumbnail({ body: thumbnail })
+        setImageOffer({
+          url: result.url,
+          credit: result.credit ?? null,
+          alternativeText: result.alternativeText ?? null,
+        })
+        setImageToUpsert(undefined)
+        setHasUpsertedImage(false)
+        return result
+      }
+
+      if (shouldDeleteThumbnail) {
+        await api.deleteThumbnail({ path: { offer_id: offerId } })
+        setImageOffer(undefined)
+        setImageToUpsert(undefined)
+        setHasUpsertedImage(false)
+      }
+
+      return undefined
+    },
+    [hasUpsertedImage, imageToUpsert]
+  )
+
+  const onImageUpload = useCallback((image: OnImageUploadArgs) => {
+    setHasUpsertedImage(true)
+    setImageToUpsert(image)
+  }, [])
+
+  const onImageDelete = useCallback(() => {
+    setHasUpsertedImage(true)
+    setImageToUpsert(undefined)
+  }, [])
+
+  return {
+    displayedImage,
+    hasUpsertedImage,
+    onImageUpload,
+    onImageDelete,
+    handleEanImage,
+    handleImageOnSubmit,
+  }
+}

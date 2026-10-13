@@ -1,0 +1,62 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/variables/_z-index.scss" as zIndex;
+@use "styles/mixins/_outline.scss" as outline;
+
+.adage-container {
+  width: max-content;
+}
+
+.adage-button {
+  display: flex;
+  align-items: center;
+  background-color: var(--color-background-default);
+  padding: var(--size-spacing-s) var(--size-spacing-m);
+  border-radius: var(--size-border-radius-m);
+  border: rem.torem(1px) solid var(--color-border-default);
+  height: rem.torem(40px);
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--color-text-default);
+
+  &-is-active {
+    @include fonts.button;
+  }
+
+  &-selected {
+    @include fonts.button;
+
+    border: rem.torem(2px) solid var(--color-border-brand-primary);
+  }
+
+  &:hover {
+    background-color: var(--color-background-subtle);
+  }
+
+  &:focus-visible {
+    @include outline.focus-outline;
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    border: none;
+    color: var(--color-text-disabled);
+    background-color: var(--color-background-disabled);
+  }
+
+  &-modal {
+    position: relative;
+  }
+
+  &-children {
+    border-radius: var(--size-border-radius-m);
+    box-shadow: var(--shadow-overlay);
+    border: none;
+    z-index: zIndex.$modal-z-index;
+    background-color: var(--color-background-default);
+  }
+
+  &-dropdown {
+    margin-left: var(--size-spacing-s);
+  }
+}

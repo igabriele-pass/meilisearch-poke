@@ -1,0 +1,84 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_outline.scss" as outline;
+
+.toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  position: relative;
+  margin-bottom: var(--size-spacing-l);
+  gap: 1ch;
+  border: 0;
+  padding: 0;
+  background-color: transparent;
+  color: var(--color-text-default);
+}
+
+.toggle:active:not([disabled]) {
+  opacity: 0.64;
+}
+
+.toggle-display {
+  --offset: 2px;
+  --diameter: 28px;
+
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-around;
+  box-sizing: content-box;
+  width: rem.torem(56px);
+  height: rem.torem(32px);
+  position: relative;
+  border-radius: 100vw;
+  background-color: var(--color-icon-subtle);
+  transform: inherit;
+}
+
+.toggle-display::before {
+  content: "";
+  z-index: 2;
+  position: absolute;
+  top: 50%;
+  left: var(--offset);
+  box-sizing: border-box;
+  width: var(--diameter);
+  height: var(--diameter);
+  border-radius: var(--size-border-radius-pill);
+  background-color: var(--color-background-default);
+  transform: translate(0, -50%);
+  will-change: transform;
+  transition: inherit;
+}
+
+.toggle:focus-visible .toggle-display {
+  @include outline.focus-outline;
+}
+
+.toggle:focus,
+.toggle:focus:not(:focus-visible) .toggle-display {
+  outline: 0;
+}
+
+.toggle[aria-pressed="true"] .toggle-display {
+  background-color: var(--color-icon-success);
+}
+
+.toggle[aria-pressed="true"] .toggle-display::before {
+  background: center / contain no-repeat url("./assets/check.png")
+    var(--color-background-default);
+  background-size: rem.torem(16px);
+  left: rem.torem(-2px);
+  transform: translate(100%, -50%);
+}
+
+.toggle[disabled] {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}
+
+.toggle[disabled] .toggle-display::before {
+  background: center / contain no-repeat url("./assets/lock.png")
+    var(--color-background-default);
+  background-size: rem.torem(16px);
+}

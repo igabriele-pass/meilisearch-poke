@@ -1,0 +1,60 @@
+import pytest
+
+import pcapi.core.educational.factories as collective_factories
+from pcapi.core import testing
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.offerers import repository as offerers_repository
+from pcapi.core.testing import assert_num_queries
+from pcapi.core.users import factories as users_factories
+from pcapi.models.api_errors import OBJECT_NOT_FOUND_ERROR_MESSAGE
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+class Return200Test:
+    @pytest.mark.parametrize(
+        "allowed_on_adage,adage_id,collective_ds_application,expected_is_onboarded",
+        [
+            (False, None, None, False),
+            (False, "1", None, True),
+            (False, None, "1", True),
+            (False, "1", "1", True),
+            (True, None, None, True),
+        ],
+    )
+    def test_synchronize_offerer_onboarding_success(
+        self, client, allowed_on_adage, adage_id, collective_ds_application, expected_is_onboarded
+    ):
+        pro = users_factories.ProFactory()
+        offerer = offerers_factories.OffererFactory(allowedOnAdage=allowed_on_adage)
+        offerers_factories.UserOffererFactory(user=pro, offerer=offerer)
+
+        venue = offerers_factories.VenueFactory(managingOfferer=offerer, adageId=adage_id)
+        if collective_ds_application is not None:
+            collective_factories.CollectiveDmsApplicationFactory(venue=venue, procedure=collective_ds_application)
+
+        offerer_id = offerer.id
+        client = client.with_session_auth(pro.email)
+        response = client.post(f"/offerers/{offerer_id}/synchronize-onboarding")
+        assert response.status_code == 204, response.json
+
+        offerer_with_extradata = offerers_repository.get_offerer_and_extradata(offerer_id)
+        assert offerer_with_extradata is not None
+        assert offerer_with_extradata.isOnboarded == expected_is_onboarded
+
+
+class Return404Test:
+    num_queries = testing.AUTHENTICATION_QUERIES
+    num_queries += 1  # check user_offerer
+    num_queries += 1  # rollback (atomic)
+    num_queries += 1  # rollback (atomic)
+
+    def test_access_by_unauthorized_pro_user(self, client):
+        pro = users_factories.ProFactory()
+        client = client.with_session_auth(email=pro.email)
+        offerer_id = 0
+        with assert_num_queries(self.num_queries):
+            response = client.post(f"/offerers/{offerer_id}/synchronize-onboarding")
+            assert response.status_code == 404
+            assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}

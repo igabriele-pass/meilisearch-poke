@@ -1,0 +1,42 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.video-uploader-container {
+  height: rem.torem(240px);
+}
+
+.video-uploader-no-video {
+  display: flex;
+  height: 100%;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-spacing-s);
+  border: rem.torem(1px) dashed var(--color-border-default);
+  border-radius: var(--size-border-radius-s);
+  padding: var(--size-spacing-xl);
+
+  &:hover {
+    background: var(--color-background-subtle);
+    border-color: var(--color-border-brand-primary);
+  }
+
+  &-disabled {
+    background: var(--color-background-subtle);
+    border-color: var(--color-border-default);
+  }
+}
+
+.action-wrapper {
+  max-width: rem.torem(521px);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: var(--size-spacing-l);
+  margin-top: var(--size-spacing-l);
+}
+
+.video-uploader-text-subtle {
+  color: var(--color-text-subtle);
+}

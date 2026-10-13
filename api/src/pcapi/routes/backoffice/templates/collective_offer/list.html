@@ -1,0 +1,90 @@
+{% extends "layouts/list.html" %}
+{% from "components/forms.html" import build_advanced_filters_form with context %}
+{% from "components/dynamic/modal.html" import build_dynamic_modal with context %}
+{% from "components/table.html" import sortable_column %}
+{% set rows_count = rows|length %}
+{% set table_id = "collective-offer-table" %}
+{% set activate_sortable_columns = not date_created_sort_url %}
+{% block title %}Offres collectives{% endblock %}
+{% block search_block %}{{ build_advanced_filters_form(form, dst) }}{% endblock %}
+{% block table_header %}
+  <th scope="col"
+      data-pc-column-name="Checkbox">
+    <input class="form-check-input fs-6 mt-0"
+           type="checkbox"
+           name="pc-table-multi-select-check-all" />
+  </th>
+  <th scope="col">Actions</th>
+  <th scope="col">ID</th>
+  <th scope="col">Nom de l'offre</th>
+  <th scope="col">Formats</th>
+  {% if has_permission("PRO_FRAUD_ACTIONS") %}<th scope="col">Règles de conformité</th>{% endif %}
+  <th scope="col">État</th>
+  <th scope="col">Statut</th>
+  <th scope="col">Créateur de l'offre</th>
+  {% if date_created_sort_url %}
+    <th scope="col">
+      <a href="{{ date_created_sort_url }}"
+         class="text-decoration-none"
+         title="Changer pour un tri {{ 'croissant' if request.args.get('sort') == 'dateCreated' and request.args.get('order') == 'desc' else 'décroissant' }}">
+        Date de création
+        <i class="bi bi-sort-{{ 'down' if request.args.get('sort') == 'dateCreated' and request.args.get('order') == 'desc' else 'up' }}-alt"></i>
+      </a>
+    </th>
+  {% else %}
+    {% call sortable_column(activate_sortable_columns, comparator="float") %}
+      Date de création
+    {% endcall %}
+  {% endif %}
+  {% call sortable_column(activate_sortable_columns, comparator="float") %}
+    Date de l'évènement
+  {% endcall %}
+  {% call sortable_column(activate_sortable_columns, comparator="float", default_sort="up") %}
+    Tarif
+  {% endcall %}
+  {% call sortable_column(activate_sortable_columns, default_sort="up") %}
+    Entité juridique
+  {% endcall %}
+  {% call sortable_column(activate_sortable_columns, default_sort="up") %}
+    Partenaire culturel
+  {% endcall %}
+  <th scope="col">Offres du partenaire culturel</th>
+  <th scope="col">Ministère</th>
+  <th scope="col">Année</th>
+  <th scope="col">Partenaire technique</th>
+{% endblock %}
+{% block table_body %}
+  {% include "collective_offer/list_rows.html" %}
+{% endblock %}
+{% block multi_select_menu %}
+  <div class="counter-container text-nowrap">
+    <span class="counter">0</span> offre(s) collective(s) sélectionnée(s)
+  </div>
+  <div data-toggle="pc-batch-confirm-btn-group"
+       data-toggle-id="table-container-collective-offer-validation-btn-group"
+       data-pc-table-multi-select-id="{{ table_name }}"
+       data-input-ids-name="object_ids"
+       class="d-flex">
+    <button disabled
+            type="button"
+            class="btn border-end rounded-0 border-top-0 border-bottom-0 text-nowrap"
+            data-bs-toggle="modal"
+            data-bs-target="#batch-validate-modal"
+            data-use-dynamic-modal="true">Valider</button>
+    <button disabled
+            type="button"
+            class="btn rounded-0 border-top-0 border-bottom-0 text-nowrap"
+            data-bs-toggle="modal"
+            data-bs-target="#batch-reject-modal"
+            data-use-dynamic-modal="true">Rejeter</button>
+  </div>
+{% endblock %}
+{% block after_table %}
+  {% for row in rows %}
+    {% set collective_offer = row.CollectiveOffer %}
+    {{ build_dynamic_modal(url_for('backoffice.collective_offer.get_validate_collective_offer_form', collective_offer_id=collective_offer.id) , "validate-collective-offer-modal-" + collective_offer.id|string) }}
+    {{ build_dynamic_modal(url_for('backoffice.collective_offer.get_reject_collective_offer_form', collective_offer_id=collective_offer.id) , "reject-collective-offer-modal-" + collective_offer.id|string) }}
+  {% endfor %}
+  {{ build_dynamic_modal(url_for("backoffice.collective_offer.get_batch_reject_collective_offers_form") , "batch-reject-modal", form="form-ids-" + table_name) }}
+  {{ build_dynamic_modal(url_for("backoffice.collective_offer.get_batch_validate_collective_offers_form") , "batch-validate-modal", form="form-ids-" + table_name) }}
+{% endblock %}

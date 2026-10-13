@@ -1,0 +1,436 @@
+import classNames from 'classnames'
+import { TABLET_MEDIA_QUERY, useMediaQuery } from 'commons/hooks/useMediaQuery'
+import React, { type ReactNode, useMemo, useState } from 'react'
+
+import { SortingMode, useColumnSorting } from '@/commons/hooks/useColumnSorting'
+import { Checkbox } from '@/design-system/Checkbox/Checkbox'
+import {
+  Pagination,
+  type PaginationProps,
+} from '@/design-system/Pagination/Pagination'
+import { Skeleton } from '@/ui-kit/Skeleton/Skeleton'
+import { Tooltip } from '@/ui-kit/Tooltip/Tooltip'
+
+import { SortColumn } from './SortColumn/SortColumn'
+import styles from './Table.module.scss'
+import { TableNoData } from './TableNoData/TableNoData'
+import { TableNoFilterResult } from './TableNoFilterResult/TableNoFilterResult'
+
+export enum TableVariant {
+  COLLAPSE = 'collapse',
+  SEPARATE = 'separate',
+}
+
+type NoResultProps = {
+  message: string
+  subtitle?: string
+  resetMessage?: string
+  onFilterReset: () => void
+}
+
+export type EmptyStateProps = {
+  hasNoData: boolean
+  message: {
+    icon: string
+    title: string
+    subtitle?: string
+    cta?: ReactNode
+  }
+}
+
+export interface Column<T> {
+  id: string
+  label: string
+  sortable?: boolean
+  centerHeader?: boolean
+  ordererField?: keyof T | ((row: T) => React.ReactNode)
+  render?: (row: T) => React.ReactNode
+  headerColSpan?: number
+  bodyHidden?: boolean
+  headerHidden?: boolean
+  headerForFullRowOnly?: boolean
+  /** Visual header content (can be any React node, e.g., a component) */
+  header?: React.ReactNode
+}
+
+export type FullRow = {
+  content: React.ReactNode
+  headerId: string
+  rawDisplay?: boolean
+}
+
+interface TableProps<T extends { id: string | number }> {
+  title?: string
+  columns: Column<T>[]
+  data: T[]
+  allData?: T[]
+  selectable?: boolean
+  className?: string
+  isLoading: boolean
+  isSticky?: boolean
+  variant: TableVariant
+  selectedNumber?: string
+  selectedIds?: Set<string | number>
+  onSelectionChange?: (rows: T[]) => void
+  getRowSelectionDateTime?: (row: T) => string
+  getFullRow?: (row: T) => FullRow | null
+  isRowSelectable?: (row: T) => boolean
+  noResult: NoResultProps
+  noData: EmptyStateProps
+  pagination?: PaginationProps
+  children?: ReactNode
+}
+
+function getValue<T>(
+  row: T,
+  ordererField?: keyof T | string | ((r: T) => unknown)
+) {
+  if (!ordererField) {
+    return undefined
+  }
+  if (typeof ordererField === 'function') {
+    return ordererField(row)
+  }
+  if (typeof ordererField === 'string') {
+    // biome-ignore lint/suspicious/noExplicitAny: Difficult to type.
+    return ordererField.split('.').reduce<any>((obj, key) => obj?.[key], row)
+  }
+  return row[ordererField]
+}
+
+export function Table<
+  T extends {
+    name?: string
+    id: string | number
+  },
+>({
+  title = 'Tableau de données',
+  columns,
+  data,
+  allData,
+  selectable = false,
+  selectedNumber,
+  selectedIds: controlledSelectedIds,
+  className,
+  isLoading,
+  isSticky,
+  variant,
+  noResult,
+  noData,
+  onSelectionChange,
+  getRowSelectionDateTime,
+  getFullRow,
+  isRowSelectable,
+  pagination,
+  children,
+}: Readonly<TableProps<T>>) {
+  const fullScope = allData ?? data
+
+  const { currentSortingColumn, currentSortingMode, onColumnHeaderClick } =
+    useColumnSorting<unknown>()
+
+  const [uncontrolledSelectedIds, setUncontrolledSelectedIds] = useState<
+    Set<string | number>
+  >(new Set())
+
+  const isControlled = controlledSelectedIds !== undefined
+  const selectedIds = isControlled
+    ? controlledSelectedIds
+    : uncontrolledSelectedIds
+
+  const isTabletOrSmaller = useMediaQuery(TABLET_MEDIA_QUERY)
+  const tableRole = isTabletOrSmaller ? 'presentation' : 'table'
+
+  const updateSelectedIds = (newSelectedIds: Set<string | number>) => {
+    if (!isControlled) {
+      setUncontrolledSelectedIds(newSelectedIds)
+    }
+    // 🔁 notify with rows from the FULL scope (all pages)
+    onSelectionChange?.(fullScope.filter((r) => newSelectedIds.has(r.id)))
+  }
+
+  function sortTableColumn(col: unknown) {
+    onColumnHeaderClick(col)
+  }
+
+  const selectableRowsAll = useMemo(
+    () => (isRowSelectable ? fullScope.filter(isRowSelectable) : fullScope),
+    [fullScope, isRowSelectable]
+  )
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === selectableRowsAll.length) {
+      updateSelectedIds(new Set())
+    } else {
+      updateSelectedIds(new Set(selectableRowsAll.map((r) => r.id)))
+    }
+  }
+
+  const toggleSelectRow = (row: T) => {
+    const newSet = new Set(selectedIds)
+    newSet.has(row.id) ? newSet.delete(row.id) : newSet.add(row.id)
+    updateSelectedIds(newSet)
+  }
+
+  const sortedData = useMemo(() => {
+    if (!currentSortingColumn) {
+      return data
+    }
+    const col = columns.find((c) => c.id === currentSortingColumn)
+    if (!col) {
+      return data
+    }
+
+    return [...fullScope].sort((a, b) => {
+      const valueA = getValue(a, col.ordererField)
+      const valueB = getValue(b, col.ordererField)
+      if (valueA === valueB) {
+        return 0
+      }
+      const isAscending = currentSortingMode === SortingMode.ASC
+      if (valueA < valueB) {
+        return isAscending ? -1 : 1
+      }
+      return isAscending ? 1 : -1
+    })
+  }, [data, currentSortingColumn, currentSortingMode, columns, fullScope])
+
+  // Header checkbox state based on ALL pages
+  const headerChecked =
+    selectedIds.size === selectableRowsAll.length &&
+    selectableRowsAll.length > 0
+
+  const headerIndeterminate =
+    selectedIds.size > 0 && selectedIds.size < selectableRowsAll.length
+
+  const headerLabel = headerChecked
+    ? 'Tout désélectionner'
+    : 'Tout sélectionner'
+
+  return (
+    <>
+      <div className={classNames(styles.wrapper, className)}>
+        <table
+          className={classNames(styles['table'], {
+            [styles['table-separate']]: variant === TableVariant.SEPARATE,
+            [styles['table-collapse']]: variant === TableVariant.COLLAPSE,
+          })}
+          role={tableRole}
+        >
+          {!isTabletOrSmaller && sortedData.length > 0 && (
+            <>
+              <caption className={styles['visually-hidden']}>{title}</caption>
+              <thead>
+                <tr
+                  className={classNames(styles['table-header'], {
+                    [styles['table-header-sticky']]: isSticky,
+                  })}
+                >
+                  {selectable && (
+                    <th scope="col" className={styles['table-header-th']}>
+                      <div className={styles['table-select-all']}>
+                        <Tooltip
+                          content="Tout sélectionner"
+                          className={styles['table-select-all-tooltip']}
+                        >
+                          <Checkbox
+                            label={headerLabel}
+                            title={headerLabel}
+                            ariaLabel="Sélectionner toutes les lignes"
+                            checked={headerChecked}
+                            indeterminate={headerIndeterminate}
+                            onChange={toggleSelectAll}
+                            className={styles['table-checkbox-label']}
+                          />
+                        </Tooltip>
+                        <div>{selectedNumber}</div>
+                      </div>
+                    </th>
+                  )}
+                  {columns.map((col) => {
+                    if (col.headerHidden) {
+                      return null
+                    }
+                    const headerContent = col.header ?? col.label ?? ''
+                    const sortingMode =
+                      currentSortingMode === SortingMode.ASC
+                        ? 'ascending'
+                        : 'descending'
+
+                    return (
+                      <th
+                        aria-sort={
+                          currentSortingColumn === col.id &&
+                          currentSortingMode !== SortingMode.NONE
+                            ? sortingMode
+                            : undefined
+                        }
+                        scope="col"
+                        id={col.id}
+                        colSpan={col.headerColSpan || 1}
+                        key={`col-${col.id}`}
+                        className={classNames(styles['table-header-th'], {
+                          [styles['table-header-sortable-th']]: col.sortable,
+                          [styles['table-header-center-th']]: col.centerHeader,
+                          [styles['table-header-full-row']]:
+                            col.headerForFullRowOnly,
+                        })}
+                      >
+                        {col.sortable ? (
+                          <SortColumn
+                            onClick={() => sortTableColumn(col.id)}
+                            sortingMode={
+                              currentSortingColumn === col.id
+                                ? currentSortingMode
+                                : SortingMode.NONE
+                            }
+                          >
+                            {headerContent}
+                          </SortColumn>
+                        ) : (
+                          headerContent
+                        )}
+                      </th>
+                    )
+                  })}
+                </tr>
+              </thead>
+            </>
+          )}
+
+          <tbody>
+            {isLoading &&
+              Array.from({ length: 8 }).map((_, index) => (
+                <tr
+                  key={`loading-row-${columns.length}-${
+                    // biome-ignore lint/suspicious/noArrayIndexKey: ignore for Skeleton
+                    index
+                  }`}
+                >
+                  <td colSpan={columns.length + 1}>
+                    <Skeleton height="7rem" width="100%" />
+                  </td>
+                </tr>
+              ))}
+
+            <TableNoFilterResult
+              colSpan={columns.length + (selectable ? 1 : 0)}
+              message={noResult.message}
+              subtitle={noResult.subtitle}
+              resetMessage={noResult.resetMessage}
+              resetFilters={noResult.onFilterReset}
+              hasNoResult={!noData.hasNoData && !sortedData.length}
+            />
+
+            {sortedData.map((row) => {
+              const isSelected = selectedIds.has(row.id)
+              const tableFullRow = getFullRow?.(row)
+              const rowDateTime = getRowSelectionDateTime?.(row)
+              const hasDateTimeSelectionLabel = rowDateTime !== undefined
+
+              const rowSelectionLabel = hasDateTimeSelectionLabel
+                ? `Sélectionner la ligne du ${rowDateTime}`
+                : `Sélectionner la ligne ${row.name || row.id}`
+
+              const rowCheckboxLabel = hasDateTimeSelectionLabel
+                ? rowSelectionLabel
+                : (row.name ?? `ligne ${row.id}`)
+
+              return (
+                <React.Fragment key={row.id}>
+                  <tr
+                    data-testid="table-row"
+                    className={classNames({
+                      [styles['table-row']]: !tableFullRow?.content,
+                    })}
+                  >
+                    {selectable && (
+                      <td
+                        className={classNames({
+                          [styles['table-separate-cell']]:
+                            variant === TableVariant.SEPARATE,
+                          [styles['table-collapse-cell']]:
+                            variant === TableVariant.COLLAPSE,
+                        })}
+                      >
+                        <Checkbox
+                          label={rowCheckboxLabel}
+                          title={rowSelectionLabel}
+                          ariaLabel={rowSelectionLabel}
+                          checked={isSelected}
+                          onChange={() => toggleSelectRow(row)}
+                          className={styles['table-checkbox-label']}
+                          disabled={
+                            isRowSelectable ? !isRowSelectable(row) : false
+                          }
+                        />
+                      </td>
+                    )}
+
+                    {columns.map((col) => {
+                      if (col.bodyHidden || col.headerForFullRowOnly) {
+                        return null
+                      }
+                      const value = col.render
+                        ? col.render(row)
+                        : getValue(row, col.ordererField)
+
+                      return (
+                        <td
+                          className={classNames({
+                            [styles['table-separate-cell']]:
+                              variant === TableVariant.SEPARATE,
+                            [styles['table-collapse-cell']]:
+                              variant === TableVariant.COLLAPSE,
+                          })}
+                          key={`col-${col.id}-${col.label}`}
+                          data-label={col.label}
+                          headers={isTabletOrSmaller ? undefined : col.id}
+                        >
+                          {value}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                  {tableFullRow?.content && (
+                    <tr className={classNames(styles['table-row'])}>
+                      <td
+                        colSpan={columns.length + (selectable ? 1 : 0)}
+                        headers={
+                          isTabletOrSmaller ? undefined : tableFullRow.headerId
+                        }
+                      >
+                        <div
+                          className={classNames(
+                            styles['table-fullrow-content'],
+                            {
+                              [styles['table-fullrow-content-raw']]:
+                                tableFullRow?.rawDisplay,
+                            }
+                          )}
+                        >
+                          {tableFullRow?.content}
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              )
+            })}
+          </tbody>
+        </table>
+        {children}
+        {pagination && (
+          <div className={styles['table-pagination']}>
+            <Pagination
+              currentPage={pagination.currentPage}
+              pageCount={pagination.pageCount}
+              onPageClick={pagination.onPageClick}
+            />
+          </div>
+        )}
+      </div>
+      <TableNoData noData={noData} />
+    </>
+  )
+}

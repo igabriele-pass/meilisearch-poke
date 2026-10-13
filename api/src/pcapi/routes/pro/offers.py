@@ -1,0 +1,1040 @@
+import logging
+import typing
+
+import sqlalchemy.orm as sa_orm
+from flask import request
+from flask_login import current_user
+from flask_login import login_required
+
+import pcapi.core.artist.api as artist_api
+import pcapi.core.artist.exceptions as artist_exceptions
+import pcapi.core.cultural_outreach.api as cultural_outreach_api
+import pcapi.core.offers.api as offers_api
+import pcapi.core.offers.constants as offers_constants
+import pcapi.core.offers.repository as offers_repository
+import pcapi.core.pro_advice.api as pro_advice_api
+from pcapi.connectors.clickhouse import queries as clickhouse_queries
+from pcapi.core.categories import pro_categories
+from pcapi.core.categories import subcategories
+from pcapi.core.offerers import exceptions as offerers_exceptions
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offerers import repository as offerers_repository
+from pcapi.core.offers import exceptions
+from pcapi.core.offers import models
+from pcapi.core.offers import schemas as offers_schemas
+from pcapi.core.offers import tasks
+from pcapi.core.offers import validation
+from pcapi.core.providers.constants import TITELIVE_MUSIC_TYPES
+from pcapi.core.videos import api as videos_api
+from pcapi.core.videos import exceptions as videos_exceptions
+from pcapi.models import api_errors
+from pcapi.models import db
+from pcapi.models.utils import first_or_404
+from pcapi.models.utils import get_or_404
+from pcapi.routes.pro.blueprint import pro_blueprint
+from pcapi.routes.pro.stocks import get_stocks_with_count
+from pcapi.routes.serialization import offer_exposure_serialize
+from pcapi.routes.serialization import offers_serialize
+from pcapi.routes.serialization import stock_serialize
+from pcapi.routes.serialization.thumbnails_serialize import CreateThumbnailBodyModel
+from pcapi.routes.serialization.thumbnails_serialize import CreateThumbnailResponseModel
+from pcapi.serialization.decorator import spectree_serialize
+from pcapi.utils import requests
+from pcapi.utils import rest
+from pcapi.utils.transaction_manager import atomic
+
+from . import blueprint
+
+
+logger = logging.getLogger(__name__)
+
+
+@pro_blueprint.route("/offers", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.ListOffersResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def list_offers(query: offers_serialize.ListOffersQueryModel) -> offers_serialize.ListOffersResponseModel:
+    paginated_offers = offers_repository.get_capped_offers_for_filters(
+        user_id=current_user.id,
+        offers_limit=offers_constants.OFFERS_RECAP_LIMIT,
+        status=query.status,
+        venue_id=query.venue_id,
+        category_id=query.categoryId,
+        name_keywords_or_ean=query.name_or_ean,
+        creation_mode=query.creation_mode,
+        period_beginning_date=query.period_beginning_date,
+        period_ending_date=query.period_ending_date,
+        offerer_address_id=query.offerer_address_id,
+    )
+
+    return offers_serialize.ListOffersResponseModel(__root__=offers_serialize.serialize_capped_offers(paginated_offers))
+
+
+@pro_blueprint.route("/offers/home", methods=["GET"])
+@atomic()
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.ListOffersHomeResponseModel,
+    api=blueprint.pro_schema,
+)
+def list_offers_home(query: offers_serialize.ListOffersHomeQueryModel) -> offers_serialize.ListOffersHomeResponseModel:
+    rest.check_user_has_access_to_venues(user=current_user, venue_ids=[query.venue_id])
+
+    offers = offers_repository.get_offers_for_homepage(
+        venue_id=query.venue_id, offers_limit=offers_constants.OFFERS_HOMEPAGE_LIMIT
+    )
+
+    return offers_serialize.ListOffersHomeResponseModel(
+        [offers_serialize.OfferHomeResponseModel.build(offer) for offer in offers]
+    )
+
+
+@pro_blueprint.route("/offers/<int:offer_id>", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetIndividualOfferResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_offer(offer_id: int) -> offers_serialize.GetIndividualOfferResponseModel:
+    load_all: offers_repository.OFFER_LOAD_OPTIONS = [
+        "stock",
+        "mediations",
+        "product",
+        "price_category",
+        "venue",
+        "bookings_count",
+        "offerer_address",
+        "future_offer",
+        "pending_bookings",
+        "headline_offer",
+        "meta_data",
+        "highlight_requests",
+        "artists",
+        "cultural_outreach",
+    ]
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options=load_all)
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+
+    return offers_serialize.GetIndividualOfferResponseModel.from_orm(offer)
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/exposure", methods=["GET"])
+@login_required
+@atomic()
+@spectree_serialize(
+    response_model=offer_exposure_serialize.GetOfferExposureResponseModel,
+    api=blueprint.pro_schema,
+)
+def get_offer_exposure(
+    offer_id: int,
+) -> offer_exposure_serialize.GetOfferExposureResponseModel:
+    load_options: offers_repository.OFFER_LOAD_OPTIONS = [
+        "venue",
+        "offerer_address",
+        "headline_offer",
+        "pro_advice",
+        "highlight_criteria",
+    ]
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options=load_options)
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+
+    views_per_day = clickhouse_queries.OfferCumulativeViewQuery().execute({"offer_id": str(offer_id)})
+    cumulative_views = clickhouse_queries.OfferCumulativeViewCounts(views_per_day)
+
+    return offer_exposure_serialize.GetOfferExposureResponseModel.build(offer, cumulative_views)
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/stocks/", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetStocksResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_stocks(offer_id: int, query: offers_serialize.StocksQueryModel) -> offers_serialize.GetStocksResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options=["offerer_address"])
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+
+    filtered_stocks = offers_repository.get_filtered_stocks(
+        offer=offer,
+        date=query.date,
+        time=query.time,
+        price_category_id=query.price_category_id,
+        only_future_stocks=query.only_future_stocks,
+        order_by=query.order_by,
+        order_by_desc=query.order_by_desc,
+        venue=offer.venue,
+    )
+    stocks_count = filtered_stocks.count()
+    filtered_and_paginated_stocks = offers_repository.get_paginated_stocks(
+        stocks_query=filtered_stocks,
+        page=query.page,
+        stocks_limit_per_page=query.stocks_limit_per_page,
+    )
+    stocks = [
+        offers_serialize.GetOfferStockResponseModel.from_orm(stock) for stock in filtered_and_paginated_stocks.all()
+    ]
+    return offers_serialize.GetStocksResponseModel(stocks=stocks, total_stock_count=stocks_count, edited_stock_count=0)
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/stocks/", methods=["PATCH"])
+@login_required
+@spectree_serialize(
+    on_success_status=200, api=blueprint.pro_schema, response_model=offers_serialize.GetStocksResponseModel
+)
+@atomic()
+def upsert_offer_stocks(
+    offer_id: int,
+    body: stock_serialize.ThingStocksBulkUpsertBodyModel,
+) -> offers_serialize.GetStocksResponseModel:
+    """
+    Upsert all price categories stocks of a non-event offer.
+
+    - If a stock exists in the DB but not in `stocks`, it is soft-deleted.
+    - Otherwise, stocks are updated or created as needed.
+    """
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id)
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    stock_inputs: list[offers_schemas.ThingStockUpsertInput] = []
+    for stock in body.stocks:
+        data = stock.model_dump(by_alias=False, exclude={"offer_id"})
+        stock_inputs.append(typing.cast(offers_schemas.ThingStockUpsertInput, data))
+
+    offers_api.upsert_offer_thing_stocks(offer, stock_inputs)
+
+    stocks, total_stock_count = get_stocks_with_count(offer)
+
+    # NOT IMPLEMENTED (edited_stock_count here is not used by app pro)
+    return offers_serialize.GetStocksResponseModel(
+        total_stock_count=total_stock_count, stocks=stocks, edited_stock_count=0
+    )
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/stocks/delete", methods=["POST"])
+@login_required
+@spectree_serialize(
+    on_success_status=200,
+    on_error_statuses=[400, 404],
+    response_model=offers_serialize.GetStocksResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def delete_stocks(offer_id: int, body: offers_serialize.DeleteStockListBody) -> offers_serialize.GetStocksResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id)
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    stocks_to_delete = [stock for stock in offer.stocks if stock.id in body.ids_to_delete]
+    try:
+        offers_api.batch_delete_stocks(stocks_to_delete, current_user.real_user.id, current_user.is_impersonated)
+    except exceptions.OfferException as error:
+        raise api_errors.ApiErrors(error.errors)
+
+    stocks, total_stock_count = get_stocks_with_count(offer)
+
+    return offers_serialize.GetStocksResponseModel(
+        total_stock_count=total_stock_count, stocks=stocks, edited_stock_count=len(stocks_to_delete)
+    )
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/stocks-stats", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.StockStatsResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_stocks_stats(offer_id: int) -> offers_serialize.StockStatsResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id)
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    try:
+        stocks_stats = offers_api.get_stocks_stats(offer_id=offer_id)
+    except exceptions.OfferHasNoStock:
+        raise api_errors.ApiErrors(
+            errors={
+                "global": ["L'offre en cours de création ne possède aucun Stock"],
+            },
+        )
+    return offers_serialize.StockStatsResponseModel(
+        oldest_stock=stocks_stats.oldest_stock,
+        newest_stock=stocks_stats.newest_stock,
+        stock_count=stocks_stats.stock_count,
+        remaining_quantity=stocks_stats.remaining_quantity,
+    )
+
+
+@pro_blueprint.route("/offers/delete-draft", methods=["POST"])
+@login_required
+@spectree_serialize(
+    on_success_status=204,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def delete_draft_offers(body: offers_serialize.DeleteOfferRequestBody) -> None:
+    if not body.ids:
+        raise api_errors.resource_not_found_error()
+    query = offers_repository.get_offers_by_ids(current_user, body.ids)  # type: ignore[arg-type]
+    offers_api.batch_delete_draft_offers(query)
+
+
+@pro_blueprint.route("/v2/offers", methods=["POST"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetIndividualOfferResponseModel,
+    on_success_status=201,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def create_offer(body: offers_serialize.PostOfferBodyModel) -> offers_serialize.GetIndividualOfferResponseModel:
+    venue: offerers_models.Venue = first_or_404(
+        db.session.query(offerers_models.Venue)
+        .filter(offerers_models.Venue.id == body.venue_id)
+        .options(
+            sa_orm.joinedload(offerers_models.Venue.offererAddress).joinedload(offerers_models.OffererAddress.address),
+            sa_orm.joinedload(offerers_models.Venue.managingOfferer),
+        )
+    )
+    rest.check_user_has_access_to_offerer(current_user, venue.managingOffererId)
+    rest.check_venue_is_opened(venue)
+
+    ean_code = body.extra_data.get("ean", None) if body.extra_data is not None else None
+    product = (
+        db.session.query(models.Product)
+        .filter(models.Product.ean == ean_code)
+        .filter(models.Product.id == body.product_id)
+        .one_or_none()
+    )
+
+    values = body.model_dump(by_alias=True)
+
+    values["ean"] = ean_code
+
+    values.pop("productId", None)
+    values.pop("venueId", None)
+
+    create_offer_schema = offers_schemas.CreateOffer(**values)
+
+    try:
+        offer = offers_api.create_offer(create_offer_schema, venue=venue, product=product, is_from_private_api=True)
+    except artist_exceptions.ArtistException as error:
+        raise api_errors.ApiErrors({"artistOfferLinks": [error.message]})
+    offer.hasPendingBookings = False
+    return offers_serialize.GetIndividualOfferResponseModel.from_orm(offer)
+
+
+@pro_blueprint.route("/offers/publish", methods=["PATCH"])
+@login_required
+@spectree_serialize(
+    on_success_status=200,
+    on_error_statuses=[404],
+    api=blueprint.pro_schema,
+    response_model=offers_serialize.GetIndividualOfferResponseModel,
+)
+@atomic()
+def patch_publish_offer(
+    body: offers_serialize.PatchOfferPublishBodyModel,
+) -> offers_serialize.GetIndividualOfferResponseModel:
+    try:
+        venue = offerers_repository.get_venue_by_offer_id(body.id)
+    except offerers_exceptions.CannotFindOffererForOfferId:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, venue.managingOffererId)
+    rest.check_venue_is_opened(venue)
+
+    offer = offers_repository.get_offer_by_id(
+        body.id,
+        load_options=(
+            "stock",
+            "mediations",
+            "price_category",
+            "is_non_free_offer",
+            "bookings_count",
+            "offerer_address",
+            "highlight_requests",
+            "venue",
+            "meta_data",
+            "artists",
+            "cultural_outreach",
+            "pending_bookings",
+            "headline_offer",
+        ),
+    )
+    if offer is None:
+        raise api_errors.resource_not_found_error()
+    if not offers_repository.offer_has_bookable_stocks(offer.id):
+        raise api_errors.ApiErrors({"offer": "Cette offre n’a pas de stock réservable"}, 400)
+
+    offers_api.update_offer_fraud_information(offer, user=current_user)
+    offers_api.publish_offer(
+        offer,
+        publication_datetime=body.publicationDatetime,
+        booking_allowed_datetime=body.bookingAllowedDatetime,
+    )
+
+    return offers_serialize.GetIndividualOfferResponseModel.from_orm(offer)
+
+
+@pro_blueprint.route("/offers/active-status", methods=["PATCH"])
+@login_required
+@spectree_serialize(
+    response_model=None,
+    on_success_status=204,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def patch_offers_active_status(body: offers_serialize.PatchOfferActiveStatusBodyModel) -> None:
+    query = offers_repository.get_offers_by_ids(current_user, body.ids)
+    if body.is_active:
+        query = offers_repository.exclude_offers_from_inactive_venue_provider(query)
+    venues = offerers_repository.get_venues_by_offer_ids(body.ids)
+    for venue in venues:
+        rest.check_venue_is_opened(venue)
+
+    offers_api.batch_activate_offers(query, activate=body.is_active)
+
+
+@pro_blueprint.route("/offers/all-active-status", methods=["PATCH"])
+@login_required
+@spectree_serialize(
+    response_model=None,
+    on_success_status=202,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def patch_all_offers_active_status(
+    body: offers_serialize.PatchAllOffersActiveStatusBodyModel,
+) -> offers_serialize.PatchAllOffersActiveStatusResponseModel:
+    filters = {
+        "user_id": current_user.id,
+        "offerer_id": body.offerer_id,
+        "status": body.status,
+        "venue_id": body.venue_id,
+        "category_id": body.category_id,
+        "name_or_ean": body.name_or_ean,
+        "creation_mode": body.creation_mode,
+        "period_beginning_date": body.period_beginning_date,
+        "period_ending_date": body.period_ending_date,
+        "offerer_address_id": body.offerer_address_id,
+    }
+    payload = tasks.UpdateAllOffersActiveStatusPayload(is_active=body.is_active, **filters)
+    tasks.update_all_offers_active_status_task.delay(payload.model_dump())
+    return offers_serialize.PatchAllOffersActiveStatusResponseModel()
+
+
+NOT_EDITABLE_WHEN_PRODUCT_BASED = {
+    "artistOfferLinks",
+    "description",
+    "durationMinutes",
+    "ean",
+    "extraData",
+    "hasCulturalOutreachClaim",
+    "name",
+    "subcategoryId",
+}
+
+NOT_EDITABLE_WHEN_SYNCHRONIZED = {
+    "artistOfferLinks",
+    "bookingAllowedDatetime",
+    "bookingContact",
+    "bookingEmail",
+    "description",
+    "durationMinutes",
+    "ean",
+    "extraData",
+    "isDuo",
+    "isNational",
+    "name",
+    "offererAddress",
+    "publicationDatetime",
+    "subcategoryId",
+    "url",
+    "withdrawalDelay",
+    "withdrawalDetails",
+    "withdrawalType",
+}
+# (tcoudray-pass, 10/02/26) to unblock the synchronization of EPNs, museums may edit
+# the name and the description of their synchronized offers
+EDITABLE_FOR_A_MUSEUM_WHEN_SYNCHRONIZED = {"description", "name"}
+EDITABLE_WHEN_SYNCHRONIZED_BY_ALLOCINE = {"withdrawalDetails"}
+
+
+def _get_not_editable_fields(offer: models.Offer) -> set[str]:
+    not_editable_fields: set[str] = set()
+
+    if offer.productId is not None:
+        not_editable_fields |= NOT_EDITABLE_WHEN_PRODUCT_BASED
+
+    if offer.lastProvider is not None:
+        not_editable_synchronized_fields = set(NOT_EDITABLE_WHEN_SYNCHRONIZED)
+        if offer.venue.activity == offerers_models.Activity.MUSEUM:
+            not_editable_synchronized_fields -= EDITABLE_FOR_A_MUSEUM_WHEN_SYNCHRONIZED
+        if offer.isFromAllocine:
+            not_editable_synchronized_fields -= EDITABLE_WHEN_SYNCHRONIZED_BY_ALLOCINE
+        not_editable_fields |= not_editable_synchronized_fields
+
+    return not_editable_fields
+
+
+def _mandatory_extra_data_fields(subcategory_id: str) -> set[str]:
+    subcategory = subcategories.ALL_SUBCATEGORIES_DICT[subcategory_id]
+    return {
+        name
+        for name, conditional_field in subcategory.conditional_fields.items()
+        if conditional_field.is_required_in_internal_form
+    }
+
+
+@pro_blueprint.route("/offers/<int:offer_id>", methods=["PATCH"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetIndividualOfferResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def patch_offer(
+    offer_id: int, body: offers_serialize.PatchOfferBodyModel
+) -> offers_serialize.GetIndividualOfferResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(
+            offer_id,
+            load_options=[
+                "bookings_count",
+                "cultural_outreach",
+                "is_non_free_offer",
+                "meta_data",
+                "offerer_address",
+                "product",
+                "stock",
+                "venue",
+                "highlight_requests",
+                "artists",
+            ],
+        )
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    updates = body.model_dump(by_alias=True, exclude_unset=True)
+
+    ean: str | None | offers_api.T_UNCHANGED = offers_api.UNCHANGED
+    extra_data: typing.Any = updates.get("extraData", offers_api.UNCHANGED)
+
+    if body_extra_data := offers_api.deserialize_extra_data(body.extraData, offer.subcategoryId):
+        if "ean" in body_extra_data:
+            ean = body_extra_data.pop("ean")
+        extra_data = body_extra_data
+
+    offerer_address = None
+
+    if body.location:
+        offerer_address = offers_api.get_or_create_offerer_address_from_address_body(
+            address_body=body.location, venue=offer.venue
+        )
+
+    subcategory_id = updates.get("subcategoryId", offer.subcategoryId)
+    not_editable_fields = _get_not_editable_fields(offer)
+
+    if body.artist_offer_links is not None:
+        validation.check_fields_are_editable({"artistOfferLinks"}, not_editable_fields=not_editable_fields)
+        try:
+            validation.check_artist_offer_links(
+                body.artist_offer_links, subcategories.ALL_SUBCATEGORIES_DICT[subcategory_id]
+            )
+            artist_api.upsert_artist_offer_links(
+                offer, {artist_api.get_artist_offer_link_key(link) for link in body.artist_offer_links}
+            )
+        except artist_exceptions.ArtistException as error:
+            raise api_errors.ApiErrors({"artistOfferLinks": [error.message]})
+
+    if body.hasCulturalOutreachClaim is not None:
+        validation.check_fields_are_editable({"hasCulturalOutreachClaim"}, not_editable_fields=not_editable_fields)
+        cultural_outreach_api.set_cultural_outreach_claim(
+            offer,
+            body.hasCulturalOutreachClaim,
+        )
+
+    offers_api.update_offer(
+        offer,
+        mandatory_extra_data_fields=_mandatory_extra_data_fields(subcategory_id),
+        not_editable_fields=not_editable_fields,
+        audio_disability_compliant=updates.get("audioDisabilityCompliant", offers_api.UNCHANGED),
+        booking_allowed_datetime=updates.get("bookingAllowedDatetime", offers_api.UNCHANGED),
+        booking_contact=updates.get("bookingContact", offers_api.UNCHANGED),
+        booking_email=updates.get("bookingEmail", offers_api.UNCHANGED),
+        description=updates.get("description", offers_api.UNCHANGED),
+        duration_minutes=updates.get("durationMinutes", offers_api.UNCHANGED),
+        ean=ean,
+        external_ticket_office_url=updates.get("externalTicketOfficeUrl", offers_api.UNCHANGED),
+        extra_data=extra_data,
+        is_duo=updates.get("isDuo", offers_api.UNCHANGED),
+        is_national=updates.get("isNational", offers_api.UNCHANGED),
+        mental_disability_compliant=updates.get("mentalDisabilityCompliant", offers_api.UNCHANGED),
+        motor_disability_compliant=updates.get("motorDisabilityCompliant", offers_api.UNCHANGED),
+        name=updates.get("name", offers_api.UNCHANGED),
+        offerer_address=offerer_address,
+        publication_datetime=updates.get("publicationDatetime", offers_api.UNCHANGED),
+        subcategory_id=updates.get("subcategoryId", offers_api.UNCHANGED),
+        url=updates.get("url", offers_api.UNCHANGED),
+        visual_disability_compliant=updates.get("visualDisabilityCompliant", offers_api.UNCHANGED),
+        withdrawal_delay=updates.get("withdrawalDelay", offers_api.UNCHANGED),
+        withdrawal_details=updates.get("withdrawalDetails", offers_api.UNCHANGED),
+        withdrawal_type=updates.get("withdrawalType", offers_api.UNCHANGED),
+        should_send_mail=bool(body.shouldSendMail),
+    )
+    db.session.flush()
+    offer = offers_repository.get_offer_by_id(
+        offer_id,
+        load_options=[
+            "bookings_count",
+            "headline_offer",
+            "is_non_free_offer",
+            "meta_data",
+            "offerer_address",
+            "pending_bookings",
+            "product",
+            "stock",
+            "venue",
+            "highlight_requests",
+            "artists",
+            "cultural_outreach",
+        ],
+    )
+
+    return offers_serialize.GetIndividualOfferResponseModel.from_orm(offer)
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/video", methods=["PUT"])
+@atomic()
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.VideoData,
+    api=blueprint.pro_schema,
+)
+def update_offer_video(offer_id: int, body: offers_serialize.UpdateOfferVideoBodyModel) -> offers_serialize.VideoData:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options=["meta_data", "venue"])
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    video_url = str(body.video_url) if body.video_url else None
+
+    try:
+        if video_url:
+            videos_api.upsert_video_and_metadata(
+                video_url=video_url, offer=offer, video_description=body.video_description
+            )
+        elif offer.metaData and offer.metaData.videoUrl:
+            videos_api.remove_video_data_from_offer_metadata(
+                offer.metaData, offer.id, offer.venueId, offer.metaData.videoUrl
+            )
+    except requests.ExternalAPIException:
+        raise api_errors.ApiErrors(
+            errors={"videoUrl": ["Nous rencontrons des problèmes de serveur, veuillez réessayer plus tard"]}
+        )
+    except videos_exceptions.YoutubeVideoNotFound:
+        raise api_errors.ApiErrors(
+            errors={"videoUrl": ["URL Youtube non trouvée, vérifiez si votre vidéo n’est pas en privé."]}
+        )
+
+    if offer.metaData is None:
+        return offers_serialize.VideoData(
+            videoDuration=None,
+            videoExternalId=None,
+            videoTitle=None,
+            videoThumbnailUrl=None,
+            videoUrl=None,
+            videoDescription=None,
+        )
+    return offers_serialize.VideoData.from_orm(offer.metaData)
+
+
+@pro_blueprint.route("/offers/thumbnails", methods=["POST"])
+@login_required
+@spectree_serialize(
+    on_success_status=201,
+    response_model=CreateThumbnailResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def create_thumbnail(form: CreateThumbnailBodyModel) -> CreateThumbnailResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(form.offer_id)
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    if "thumb" not in request.files:
+        raise validation.exceptions.MissingImage()
+
+    thumbnail = offers_api.create_mediation(
+        user=current_user,
+        offer=offer,
+        credit=form.credit,
+        alternative_text=form.alternative_text,
+        image_as_bytes=request.files["thumb"].read(),
+        crop_params=form.crop_params,
+        min_width=None,
+        min_height=None,
+    )
+
+    return CreateThumbnailResponseModel.model_validate(thumbnail)
+
+
+@pro_blueprint.route("/offers/thumbnails/<int:offer_id>", methods=["DELETE"])
+@login_required
+@spectree_serialize(
+    on_success_status=204,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def delete_thumbnail(offer_id: int) -> None:
+    offer = get_or_404(models.Offer, offer_id)
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+    offers_api.delete_mediations([offer_id])
+
+
+@pro_blueprint.route("/offers/categories", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.CategoriesResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_categories() -> offers_serialize.CategoriesResponseModel:
+    return offers_serialize.CategoriesResponseModel(
+        categories=[
+            offers_serialize.CategoryResponseModel.from_orm(category) for category in pro_categories.ALL_CATEGORIES
+        ],
+        subcategories=[
+            offers_serialize.SubcategoryResponseModel.from_orm(subcategory)
+            for subcategory in subcategories.ALL_SUBCATEGORIES
+        ],
+    )
+
+
+@pro_blueprint.route("/offers/music-types", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetMusicTypesResponse,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_music_types() -> offers_serialize.GetMusicTypesResponse:
+    return offers_serialize.GetMusicTypesResponse(
+        __root__=[
+            offers_serialize.MusicTypeResponse(
+                gtl_id=music_type.gtl_id, label=music_type.label, canBeEvent=music_type.can_be_event
+            )
+            for music_type in TITELIVE_MUSIC_TYPES
+        ]
+    )
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/price_categories", methods=["PUT"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetIndividualOfferResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def replace_offer_price_categories(
+    offer_id: int, body: offers_serialize.PriceCategoryBody
+) -> offers_serialize.GetIndividualOfferResponseModel:
+    """
+    Replace all price categories of an offer.
+
+    - If a price category exists in the DB but not in `price_categories`, it is deleted.
+    - Otherwise, price categories are updated or created as needed.
+    """
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id)
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    price_category_inputs: list[offers_schemas.PriceCategoryInput] = []
+    for price_category in body.price_categories:
+        data = price_category.dict(by_alias=False, exclude={"offer_id"})
+        price_category_inputs.append(typing.cast(offers_schemas.PriceCategoryInput, data))
+
+    offers_api.replace_offer_price_categories(offer, price_category_inputs)
+
+    load_options: offers_repository.OFFER_LOAD_OPTIONS = [
+        "mediations",
+        "product",
+        "price_category",
+        "venue",
+        "bookings_count",
+        "offerer_address",
+        "future_offer",
+        "pending_bookings",
+        "headline_offer",
+        "meta_data",
+        "cultural_outreach",
+    ]
+    offer = offers_repository.get_offer_by_id(offer.id, load_options=load_options)
+
+    return offers_serialize.GetIndividualOfferResponseModel.from_orm(offer)
+
+
+@pro_blueprint.route("/offers/<int:venue_id>/ean/<string:ean>", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetActiveEANOfferResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_active_venue_offer_by_ean(venue_id: int, ean: str) -> offers_serialize.GetActiveEANOfferResponseModel:
+    try:
+        venue = get_or_404(offerers_models.Venue, venue_id)
+        offer = offers_repository.get_active_offer_by_venue_id_and_ean(venue_id, ean)
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+
+    rest.check_user_has_access_to_offerer(current_user, venue.managingOffererId)
+
+    return offers_serialize.GetActiveEANOfferResponseModel.from_orm(offer)
+
+
+@pro_blueprint.route("/get_product_by_ean/<string:ean>/<int:offerer_id>", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetProductInformations,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_product_by_ean(ean: str, offerer_id: int) -> offers_serialize.GetProductInformations:
+    rest.check_user_has_access_to_offerer(current_user, offerer_id)
+
+    product = (
+        db.session.query(models.Product)
+        .filter(models.Product.ean == ean)
+        .options(
+            sa_orm.load_only(
+                models.Product.id,
+                models.Product.extraData,
+                models.Product.gcuCompatibilityType,
+                models.Product.name,
+                models.Product.ean,
+                models.Product.description,
+                models.Product.subcategoryId,
+                models.Product.thumbCount,
+            )
+        )
+        .options(sa_orm.joinedload(models.Product.productMediations))
+        .one_or_none()
+    )
+    offerer = (
+        db.session.query(offerers_models.Offerer)
+        .filter_by(id=offerer_id)
+        .options(sa_orm.load_only(offerers_models.Offerer.id))
+        .options(sa_orm.joinedload(offerers_models.Offerer.managedVenues).load_only(offerers_models.Venue.id))
+        .one_or_none()
+    )
+    validation.check_product_cgu_and_offerer(product, ean, offerer)
+    return offers_serialize.GetProductInformations.from_orm(product=typing.cast(models.Product, product))
+
+
+@pro_blueprint.route("/get-offer-video-data", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.VideoData,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_offer_video_metadata(
+    query: offers_serialize.VideoMetatdataQueryModel,
+) -> offers_serialize.VideoData:
+    try:
+        video_metadata = videos_api.get_video_metadata_from_cache(query.video_url)
+    except requests.ExternalAPIException:
+        raise api_errors.ApiErrors(
+            errors={"videoUrl": ["Nous rencontrons des problèmes de serveur, veuillez réessayer plus tard"]}
+        )
+    except videos_exceptions.InvalidVideoUrl:
+        raise api_errors.ApiErrors(
+            errors={
+                "videoUrl": [
+                    "Veuillez renseigner une URL provenant de la plateforme Youtube. Les chaînes ne sont pas acceptées."
+                ]
+            }
+        )
+    except videos_exceptions.YoutubeVideoNotFound:
+        raise api_errors.ApiErrors(
+            errors={"videoUrl": ["URL Youtube non trouvée, vérifiez si votre vidéo n’est pas en privé."]}
+        )
+    return offers_serialize.VideoData(
+        videoDuration=video_metadata.duration,
+        videoExternalId=video_metadata.id,
+        videoTitle=video_metadata.title,
+        videoThumbnailUrl=video_metadata.thumbnail_url,
+        videoUrl=query.video_url,
+        videoDescription=None,
+    )
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/highlight-requests", methods=["POST"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetIndividualOfferResponseModel,
+    on_success_status=201,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def post_highlight_request_offer(
+    offer_id: int,
+    body: offers_schemas.CreateOfferHighlightRequestBodyModel,
+) -> offers_serialize.GetIndividualOfferResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options={"venue"})
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+    validation.check_offer_can_ask_for_highlight_request(offer)
+
+    try:
+        offers_api.upsert_highlight_requests(body.highlight_ids, offer)
+    except exceptions.HighlightNotFoundException:
+        raise api_errors.ApiErrors(errors={"global": ["Un des temps fort n'existe pas"]}, status_code=400)
+    except exceptions.UnavailableHighlightException:
+        raise api_errors.ApiErrors(errors={"global": ["Un des temps fort n'est pas disponible"]}, status_code=400)
+    # Potential Race Condition Warning
+    # Should not occur: The upsert_highlight_requests function is designed to ignore existing requests, which should prevent this.
+    # Edge Case: This can happen if two simultaneous HTTP requests hit this route,
+    #   and the second request starts processing before the first one has fully completed its database operation (the upsert).
+    except exceptions.HighlightRequestAlreadyExistsException:
+        raise api_errors.ApiErrors(
+            errors={"global": ["Une demande de participation existe déjà pour cette offre et ce temps fort"]},
+            status_code=400,
+        )
+
+    load_options: offers_repository.OFFER_LOAD_OPTIONS = [
+        "bookings_count",
+        "cultural_outreach",
+        "headline_offer",
+        "is_non_free_offer",
+        "meta_data",
+        "offerer_address",
+        "pending_bookings",
+        "product",
+        "stock",
+        "venue",
+    ]
+    offer = offers_repository.get_offer_by_id(offer_id, load_options)
+    return offers_serialize.GetIndividualOfferResponseModel.from_orm(offer)
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/pro_advice", methods=["GET"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.GetProAdviceResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def get_offer_pro_advice(offer_id: int) -> offers_serialize.GetProAdviceResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options=["venue", "pro_advice"])
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+
+    pro_advice = offers_serialize.ProAdviceModel.model_validate(offer.proAdvice) if offer.proAdvice else None
+    return offers_serialize.GetProAdviceResponseModel(pro_advice=pro_advice)
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/pro_advice", methods=["POST"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.PostProAdviceResponseModel,
+    on_success_status=201,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def create_offer_pro_advice(
+    offer_id: int, body: offers_serialize.ProAdviceBodyModel
+) -> offers_serialize.PostProAdviceResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options=["venue", "pro_advice"])
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    user = current_user._get_current_object()
+    pro_advice = pro_advice_api.create_pro_advice(offer, body.content, body.author, user.id)
+    return offers_serialize.PostProAdviceResponseModel(pro_advice=offers_serialize.ProAdviceModel.from_orm(pro_advice))
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/pro_advice", methods=["PATCH"])
+@login_required
+@spectree_serialize(
+    response_model=offers_serialize.PatchProAdviceResponseModel,
+    api=blueprint.pro_schema,
+)
+@atomic()
+def update_offer_pro_advice(
+    offer_id: int, body: offers_serialize.ProAdviceBodyModel
+) -> offers_serialize.PatchProAdviceResponseModel:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options=["venue", "pro_advice"])
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    user = current_user._get_current_object()
+    pro_advice = pro_advice_api.update_pro_advice(offer, body.content, body.author, user.id)
+    return offers_serialize.PatchProAdviceResponseModel(pro_advice=offers_serialize.ProAdviceModel.from_orm(pro_advice))
+
+
+@pro_blueprint.route("/offers/<int:offer_id>/pro_advice", methods=["DELETE"])
+@login_required
+@spectree_serialize(
+    api=blueprint.pro_schema,
+    on_success_status=204,
+)
+@atomic()
+def delete_offer_pro_advice(offer_id: int) -> None:
+    try:
+        offer = offers_repository.get_offer_by_id(offer_id, load_options=["venue", "pro_advice"])
+    except exceptions.OfferNotFound:
+        raise api_errors.resource_not_found_error()
+    rest.check_user_has_access_to_offerer(current_user, offer.venue.managingOffererId)
+    rest.check_venue_is_opened(offer.venue)
+
+    user = current_user._get_current_object()
+    pro_advice_api.delete_pro_advice(offer, user.id)

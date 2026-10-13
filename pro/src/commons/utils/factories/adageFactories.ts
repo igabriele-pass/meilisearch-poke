@@ -1,0 +1,275 @@
+import { addDays } from 'date-fns'
+
+import {
+  AdageFrontRoles,
+  type AuthenticatedResponse,
+  CollectiveLocationType,
+  type CollectiveOfferResponseModel,
+  type CollectiveOfferTemplateResponseModel,
+  EacFormat,
+  type EducationalInstitutionBudgetResponseModel,
+} from '@/apiClient/adage'
+import {
+  CollectiveOfferAllowedAction,
+  CollectiveOfferDisplayedStatus,
+  type CollectiveOfferHomeResponseModel,
+  CollectiveOfferTemplateAllowedAction,
+  type CollectiveOfferTemplateHomeResponseModel,
+  type CollectiveStockHomeResponseModel,
+  StudentLevels,
+} from '@/apiClient/v1'
+
+export const defaultCollectiveTemplateOffer: CollectiveOfferTemplateResponseModel =
+  {
+    audioDisabilityCompliant: false,
+    visualDisabilityCompliant: false,
+    mentalDisabilityCompliant: true,
+    motorDisabilityCompliant: true,
+    contactEmail: 'test@example.com',
+    contactForm: null,
+    contactPhone: null,
+    contactUrl: null,
+    description: '',
+    durationMinutes: null,
+    educationalPriceDetail: null,
+    imageAlternativeText: null,
+    imageCredit: null,
+    imageUrl: null,
+    nationalProgram: null,
+    domains: [],
+    id: 1,
+    interventionArea: [],
+    isFavorite: false,
+    isTemplate: true,
+    name: 'Mon offre vitrine',
+    location: {
+      locationType: CollectiveLocationType.ADDRESS,
+      locationComment: null,
+      location: {
+        isManualEdition: false,
+        isVenueLocation: false,
+        id: 1,
+        label: 'Le nom du lieu 1',
+        city: 'Paris',
+        street: '10 Rue de Paris',
+        postalCode: '75001',
+        banId: '49759_1304_00002',
+        departmentCode: '75',
+        inseeCode: '75111',
+        latitude: 48.87004,
+        longitude: 2.3785,
+      },
+    },
+    students: [],
+    venue: {
+      id: 1,
+      imgUrl: null,
+      imgAlternativeText: null,
+      adageId: '1',
+      address: '1 boulevard Poissonnière',
+      city: 'Paris',
+      departmentCode: '75',
+      name: 'Mon lieu',
+      postalCode: '75000',
+      publicName: 'Mon lieu nom publique',
+      managingOfferer: {
+        name: 'Ma super structure',
+      },
+      coordinates: {
+        latitude: 48.87004,
+        longitude: 2.3785,
+      },
+    },
+    dates: {
+      start: new Date().toISOString(),
+      end: addDays(new Date(), 1).toISOString(),
+    },
+    formats: [EacFormat.CONCERT],
+  }
+
+export const defaultCollectiveOffer: CollectiveOfferResponseModel = {
+  id: 479,
+  name: 'Une chouette à la mer',
+  additionalDetails: '',
+  description: 'Une offre vraiment chouette',
+  durationMinutes: null,
+  imageCredit: null,
+  imageUrl: null,
+  imageAlternativeText: null,
+  nationalProgram: null,
+  location: {
+    locationType: CollectiveLocationType.SCHOOL,
+    locationComment: null,
+    location: null,
+  },
+  stock: {
+    id: 825,
+    startDatetime: new Date('2022-09-16T00:00:00Z').toISOString(),
+    endDatetime: new Date('2022-09-16T00:00:00Z').toISOString(),
+    bookingLimitDatetime: new Date('2022-09-16T00:00:00Z').toISOString(),
+    price: 140000,
+    servicePrice: 140000,
+    collectiveAdditionalFees: [],
+    numberOfTickets: 10,
+    numberOfTeachers: 0,
+    educationalPriceDetail: '',
+  },
+  venue: {
+    id: 1,
+    imgUrl: null,
+    imgAlternativeText: null,
+    adageId: '1',
+    address: '1 boulevard Poissonnière',
+    city: 'Paris',
+    departmentCode: '75',
+    name: 'Le Petit Rintintin 33',
+    postalCode: '75000',
+    publicName: 'Le Petit Rintintin 33',
+    coordinates: {
+      latitude: 48.87004,
+      longitude: 2.3785,
+    },
+    managingOfferer: {
+      name: 'Le Petit Rintintin Management',
+    },
+  },
+  visualDisabilityCompliant: true,
+  mentalDisabilityCompliant: true,
+  audioDisabilityCompliant: true,
+  motorDisabilityCompliant: true,
+  contactEmail: '',
+  contactPhone: '',
+  domains: [],
+  teacher: {
+    firstName: 'Jean',
+    lastName: 'Dupont',
+    civility: null,
+    email: 'jean.dupont@example.com',
+  },
+  educationalInstitution: null,
+  educationalPriceDetail: '',
+  students: [StudentLevels.COLL_GE_4E, StudentLevels.COLL_GE_3E],
+  interventionArea: ['75', '92'],
+  formats: [EacFormat.CONCERT],
+  isTemplate: false,
+}
+
+export const defaultAdageUser: AuthenticatedResponse = {
+  departmentCode: '75',
+  email: 'test@example.com',
+  institutionCity: 'Paris',
+  institutionName: 'Mon établissement',
+  role: AdageFrontRoles.REDACTOR,
+  uai: '1234567A',
+  lat: 1,
+  lon: 2,
+  canPrebook: true,
+  favoritesCount: 0,
+  offersCount: 0,
+  programs: [],
+  institutionRuralLevel: null,
+  preferences: null,
+}
+
+export const defaultEducationalInstitution: EducationalInstitutionBudgetResponseModel =
+  {
+    budget: 1000,
+  }
+
+export const defaultUseStatsReturn = {
+  nbHits: 0,
+  nbPages: 0,
+  areHitsSorted: false,
+  page: 0,
+  processingTimeMS: 0,
+  query: '',
+}
+
+const hit = {
+  objectID: 'T-481',
+  offer: {
+    dates: [new Date('2021-09-29T13:54:30+00:00').valueOf()],
+    name: 'titre',
+    thumbUrl: '',
+  },
+  venue: {
+    name: 'lieu',
+    publicName: 'lieu public',
+  },
+  _highlightResult: {},
+  isTemplate: true,
+  __queryID: 'queryId',
+  __position: 0,
+}
+export const defaultUseInfiniteHitsReturn = {
+  items: [hit],
+  hits: [hit],
+  isLastPage: true,
+  showMore: vi.fn(),
+  showPrevious: vi.fn(),
+  isFirstPage: true,
+  sendEvent: vi.fn(),
+  bindEvent: vi.fn(),
+  currentPageHits: [hit],
+}
+
+export function buildCollectiveStock(
+  bookingDateDaysFromToday: number,
+  startDateDaysFromToday: number,
+  numberOfTickets: number = 100,
+  numberOfTeachers: number = 5
+): CollectiveStockHomeResponseModel {
+  const today = new Date()
+  return {
+    bookingLimitDatetime: addDays(
+      today,
+      bookingDateDaysFromToday
+    ).toISOString(),
+    startDatetime: addDays(today, startDateDaysFromToday).toISOString(),
+    endDatetime: addDays(today, startDateDaysFromToday + 1).toISOString(),
+    numberOfTickets,
+    numberOfTeachers,
+  }
+}
+
+export const buildCollectiveOfferHome = (
+  bookingDateDaysFromToday: number = 10,
+  startDateDaysFromToday: number = 11,
+  displayedStatus: CollectiveOfferDisplayedStatus = CollectiveOfferDisplayedStatus.PUBLISHED
+): CollectiveOfferHomeResponseModel => ({
+  id: 435,
+  name: 'Mon offre réservable 435',
+  displayedStatus: displayedStatus,
+  imageUrl:
+    'http://localhost:5001/storage/thumbs/collectiveoffer/00000004357405842.jpg',
+  allowedActions: [
+    CollectiveOfferAllowedAction.CAN_EDIT_DETAILS,
+    CollectiveOfferAllowedAction.CAN_EDIT_DATES,
+    CollectiveOfferAllowedAction.CAN_EDIT_DISCOUNT,
+    CollectiveOfferAllowedAction.CAN_DUPLICATE,
+    CollectiveOfferAllowedAction.CAN_ARCHIVE,
+  ],
+  collectiveStock: buildCollectiveStock(
+    bookingDateDaysFromToday,
+    startDateDaysFromToday
+  ),
+})
+
+export const buildCollectiveOfferTemplateHome = (
+  displayedStatus: CollectiveOfferDisplayedStatus = CollectiveOfferDisplayedStatus.PUBLISHED
+): CollectiveOfferTemplateHomeResponseModel => ({
+  id: 436,
+  name: 'Mon offre vitrine 436',
+  displayedStatus,
+  imageUrl:
+    'http://localhost:5001/storage/thumbs/collectiveoffertemplate/00000004367405842.jpg',
+  allowedActions: [
+    CollectiveOfferTemplateAllowedAction.CAN_EDIT_DETAILS,
+    CollectiveOfferTemplateAllowedAction.CAN_DUPLICATE,
+    CollectiveOfferTemplateAllowedAction.CAN_ARCHIVE,
+  ],
+  dates: {
+    start: new Date().toISOString(),
+    end: addDays(new Date(), 30).toISOString(),
+  },
+})

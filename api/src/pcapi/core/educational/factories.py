@@ -1,0 +1,824 @@
+import datetime
+import re
+import typing
+
+import factory
+import pytz
+from dateutil.relativedelta import relativedelta
+
+from pcapi.core.categories.models import EacFormat
+from pcapi.core.educational import constants
+from pcapi.core.educational import models
+from pcapi.core.educational import utils
+from pcapi.core.factories import BaseFactory
+from pcapi.core.geography import factories as geography_factories
+from pcapi.core.offerers import api as offerers_api
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.models import db
+from pcapi.models.offer_mixin import OfferValidationStatus
+from pcapi.models.offer_mixin import OfferValidationType
+from pcapi.utils import date as date_utils
+from pcapi.utils import db as db_utils
+
+
+ADAGE_STARTING_EDUCATIONAL_YEAR = 2014
+
+
+class EducationalDomainFactory(BaseFactory[models.EducationalDomain]):
+    class Meta:
+        model = models.EducationalDomain
+
+    name = factory.Faker("name")
+
+
+def _institution_email_builder(institution: models.EducationalInstitution) -> str:
+    name = institution.name if institution.name else institution.institutionType
+    name = re.sub(r"\W", "-", name.lower().strip())
+
+    city = re.sub(r"\W", "-", institution.city.lower().strip())
+
+    return f"{name}@{city}.fr"
+
+
+class EducationalInstitutionFactory(BaseFactory[models.EducationalInstitution]):
+    class Meta:
+        model = models.EducationalInstitution
+
+    # institutionId (UAI) is a unique string with 7 digits and 1 letter
+    institutionId = factory.Sequence(lambda x: f"{x}F".zfill(8))
+    name = factory.Sequence("DE LA TOUR{}".format)
+    city = "PARIS"
+    postalCode = "75000"
+    email = factory.LazyAttribute(_institution_email_builder)
+    phoneNumber = "0600000000"
+    institutionType = "COLLEGE"
+    latitude = 48.8566
+    longitude = 2.3522
+
+
+class CollectiveOfferFactory(BaseFactory[models.CollectiveOffer]):
+    class Meta:
+        model = models.CollectiveOffer
+
+    name = factory.Sequence("CollectiveOffer {}".format)
+    description = factory.Sequence("A passionate description of collectiveoffer {}".format)
+    additionalDetails = "Some practical information"
+    venue = factory.SubFactory(offerers_factories.VenueFactory)
+    audioDisabilityCompliant = False
+    mentalDisabilityCompliant = False
+    motorDisabilityCompliant = False
+    visualDisabilityCompliant = False
+    dateCreated = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=5))
+    students = [models.StudentLevels.GENERAL2]
+    contactEmail = "collectiveofferfactory+contact@example.com"
+    bookingEmails = ["collectiveofferfactory+booking@example.com", "collectiveofferfactory+booking@example2.com"]
+    contactPhone = "+33199006328"
+    locationType = models.CollectiveLocationType.TO_BE_DEFINED
+    interventionArea = ["93", "94", "95"]
+    formats = [EacFormat.PROJECTION_AUDIOVISUELLE]
+
+    @classmethod
+    def _create(
+        cls,
+        model_class: type[models.CollectiveOffer],
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> models.CollectiveOffer:
+        if kwargs.get("isActive") is None:
+            kwargs["isActive"] = kwargs.get("validation") not in (
+                OfferValidationStatus.REJECTED,
+                OfferValidationStatus.PENDING,
+            )
+
+        if kwargs.get("validation") in {OfferValidationStatus.APPROVED, OfferValidationStatus.REJECTED, None}:
+            if "lastValidationType" not in kwargs:
+                kwargs["lastValidationType"] = OfferValidationType.AUTO
+
+            if "lastValidationDate" not in kwargs:
+                stock_date_created = date_utils.get_naive_utc_now() - datetime.timedelta(days=3)
+                kwargs["lastValidationDate"] = stock_date_created + datetime.timedelta(minutes=10)
+
+        if (
+            "offererAddress" not in kwargs
+            and "offererAddressId" not in kwargs
+            and kwargs.get("locationType") == models.CollectiveLocationType.ADDRESS
+        ):
+            venue = kwargs.get("venue")
+            db.session.flush()  # Flush is needed otherwise venue.offererAddress will be empty.
+            if venue:
+                kwargs["offererAddress"] = offerers_api.get_or_create_offer_location(
+                    offerer_id=venue.managingOffererId,
+                    venue_id=venue.id,
+                    address_id=venue.offererAddress.addressId,
+                    label=None,
+                )
+        return super()._create(model_class, *args, **kwargs)
+
+    @factory.post_generation
+    def educational_domains(
+        self,
+        create: bool,
+        extracted: list[models.EducationalDomain] | None = None,
+    ) -> None:
+        if not create or not extracted:
+            return
+
+        if extracted:
+            self.domains = list.copy(extracted)
+
+
+class CollectiveOfferTemplateFactory(BaseFactory[models.CollectiveOfferTemplate]):
+    class Meta:
+        model = models.CollectiveOfferTemplate
+
+    name = factory.Sequence("CollectiveOffer {}".format)
+    description = factory.Sequence("A passionate description of collectiveoffer {}".format)
+    venue = factory.SubFactory(offerers_factories.VenueFactory)
+    audioDisabilityCompliant = False
+    mentalDisabilityCompliant = False
+    motorDisabilityCompliant = False
+    visualDisabilityCompliant = False
+
+    dateCreated = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=5))
+    students = [models.StudentLevels.GENERAL2]
+    contactEmail = "collectiveofferfactory+contact@example.com"
+    contactPhone = "+33199006328"
+    contactUrl: str | None = None
+    contactForm = models.OfferContactFormEnum.FORM
+    locationType = models.CollectiveLocationType.TO_BE_DEFINED
+    interventionArea = ["2A", "2B"]
+    dateRange = db_utils.make_timerange(
+        start=date_utils.get_naive_utc_now() + datetime.timedelta(days=1),
+        end=date_utils.get_naive_utc_now() + datetime.timedelta(days=7),
+    )
+    formats = [EacFormat.PROJECTION_AUDIOVISUELLE]
+
+    @classmethod
+    def _create(
+        cls,
+        model_class: type[models.CollectiveOfferTemplate],
+        *args: typing.Any,
+        **kwargs: typing.Any,
+    ) -> models.CollectiveOfferTemplate:
+        if kwargs.get("isActive") is None:
+            kwargs["isActive"] = kwargs.get("validation") not in (
+                OfferValidationStatus.REJECTED,
+                OfferValidationStatus.PENDING,
+            )
+
+        return super()._create(model_class, *args, **kwargs)
+
+    @factory.post_generation
+    def educational_domains(
+        self,
+        create: bool,
+        extracted: list[models.EducationalDomain] | None = None,
+    ) -> None:
+        if not create or not extracted:
+            domain = db.session.query(models.EducationalDomain).filter(models.EducationalDomain.name == "Danse").first()
+            if not domain:
+                domain = EducationalDomainFactory.create(name="Danse", collectiveOfferTemplates=[self])
+            self.domains = [domain]
+
+        if extracted:
+            self.domains = list.copy(extracted)
+
+
+class CollectiveStockFactory(BaseFactory[models.CollectiveStock]):
+    class Meta:
+        model = models.CollectiveStock
+
+    collectiveOffer = factory.SubFactory(CollectiveOfferFactory)
+    startDatetime = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() + datetime.timedelta(days=1))
+    endDatetime = factory.LazyAttribute(lambda o: o.startDatetime)
+    bookingLimitDatetime = factory.LazyAttribute(lambda stock: stock.startDatetime - datetime.timedelta(minutes=60))
+    dateCreated = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=3))
+    dateModified = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=1))
+    numberOfTickets = 25
+    numberOfTeachers = 5
+    price = 100
+    collectiveAdditionalFees = factory.LazyFunction(list)
+    # when not given, set servicePrice to be consistent with price and collectiveAdditionalFees
+    servicePrice = factory.LazyAttribute(
+        lambda stock: stock.price - sum(fee.amount for fee in stock.collectiveAdditionalFees)
+    )
+    priceDetail = factory.LazyAttribute(lambda stock: f"Prix: {stock.price}€ pour {stock.numberOfTickets} tickets")
+
+
+class CollectiveAdditionalFeeFactory(BaseFactory[models.CollectiveAdditionalFee]):
+    class Meta:
+        model = models.CollectiveAdditionalFee
+
+    collectiveStock = factory.SubFactory(CollectiveStockFactory)
+    type = models.CollectiveAdditionalFeeType.TRAVEL
+    amount = 50
+
+
+class CollectiveAdditionalFeeCustomFactory(CollectiveAdditionalFeeFactory):
+    type = models.CollectiveAdditionalFeeType.OTHER
+    label = "A custom fee"
+
+
+class EducationalYearFactory(BaseFactory[models.EducationalYear]):
+    class Meta:
+        model = models.EducationalYear
+        sqlalchemy_get_or_create = ["adageId", "beginningDate", "expirationDate"]
+
+    adageId: factory.declarations.BaseDeclaration = factory.Sequence(
+        lambda number: str(int(_get_current_educational_year_adage_id()) + number)
+    )
+    beginningDate: factory.declarations.BaseDeclaration = factory.Sequence(
+        lambda number: (
+            _get_educational_year_start(get_current_educational_first_civil_year()) + relativedelta(years=number)
+        )
+    )
+    expirationDate: factory.declarations.BaseDeclaration = factory.Sequence(
+        lambda number: (
+            _get_educational_year_end(get_current_educational_first_civil_year() + 1) + relativedelta(years=number)
+        ),
+    )
+
+
+def get_educational_first_civil_year(date_time: datetime.datetime) -> int:
+    if 1 <= date_time.month < 9:
+        return date_time.year - 1
+
+    return date_time.year
+
+
+def get_current_educational_first_civil_year() -> int:
+    current_date = date_utils.get_naive_utc_now()
+
+    return get_educational_first_civil_year(current_date)
+
+
+def create_educational_year(date_time: datetime.datetime) -> models.EducationalYear:
+    beginning_year = get_educational_first_civil_year(date_time)
+    adage_id = str(beginning_year - ADAGE_STARTING_EDUCATIONAL_YEAR)
+
+    return EducationalYearFactory.create(
+        beginningDate=_get_educational_year_start(beginning_year),
+        expirationDate=_get_educational_year_end(beginning_year + 1),
+        adageId=adage_id,
+    )
+
+
+def _get_current_educational_year_adage_id() -> str:
+    return str(get_current_educational_first_civil_year() - ADAGE_STARTING_EDUCATIONAL_YEAR)
+
+
+def _get_next_educational_year_adage_id() -> str:
+    return str(get_current_educational_first_civil_year() - ADAGE_STARTING_EDUCATIONAL_YEAR + 1)
+
+
+def _get_educational_year_start(civil_year: int) -> datetime.datetime:
+    naive_start = datetime.datetime(year=civil_year, month=9, day=1)
+    aware_start = pytz.timezone(date_utils.METROPOLE_TIMEZONE).localize(naive_start)
+    return date_utils.to_naive_utc_datetime(aware_start)
+
+
+def _get_educational_year_end(civil_year: int) -> datetime.datetime:
+    naive_end = datetime.datetime(year=civil_year, month=8, day=31, hour=23, minute=59, second=59)
+    aware_end = pytz.timezone(date_utils.METROPOLE_TIMEZONE).localize(naive_end)
+    return date_utils.to_naive_utc_datetime(aware_end)
+
+
+class EducationalCurrentYearFactory(EducationalYearFactory):
+    beginningDate = factory.LazyFunction(
+        lambda: _get_educational_year_start(get_current_educational_first_civil_year())
+    )
+    expirationDate = factory.LazyFunction(
+        lambda: _get_educational_year_end(get_current_educational_first_civil_year() + 1)
+    )
+    adageId = factory.LazyFunction(_get_current_educational_year_adage_id)
+
+
+class EducationalNextYearFactory(EducationalYearFactory):
+    beginningDate = factory.LazyFunction(
+        lambda: _get_educational_year_start(get_current_educational_first_civil_year() + 1)
+    )
+    expirationDate = factory.LazyFunction(
+        lambda: _get_educational_year_end(get_current_educational_first_civil_year() + 2)
+    )
+    adageId = factory.LazyFunction(_get_next_educational_year_adage_id)
+
+
+class EducationalDepositFactory(BaseFactory[models.EducationalDeposit]):
+    class Meta:
+        model = models.EducationalDeposit
+        sqlalchemy_get_or_create = ["educationalInstitution", "educationalYear", "period"]
+
+    educationalInstitution = factory.SubFactory(EducationalInstitutionFactory)
+    educationalYear = factory.SubFactory(EducationalYearFactory)
+    amount = 3000
+    isFinal = True
+    ministry = models.Ministry.EDUCATION_NATIONALE.name
+    period = factory.LazyAttribute(lambda deposit: utils.get_educational_year_full_period(deposit.educationalYear))
+
+
+class EducationalDepositFirstPeriodFactory(EducationalDepositFactory):
+    period = factory.LazyAttribute(lambda deposit: utils.get_educational_year_first_period(deposit.educationalYear))
+
+
+class EducationalDepositSecondPeriodFactory(EducationalDepositFactory):
+    period = factory.LazyAttribute(lambda deposit: utils.get_educational_year_second_period(deposit.educationalYear))
+
+
+class EducationalRedactorFactory(BaseFactory[models.EducationalRedactor]):
+    class Meta:
+        model = models.EducationalRedactor
+
+    email = factory.Sequence("reda.khteur{}@example.com".format)
+    firstName = "Reda"
+    lastName = "Khteur"
+    civility = "M."
+
+
+class CollectiveBookingFactory(BaseFactory[models.CollectiveBooking]):
+    class Meta:
+        model = models.CollectiveBooking
+
+    class Params:
+        ministry = models.Ministry.EDUCATION_NATIONALE
+
+    collectiveStock = factory.SubFactory(CollectiveStockFactory)
+    dateCreated = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=2))
+    offerer = factory.SelfAttribute("collectiveStock.collectiveOffer.venue.managingOfferer")
+    venue = factory.SelfAttribute("collectiveStock.collectiveOffer.venue")
+    cancellationLimitDate: factory.declarations.BaseDeclaration = factory.LazyAttribute(
+        lambda self: utils.compute_educational_booking_cancellation_limit_date(
+            self.collectiveStock.startDatetime, self.dateCreated
+        )
+    )
+    confirmationLimitDate: factory.declarations.BaseDeclaration = factory.LazyFunction(
+        lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+    )
+    educationalInstitution = factory.SubFactory(EducationalInstitutionFactory)
+    educationalYear = factory.LazyAttribute(lambda booking: _get_booking_year(booking))
+    educationalRedactor = factory.SubFactory(EducationalRedactorFactory)
+    confirmationDate: factory.declarations.BaseDeclaration | None = factory.LazyFunction(
+        lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+    )
+    educationalDeposit = factory.LazyAttribute(lambda booking: _get_booking_deposit(booking, booking.ministry))
+
+
+def _get_booking_year(booking: models.CollectiveBooking) -> models.EducationalYear | None:
+    start_datetime = booking.collectiveStock.startDatetime
+    return create_educational_year(start_datetime)
+
+
+def _get_booking_deposit(
+    booking: models.CollectiveBooking, ministry: models.Ministry
+) -> models.EducationalDeposit | None:
+    if booking.confirmationDate is None:
+        return None
+
+    institution = booking.educationalInstitution
+    year = booking.educationalYear
+    period = utils.get_educational_year_full_period(year)
+
+    return EducationalDepositFactory.create(
+        educationalInstitution=institution, educationalYear=year, period=period, ministry=ministry
+    )
+
+
+class CancelledCollectiveBookingFactory(CollectiveBookingFactory):
+    status = models.CollectiveBookingStatus.CANCELLED
+    cancellationDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(hours=1))
+    cancellationReason = factory.Iterator(models.CollectiveBookingCancellationReasons)
+
+
+class CancelledNotConfirmedCollectiveBookingFactory(CancelledCollectiveBookingFactory):
+    confirmationDate = None
+
+
+class PendingCollectiveBookingFactory(CollectiveBookingFactory):
+    cancellationLimitDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() + datetime.timedelta(days=10))
+    confirmationLimitDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() + datetime.timedelta(days=10))
+    confirmationDate = None
+    status = models.CollectiveBookingStatus.PENDING
+
+
+class UsedCollectiveBookingFactory(CollectiveBookingFactory):
+    status = models.CollectiveBookingStatus.USED
+    dateUsed = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=5))
+    dateCreated = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=20))
+    confirmationLimitDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=12))
+    confirmationDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=6))
+
+
+class PendingReimbursementCollectiveBookingFactory(UsedCollectiveBookingFactory):
+    status = models.CollectiveBookingStatus.PENDING_REIMBURSEMENT
+
+
+class ReimbursedCollectiveBookingFactory(UsedCollectiveBookingFactory):
+    status = models.CollectiveBookingStatus.REIMBURSED
+    reimbursementDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=1))
+
+
+class ConfirmedCollectiveBookingFactory(CollectiveBookingFactory):
+    status = models.CollectiveBookingStatus.CONFIRMED
+    cancellationLimitDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=1))
+    confirmationDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() - datetime.timedelta(days=1))
+    confirmationLimitDate = factory.LazyFunction(lambda: date_utils.get_naive_utc_now() + datetime.timedelta(days=1))
+
+
+class CollectiveDmsApplicationWithNoVenueFactory(BaseFactory[models.CollectiveDmsApplication]):
+    class Meta:
+        model = models.CollectiveDmsApplication
+
+    siret: str | factory.declarations.BaseDeclaration = "00000000000001"
+    state = "en_construction"
+    procedure = 1  # could be any positive integer
+    application = factory.Sequence(int)
+    lastChangeDate = date_utils.get_naive_utc_now() - datetime.timedelta(hours=1)
+    depositDate = date_utils.get_naive_utc_now() - datetime.timedelta(days=10)
+    expirationDate = date_utils.get_naive_utc_now() + datetime.timedelta(days=365)
+    buildDate = factory.SelfAttribute("lastChangeDate")
+
+
+class CollectiveDmsApplicationFactory(CollectiveDmsApplicationWithNoVenueFactory):
+    class Meta:
+        model = models.CollectiveDmsApplication
+
+    venue = factory.SubFactory(offerers_factories.VenueFactory)
+    siret = factory.SelfAttribute("venue.siret")
+
+
+class CollectiveOfferRequestFactory(BaseFactory[models.CollectiveOfferRequest]):
+    class Meta:
+        model = models.CollectiveOfferRequest
+
+    comment = "Un commentaire sublime"
+    educationalRedactor = factory.SubFactory(EducationalRedactorFactory)
+    educationalInstitution = factory.SubFactory(EducationalInstitutionFactory)
+    collectiveOfferTemplate = factory.SubFactory(CollectiveOfferTemplateFactory)
+
+
+class NationalProgramFactory(BaseFactory[models.NationalProgram]):
+    class Meta:
+        model = models.NationalProgram
+
+    name = factory.Sequence("Dispositif national {}".format)
+
+
+class DomainToNationalProgramFactory(BaseFactory[models.DomainToNationalProgram]):
+    class Meta:
+        model = models.DomainToNationalProgram
+
+
+class EducationalRedactorWithFavoriteCollectiveOfferTemplateFactory(EducationalRedactorFactory):
+    favoriteCollectiveOfferTemplates = factory.List([factory.SubFactory(CollectiveOfferTemplateFactory)])
+
+
+class EducationalInstitutionProgramFactory(BaseFactory[models.EducationalInstitutionProgram]):
+    class Meta:
+        model = models.EducationalInstitutionProgram
+        sqlalchemy_get_or_create = ["name"]
+
+    # some programs are inserted by default.
+    # since the id sequence starts at 0, this will trigger a unique
+    # constraint error.
+    id = factory.Sequence(lambda n: n + 1_000)
+    name = factory.Sequence("Program {}".format)
+
+
+class EducationalInstitutionProgramAssociationFactory(BaseFactory[models.EducationalInstitutionProgramAssociation]):
+    class Meta:
+        model = models.EducationalInstitutionProgramAssociation
+        sqlalchemy_get_or_create = ["institution", "program"]
+
+    institution = factory.SubFactory(EducationalInstitutionFactory)
+    program = factory.SubFactory(EducationalInstitutionProgramFactory)
+    timespan = db_utils.make_timerange(start=constants.MEG_BEGINNING_DATE, end=None)
+
+
+class PlaylistFactory(BaseFactory[models.CollectivePlaylist]):
+    class Meta:
+        model = models.CollectivePlaylist
+
+    type = models.PlaylistType.CLASSROOM
+    institution = factory.SubFactory(EducationalInstitutionFactory)
+    collective_offer_template = factory.SubFactory(CollectiveOfferTemplateFactory)
+    venue = factory.SubFactory(offerers_factories.VenueFactory)
+
+
+class CollectiveOfferBaseFactory(CollectiveOfferFactory):
+    institution = factory.SubFactory(EducationalInstitutionFactory)
+
+
+class ArchivedCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    isActive = False
+    dateArchived = factory.LazyFunction(date_utils.get_naive_utc_now)
+
+
+class RejectedCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    validation = OfferValidationStatus.REJECTED
+    isActive = False
+
+    @factory.post_generation
+    def create_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        # a rejected offer has a stock because it completed the creation process
+        CollectiveStockFactory.create(
+            startDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=10), collectiveOffer=self
+        )
+
+
+class UnderReviewCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    validation = OfferValidationStatus.PENDING
+    isActive = False
+
+    @factory.post_generation
+    def create_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        # an offer under review has a stock because it completed the creation process
+        CollectiveStockFactory.create(
+            startDatetime=date_utils.get_naive_utc_now() + datetime.timedelta(days=10), collectiveOffer=self
+        )
+
+
+class DraftCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    validation = OfferValidationStatus.DRAFT
+    isActive = False
+
+
+class PublishedCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    validation = OfferValidationStatus.APPROVED
+
+    @factory.post_generation
+    def create_stock(self, _create: bool, _extracted: typing.Any, **kwargs: typing.Any) -> None:
+        future = date_utils.get_naive_utc_now() + datetime.timedelta(days=10)
+        CollectiveStockFactory.create(startDatetime=future, collectiveOffer=self, **kwargs)
+
+
+class ArchivedPublishedCollectiveOfferFactory(PublishedCollectiveOfferFactory):
+    isActive = False
+    dateArchived = factory.LazyFunction(date_utils.get_naive_utc_now)
+
+
+class HiddenCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    isActive = False
+
+
+class ExpiredWithoutBookingCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    validation = OfferValidationStatus.APPROVED
+
+    @factory.post_generation
+    def create_expired_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        CollectiveStockFactory.create(bookingLimitDatetime=yesterday, collectiveOffer=self)
+
+
+class ExpiredWithBookingCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    validation = OfferValidationStatus.APPROVED
+
+    @factory.post_generation
+    def create_expired_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        stock = CollectiveStockFactory.create(bookingLimitDatetime=yesterday, collectiveOffer=self)
+        PendingCollectiveBookingFactory.create(collectiveStock=stock)
+
+
+class PrebookedCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_prebooked_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        tomorrow = date_utils.get_naive_utc_now() + datetime.timedelta(days=1)
+        stock = CollectiveStockFactory.create(startDatetime=tomorrow, collectiveOffer=self)
+        PendingCollectiveBookingFactory.create(collectiveStock=stock)
+
+
+class PrebookedStartPassedCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_prebooked_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        stock = CollectiveStockFactory.create(startDatetime=yesterday, collectiveOffer=self)
+        PendingCollectiveBookingFactory.create(collectiveStock=stock)
+
+
+class CancelledWithoutBookingCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_cancelled_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        in_past = date_utils.get_naive_utc_now() - datetime.timedelta(days=4)
+        CollectiveStockFactory.create(startDatetime=in_past, collectiveOffer=self)
+
+
+class CancelledWithPendingBookingCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_cancelled_booking(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        in_past = date_utils.get_naive_utc_now() - datetime.timedelta(days=4)
+        stock = CollectiveStockFactory.create(startDatetime=in_past, collectiveOffer=self)
+        CancelledCollectiveBookingFactory.create(collectiveStock=stock, confirmationDate=None)
+
+
+class CancelledWithBookingCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_cancelled_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        in_past = date_utils.get_naive_utc_now() - datetime.timedelta(days=4)
+        stock = CollectiveStockFactory.create(startDatetime=in_past, collectiveOffer=self)
+        CancelledCollectiveBookingFactory.create(
+            collectiveStock=stock, cancellationReason=models.CollectiveBookingCancellationReasons.OFFERER
+        )
+
+
+class CancelledDueToExpirationCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_cancelled_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        in_past = date_utils.get_naive_utc_now() - datetime.timedelta(days=4)
+        stock = CollectiveStockFactory.create(startDatetime=in_past, collectiveOffer=self)
+        CancelledCollectiveBookingFactory.create(
+            collectiveStock=stock, cancellationReason=models.CollectiveBookingCancellationReasons.EXPIRED
+        )
+
+
+class BookedCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_booked_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        tomorrow = date_utils.get_naive_utc_now() + datetime.timedelta(days=1)
+        stock = CollectiveStockFactory.create(startDatetime=tomorrow, collectiveOffer=self)
+        ConfirmedCollectiveBookingFactory.create(collectiveStock=stock)
+
+
+class EndedCollectiveOfferConfirmedBookingFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_booking(self, _create: bool, _extracted: typing.Any, **kwargs: typing.Any) -> None:
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        stock = CollectiveStockFactory.create(startDatetime=yesterday, collectiveOffer=self)
+        ConfirmedCollectiveBookingFactory.create(collectiveStock=stock)
+
+
+class EndedCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_booking(self, _create: bool, _extracted: typing.Any, **kwargs: typing.Any) -> None:
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=3)
+        stock = CollectiveStockFactory.create(startDatetime=yesterday, collectiveOffer=self)
+        UsedCollectiveBookingFactory.create(collectiveStock=stock)
+
+
+class PendingReimbursementCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_reimbursed_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        stock = CollectiveStockFactory.create(startDatetime=yesterday, collectiveOffer=self)
+        PendingReimbursementCollectiveBookingFactory.create(collectiveStock=stock)
+
+
+class ReimbursedCollectiveOfferFactory(CollectiveOfferBaseFactory):
+    @factory.post_generation
+    def create_reimbursed_stock(self, _create: bool, _extracted: typing.Any, **_kwargs: typing.Any) -> None:
+        yesterday = date_utils.get_naive_utc_now() - datetime.timedelta(days=1)
+        stock = CollectiveStockFactory.create(startDatetime=yesterday, collectiveOffer=self)
+        ReimbursedCollectiveBookingFactory.create(collectiveStock=stock)
+
+
+class ArchivedReimbursedCollectiveOfferFactory(ReimbursedCollectiveOfferFactory):
+    isActive = False
+    dateArchived = factory.LazyFunction(date_utils.get_naive_utc_now)
+
+
+class CollectiveOfferOnSchoolLocationFactory(PublishedCollectiveOfferFactory):
+    locationType = models.CollectiveLocationType.SCHOOL
+    interventionArea = ["33", "75", "93"]
+
+
+class CollectiveOfferOnAddressVenueLocationFactory(PublishedCollectiveOfferFactory):
+    locationType = models.CollectiveLocationType.ADDRESS
+    offererAddress = factory.SubFactory(
+        offerers_factories.OfferLocationFactory,
+        address=factory.SelfAttribute("..venue.offererAddress.address"),
+        label=None,
+    )
+
+
+class CollectiveOfferOnOtherAddressLocationFactory(PublishedCollectiveOfferFactory):
+    locationType = models.CollectiveLocationType.ADDRESS
+    offererAddress = factory.SubFactory(
+        offerers_factories.OfferLocationFactory,
+        offerer=factory.SelfAttribute("..venue.managingOfferer"),
+        address=factory.SubFactory(geography_factories.AddressFactory),
+    )
+
+
+class CollectiveOfferOnToBeDefinedLocationFactory(PublishedCollectiveOfferFactory):
+    locationType = models.CollectiveLocationType.TO_BE_DEFINED
+    locationComment = "In space"
+    interventionArea = ["33", "75", "93"]
+
+
+class CollectiveOfferTemplateOnSchoolLocationFactory(CollectiveOfferTemplateFactory):
+    locationType = models.CollectiveLocationType.SCHOOL
+    interventionArea = ["33", "75", "93"]
+
+
+class CollectiveOfferTemplateOnAddressVenueLocationFactory(CollectiveOfferTemplateFactory):
+    locationType = models.CollectiveLocationType.ADDRESS
+    offererAddress = factory.SubFactory(
+        offerers_factories.OfferLocationFactory,
+        address=factory.SelfAttribute("..venue.offererAddress.address"),
+        label=None,
+        venueId=factory.SelfAttribute("..venue.id"),
+    )
+
+
+class CollectiveOfferTemplateOnOtherAddressLocationFactory(CollectiveOfferTemplateFactory):
+    locationType = models.CollectiveLocationType.ADDRESS
+    offererAddress = factory.SubFactory(
+        offerers_factories.OfferLocationFactory,
+        offerer=factory.SelfAttribute("..venue.managingOfferer"),
+        address=factory.SubFactory(geography_factories.AddressFactory),
+    )
+
+
+class CollectiveOfferTemplateOnToBeDefinedLocationFactory(CollectiveOfferTemplateFactory):
+    locationType = models.CollectiveLocationType.TO_BE_DEFINED
+    locationComment = "In space"
+    interventionArea = ["33", "75", "93"]
+
+
+def create_collective_offer_by_status(
+    status: models.CollectiveOfferDisplayedStatus,
+    **kwargs: typing.Any,
+) -> models.CollectiveOffer:
+    match status:
+        case models.CollectiveOfferDisplayedStatus.ARCHIVED:
+            return ArchivedCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.REJECTED:
+            return RejectedCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.UNDER_REVIEW:
+            return UnderReviewCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.PUBLISHED:
+            return PublishedCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.HIDDEN:
+            return HiddenCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.EXPIRED:
+            return ExpiredWithBookingCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.PREBOOKED:
+            return PrebookedCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.CANCELLED:
+            return CancelledWithoutBookingCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.BOOKED:
+            return BookedCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.ENDED:
+            return EndedCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.REIMBURSED:
+            return ReimbursedCollectiveOfferFactory.create(**kwargs)
+        case models.CollectiveOfferDisplayedStatus.DRAFT:
+            return DraftCollectiveOfferFactory.create(**kwargs)
+        case _:
+            raise ValueError(f"No factory for collective offer status {status}")
+
+
+def create_collective_offer_template_by_status(
+    status: models.CollectiveOfferDisplayedStatus,
+    **kwargs: typing.Any,
+) -> models.CollectiveOfferTemplate:
+    match status:
+        case models.CollectiveOfferDisplayedStatus.ARCHIVED:
+            kwargs.update({"isActive": False, "dateArchived": date_utils.get_naive_utc_now()})
+            return CollectiveOfferTemplateFactory.create(**kwargs)
+
+        case models.CollectiveOfferDisplayedStatus.REJECTED:
+            kwargs["validation"] = OfferValidationStatus.REJECTED
+            kwargs["rejectionReason"] = models.CollectiveOfferRejectionReason.MISSING_PRICE
+            return CollectiveOfferTemplateFactory.create(**kwargs)
+
+        case models.CollectiveOfferDisplayedStatus.UNDER_REVIEW:
+            kwargs["validation"] = OfferValidationStatus.PENDING
+            return CollectiveOfferTemplateFactory.create(**kwargs)
+
+        case models.CollectiveOfferDisplayedStatus.DRAFT:
+            kwargs["validation"] = OfferValidationStatus.DRAFT
+            return CollectiveOfferTemplateFactory.create(**kwargs)
+
+        case models.CollectiveOfferDisplayedStatus.HIDDEN:
+            kwargs["isActive"] = False
+            return CollectiveOfferTemplateFactory.create(**kwargs)
+
+        case models.CollectiveOfferDisplayedStatus.PUBLISHED:
+            return CollectiveOfferTemplateFactory.create(**kwargs)
+
+        case models.CollectiveOfferDisplayedStatus.ENDED:
+            now = date_utils.get_naive_utc_now()
+            start = now - datetime.timedelta(days=14)
+            date_range = db_utils.make_timerange(start=start, end=now - datetime.timedelta(days=7))
+            return CollectiveOfferTemplateFactory.create(**kwargs, dateRange=date_range, dateCreated=start)
+
+    raise ValueError(f"No factory for collective offer status {status}")
+
+
+def create_collective_booking_by_status(
+    status: models.CollectiveBookingStatus, **kwargs: typing.Any
+) -> models.CollectiveBooking:
+    match status:
+        case models.CollectiveBookingStatus.PENDING:
+            return PendingCollectiveBookingFactory.create(**kwargs)
+        case models.CollectiveBookingStatus.CONFIRMED:
+            return ConfirmedCollectiveBookingFactory.create(**kwargs)
+        case models.CollectiveBookingStatus.USED:
+            return UsedCollectiveBookingFactory.create(**kwargs)
+        case models.CollectiveBookingStatus.CANCELLED:
+            return CancelledCollectiveBookingFactory.create(**kwargs)
+        case models.CollectiveBookingStatus.PENDING_REIMBURSEMENT:
+            return PendingReimbursementCollectiveBookingFactory.create(**kwargs)
+        case models.CollectiveBookingStatus.REIMBURSED:
+            return ReimbursedCollectiveBookingFactory.create(**kwargs)
+
+    raise ValueError(f"No factory for collective booking status {status}")

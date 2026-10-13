@@ -1,0 +1,287 @@
+import cn from 'classnames'
+import { useId, useRef, useState } from 'react'
+import { useForm } from 'react-hook-form'
+
+import { api } from '@/apiClient/api'
+import { isErrorAPIError, serializeApiErrors } from '@/apiClient/helpers'
+import type { BankAccountResponseModel, ManagedVenue } from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { BankAccountEvents } from '@/commons/core/FirebaseEvents/constants'
+import { SENT_DATA_ERROR_MESSAGE } from '@/commons/core/shared/constants'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { isEqual } from '@/commons/utils/isEqual'
+import { pluralizeFr } from '@/commons/utils/pluralize'
+import { Banner, BannerVariants } from '@/design-system/Banner/Banner'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonColor, ButtonVariant } from '@/design-system/Button/types'
+import { Checkbox } from '@/design-system/Checkbox/Checkbox'
+import { FieldFooter } from '@/design-system/common/FieldFooter/FieldFooter'
+import { DetailedModal } from '@/design-system/DetailedModal/DetailedModal'
+import { SimpleModal } from '@/design-system/SimpleModal/SimpleModal'
+import strokeWarningIcon from '@/icons/stroke-warning.svg'
+
+import { ManagedVenueItem } from '../ManagedVenueItem/ManagedVenueItem'
+import styles from './LinkVenuesDialog.module.scss'
+
+interface LinkVenuesDialogProps {
+  offererId: number
+  selectedBankAccount: BankAccountResponseModel
+  managedVenues: Array<ManagedVenue>
+  closeDialog: (update?: boolean) => Promise<void>
+  updateBankAccountVenuePricingPoint: (venueId: number) => Promise<void>
+  editLinkId: string
+  addLinkId: string
+}
+
+export const LinkVenuesDialog = ({
+  offererId,
+  selectedBankAccount,
+  managedVenues,
+  closeDialog,
+  updateBankAccountVenuePricingPoint,
+  editLinkId,
+  addLinkId,
+}: LinkVenuesDialogProps) => {
+  const [showDiscardDialog, setShowDiscardDialog] = useState<boolean>(false)
+  const [showUnlinkDialog, setShowUnlinkDialog] = useState<boolean>(false)
+
+  const availableManagedVenuesIds = managedVenues
+    .filter(
+      (venue) =>
+        venue.hasPricingPoint &&
+        (!venue.bankAccountId || venue.bankAccountId === selectedBankAccount.id)
+    )
+    .map((venue) => venue.id)
+  const snackBar = useSnackBar()
+  const { logEvent } = useAnalytics()
+
+  const initialVenuesIds = selectedBankAccount.linkedVenues.map(
+    (venue) => venue.id
+  )
+
+  const methods = useForm<{ venuesIds: number[] }>({
+    defaultValues: { venuesIds: initialVenuesIds },
+  })
+
+  const selectedVenuesIds = methods.watch('venuesIds')
+  const venuesIdsError = methods.formState.errors.venuesIds?.message
+
+  const setSelectedVenuesIds = (ids: number[]) => {
+    methods.setValue('venuesIds', ids, { shouldDirty: true })
+    methods.clearErrors('venuesIds')
+  }
+
+  const allVenuesSelected = availableManagedVenuesIds.every((venueId) =>
+    selectedVenuesIds.includes(venueId)
+  )
+
+  const saveButtonRef = useRef<HTMLButtonElement>(null)
+
+  const handleCancel = () => {
+    if (isEqual(selectedVenuesIds, initialVenuesIds)) {
+      void closeDialog()
+    } else {
+      setShowDiscardDialog(true)
+    }
+  }
+
+  const submitVenuesIds = async (venuesIds: number[], hasUnchecked = false) => {
+    if (isEqual(venuesIds, initialVenuesIds)) {
+      void closeDialog(false)
+      return
+    }
+
+    try {
+      await api.linkVenueToBankAccount({
+        body: { venuesIds },
+        path: {
+          offerer_id: offererId,
+          bank_account_id: selectedBankAccount.id,
+        },
+      })
+
+      logEvent(BankAccountEvents.CLICKED_SAVE_VENUE_TO_BANK_ACCOUNT, {
+        HasUncheckedVenue: hasUnchecked,
+      })
+
+      await closeDialog(true)
+      snackBar.success(
+        'Vos modifications ont bien été prises en compte.',
+        venuesIds.length > 0 ? editLinkId : addLinkId
+      )
+    } catch (error) {
+      if (isErrorAPIError(error) && error.status === 400) {
+        serializeApiErrors(error.body, methods.setError)
+      } else {
+        snackBar.error(SENT_DATA_ERROR_MESSAGE)
+      }
+    }
+  }
+
+  const onSubmit = async ({ venuesIds }: { venuesIds: number[] }) => {
+    const hasUnlinked = !initialVenuesIds.every((id) => venuesIds.includes(id))
+    if (hasUnlinked) {
+      setShowUnlinkDialog(true)
+    } else {
+      await submitVenuesIds(venuesIds)
+    }
+  }
+
+  const hasVenuesWithoutPricingPoint = managedVenues.some(
+    (venue) => !venue.hasPricingPoint
+  )
+
+  const venuesForPricingPoint = managedVenues.filter((x) => Boolean(x.siret))
+  const formId = useId()
+  return (
+    <>
+      <DetailedModal
+        isOpen
+        onClose={() => {
+          if (!showDiscardDialog && !showUnlinkDialog) {
+            handleCancel()
+          }
+        }}
+        description="Sélectionnez les structures dont les offres seront remboursées sur ce compte bancaire."
+        title={`Compte bancaire : ${selectedBankAccount.label}`}
+        secondaryAction={
+          <Button
+            variant={ButtonVariant.SECONDARY}
+            color={ButtonColor.NEUTRAL}
+            onClick={handleCancel}
+            label="Annuler"
+          />
+        }
+        primaryAction={
+          <Button
+            type="submit"
+            form={formId}
+            isLoading={methods.formState.isSubmitting}
+            ref={saveButtonRef}
+            label="Enregistrer"
+          />
+        }
+        isFooterFixed
+      >
+        <div className={cn(styles['dialog'])}>
+          {hasVenuesWithoutPricingPoint && (
+            <div className={styles['dialog-callout']}>
+              <Banner
+                title="Certaines de vos structures n’ont pas de SIRET"
+                variant={BannerVariants.ERROR}
+                description="Sélectionnez un SIRET pour chacune de ces structures avant de pouvoir les rattacher à ce compte bancaire."
+              />
+            </div>
+          )}
+          <form
+            id={formId}
+            onSubmit={methods.handleSubmit(onSubmit)}
+            className={styles['dialog-form']}
+          >
+            <div className={styles['dialog-checkboxes-section']}>
+              <div className={styles['dialog-checkboxes']}>
+                <div className={styles['dialog-select-all']}>
+                  <Checkbox
+                    checked={allVenuesSelected}
+                    indeterminate={
+                      selectedVenuesIds.length >= 1 && !allVenuesSelected
+                    }
+                    onChange={() => {
+                      setSelectedVenuesIds(
+                        allVenuesSelected
+                          ? []
+                          : [
+                              ...new Set([
+                                ...availableManagedVenuesIds,
+                                ...initialVenuesIds,
+                              ]),
+                            ]
+                      )
+                    }}
+                    label={
+                      allVenuesSelected
+                        ? 'Tout désélectionner'
+                        : 'Tout sélectionner'
+                    }
+                  />
+                  <span className={styles['dialog-select-all-count']}>
+                    {selectedVenuesIds.length}{' '}
+                    {pluralizeFr(
+                      selectedVenuesIds.length,
+                      'structure sélectionnée',
+                      'structures sélectionnées'
+                    )}
+                  </span>
+                </div>
+
+                {managedVenues.map((venue) => {
+                  return (
+                    <ManagedVenueItem
+                      venue={venue}
+                      key={venue.id}
+                      updateBankAccountVenuePricingPoint={
+                        updateBankAccountVenuePricingPoint
+                      }
+                      selectedBankAccount={selectedBankAccount}
+                      selectedVenuesIds={selectedVenuesIds}
+                      setSelectedVenuesIds={setSelectedVenuesIds}
+                      venuesForPricingPoint={venuesForPricingPoint}
+                      hasError={Boolean(venuesIdsError)}
+                    />
+                  )
+                })}
+              </div>
+              <FieldFooter error={venuesIdsError} />
+            </div>
+          </form>
+        </div>
+      </DetailedModal>
+      <SimpleModal
+        iconPath={strokeWarningIcon}
+        title="Les informations non sauvegardées ne seront pas prises en compte"
+        isOpen={showDiscardDialog}
+        onClose={() => setShowDiscardDialog(false)}
+        actionButtons={[
+          <Button
+            onClick={() => setShowDiscardDialog(false)}
+            variant={ButtonVariant.SECONDARY}
+            color={ButtonColor.NEUTRAL}
+            label="Annuler"
+            key="cancel"
+          />,
+          <Button
+            onClick={() => {
+              setShowDiscardDialog(false)
+              void closeDialog()
+            }}
+            label="Quitter sans enregistrer"
+            key="confirm"
+          />,
+        ]}
+      />
+      <SimpleModal
+        iconPath={strokeWarningIcon}
+        title="Attention : la ou les structures désélectionnées ne seront plus remboursées sur ce compte bancaire"
+        isOpen={showUnlinkDialog}
+        onClose={() => setShowUnlinkDialog(false)}
+        actionButtons={[
+          <Button
+            onClick={() => setShowUnlinkDialog(false)}
+            variant={ButtonVariant.SECONDARY}
+            color={ButtonColor.NEUTRAL}
+            label="Retour"
+            key="cancel"
+          />,
+          <Button
+            onClick={() => {
+              setShowUnlinkDialog(false)
+              void submitVenuesIds(methods.getValues('venuesIds'), true)
+            }}
+            label="Confirmer"
+            key="confirm"
+          />,
+        ]}
+      />
+    </>
+  )
+}

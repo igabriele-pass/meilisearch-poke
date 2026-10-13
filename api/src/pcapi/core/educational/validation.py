@@ -1,0 +1,214 @@
+import datetime
+from decimal import Decimal
+
+from pcapi.core.bookings import exceptions as booking_exceptions
+from pcapi.core.educational import constants
+from pcapi.core.educational import exceptions
+from pcapi.core.educational import models
+from pcapi.core.educational import repository
+from pcapi.core.offers import models as offers_models
+from pcapi.models import api_errors
+from pcapi.models import db
+from pcapi.models.feature import FeatureToggle
+
+
+def check_institution_fund(booking_amount: Decimal, deposit: models.EducationalDeposit) -> None:
+    spent_amount = repository.get_confirmed_collective_bookings_amount(deposit)
+    total_amount = booking_amount + spent_amount
+    deposit.check_has_enough_fund(total_amount)
+
+
+def check_collective_stock_is_bookable(stock: models.CollectiveStock) -> None:
+    if not stock.isBookable:
+        raise exceptions.CollectiveStockNotBookable()
+
+
+def check_collective_booking_status(collective_booking: models.CollectiveBooking) -> None:
+    if collective_booking.status == models.CollectiveBookingStatus.CANCELLED:
+        raise exceptions.BookingIsCancelled()
+
+
+def check_confirmation_limit_date_has_not_passed(
+    booking: models.CollectiveBooking, confirmation_datetime: datetime.datetime
+) -> None:
+    if booking.confirmationLimitDate < confirmation_datetime:
+        raise booking_exceptions.ConfirmationLimitDateHasPassed()
+
+
+def check_collective_offer_number_of_collective_stocks(
+    collective_offer: models.CollectiveOffer,
+) -> None:
+    if collective_offer.collectiveStock:
+        raise exceptions.CollectiveStockAlreadyExists()
+
+
+def check_user_can_prebook_collective_stock(uai: str, stock: models.CollectiveStock) -> None:
+    offer_institution = stock.collectiveOffer.institution
+    if offer_institution is not None and offer_institution.institutionId != uai:
+        raise exceptions.CollectiveStockNotBookableByUser()
+
+
+def check_institution_id_exists(institution_id: int) -> models.EducationalInstitution:
+    institution = db.session.get(models.EducationalInstitution, institution_id)
+    if not institution:
+        raise exceptions.EducationalInstitutionNotFound()
+    return institution
+
+
+def check_collective_offer_action_is_allowed(
+    offer: models.CollectiveOffer, action: models.CollectiveOfferAllowedAction, for_public_api: bool = False
+) -> None:
+    allowed_actions = offer.allowedActionsForPublicApi if for_public_api else offer.allowedActions
+    if action not in allowed_actions:
+        raise exceptions.CollectiveOfferForbiddenAction(action=action)
+
+
+def check_collective_offer_template_action_is_allowed(
+    offer: models.CollectiveOfferTemplate, action: models.CollectiveOfferTemplateAllowedAction
+) -> None:
+    if action not in offer.allowedActions:
+        raise exceptions.CollectiveOfferTemplateForbiddenAction(action=action)
+
+
+def check_collective_offer_name_length_is_valid(offer_name: str) -> None:
+    if len(offer_name) > constants.MAX_COLLECTIVE_NAME_LENGTH:
+        raise api_errors.ApiErrors(
+            errors={
+                "name": [
+                    f"Le titre de l’offre doit faire au maximum {constants.MAX_COLLECTIVE_NAME_LENGTH} caractères."
+                ]
+            }
+        )
+
+
+def check_collective_offer_description_length_is_valid(offer_description: str) -> None:
+    if len(offer_description) > constants.MAX_COLLECTIVE_DESCRIPTION_LENGTH:
+        raise api_errors.ApiErrors(
+            {
+                "description": [
+                    f"La description de l’offre doit faire au maximum {constants.MAX_COLLECTIVE_DESCRIPTION_LENGTH} caractères."
+                ]
+            }
+        )
+
+
+def check_start_and_end_dates_in_same_educational_year(
+    start_datetime: datetime.datetime, end_datetime: datetime.datetime
+) -> None:
+    start_year = repository.find_educational_year_by_date(start_datetime)
+    if not start_year:
+        raise exceptions.StartEducationalYearMissing()
+
+    if start_datetime == end_datetime:
+        return
+
+    end_year = repository.find_educational_year_by_date(end_datetime)
+    if not end_year:
+        raise exceptions.EndEducationalYearMissing()
+
+    if start_year.id != end_year.id:
+        raise exceptions.StartAndEndEducationalYearDifferent()
+
+
+def check_start_is_before_end(start_datetime: datetime.datetime, end_datetime: datetime.datetime) -> None:
+    # each date may have a timezone (if coming e.g from a route input) or not (if coming from the DB)
+    # so we need to set a timezone to each date in order to compare them
+
+    # if start or end datetime does not have a timezone, it is assumed to be UTC
+    check_start = start_datetime
+    if check_start.tzinfo is None:
+        check_start = check_start.replace(tzinfo=datetime.UTC)
+
+    check_end = end_datetime
+    if check_end.tzinfo is None:
+        check_end = check_end.replace(tzinfo=datetime.UTC)
+
+    if check_end < check_start:
+        raise exceptions.EndDatetimeBeforeStartDatetime()
+
+
+def validate_national_program(national_program_id: int | None, domains: list[models.EducationalDomain] | None) -> None:
+    if national_program_id is None:
+        return
+
+    if not domains:
+        raise exceptions.MissingDomains()
+
+    national_program = repository.get_national_program_or_none(national_program_id)
+
+    if not national_program:
+        raise exceptions.NationalProgramNotFound()
+
+    if not national_program.isActive:
+        raise exceptions.InactiveNationalProgram()
+
+    valid_national_program_ids = {np.id for domain in domains for np in domain.nationalPrograms}
+    if national_program_id not in valid_national_program_ids:
+        raise exceptions.IllegalNationalProgram()
+
+
+def check_validation_status(
+    offer: models.CollectiveOffer | models.CollectiveOfferTemplate,
+) -> None:
+    if offer.validation in (offers_models.OfferValidationStatus.REJECTED, offers_models.OfferValidationStatus.PENDING):
+        raise exceptions.EducationalException(
+            {"global": ["Les offres refusées ou en attente de validation ne sont pas modifiables"]}
+        )
+
+
+def check_contact_request(offer: models.CollectiveOfferTemplate, updates: dict) -> None:
+    set_email = updates.get("contactEmail", offer.contactEmail)
+    set_phone = updates.get("contactPhone", offer.contactPhone)
+    set_url = updates.get("contactUrl", offer.contactUrl)
+    set_form = updates.get("contactForm", offer.contactForm)
+
+    if not any((set_email, set_phone, set_url, set_form)):
+        raise exceptions.AllNullContactRequestDataError()
+
+    if set_url and set_form:
+        raise exceptions.UrlandFormBothSetError()
+
+
+def validate_students(student_levels: list[str] | list[models.StudentLevels] | None) -> list[models.StudentLevels]:
+    if not student_levels:
+        raise ValueError("La liste des niveaux scolaires ne peut pas être vide")
+
+    output = []
+    for student_level in student_levels:
+        try:
+            if isinstance(student_level, str):
+                level = _fetch_student_level(student_level)
+            else:
+                level = student_level
+
+        except ValueError:
+            permitted = _permitted_levels()
+            msg = f'Value is not a valid enumeration member; permitted: ["{permitted}"]'
+            raise ValueError(msg)
+
+        if not FeatureToggle.ENABLE_MARSEILLE.is_active() and level in models.StudentLevels.primary_levels():
+            raise ValueError(f"Ce niveau ('{level.name}') n'est pas encore autorisé")
+
+        output.append(level)
+    return output
+
+
+def _permitted_levels() -> str:
+    if FeatureToggle.ENABLE_MARSEILLE.is_active():
+        return '", "'.join(models.StudentLevels.__members__.keys())
+
+    restricted_levels = [
+        level.name for level in models.StudentLevels if level not in models.StudentLevels.primary_levels()
+    ]
+    return '", "'.join(restricted_levels)
+
+
+def _fetch_student_level(level: str) -> models.StudentLevels:
+    """Fetch student level from enum name or value (try both)"""
+    try:
+        return models.StudentLevels(level)
+    except ValueError:
+        try:
+            return models.StudentLevels[level]
+        except Exception:
+            raise ValueError("Unknown student level")

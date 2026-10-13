@@ -1,0 +1,206 @@
+import cn from 'classnames'
+
+import {
+  CollectiveOfferDisplayedStatus,
+  CollectiveOfferTemplateAllowedAction,
+} from '@/apiClient/v1'
+import { ContentLayout } from '@/app/App/layouts/ContentLayout/ContentLayout'
+import { isCollectiveOfferTemplate } from '@/commons/core/OfferEducational/types'
+import { ShareTemplateOfferLink } from '@/components/CollectiveOffer/ShareTemplateOfferLink/ShareTemplateOfferLink'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonVariant } from '@/design-system/Button/types'
+import fullValidateIcon from '@/icons/full-validate.svg'
+import fullWaitIcon from '@/icons/full-wait.svg'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import {
+  type MandatoryCollectiveOfferFromParamsProps,
+  withCollectiveOfferFromParams,
+} from '../CollectiveOffer/components/OfferEducational/useCollectiveOfferFromParams'
+import styles from './CollectiveOfferConfirmation.module.scss'
+
+function getInstitutionDisplayName(
+  offer: MandatoryCollectiveOfferFromParamsProps['offer']
+) {
+  if (isCollectiveOfferTemplate(offer)) {
+    return ''
+  }
+
+  if (!offer.institution) {
+    return ''
+  }
+  return `${offer.institution.institutionType ?? ''} ${offer.institution.name}`.trim()
+}
+
+const activeOffer = (
+  offer: MandatoryCollectiveOfferFromParamsProps['offer']
+) => ({
+  title: 'Votre offre a été publiée sur ADAGE',
+  description: (
+    <>
+      {getInstitutionDisplayName(offer) ? (
+        <>
+          <p>
+            Votre offre est désormais visible et réservable par les enseignants
+            et chefs d'établissements de l'établissement scolaire :
+          </p>
+          <p className={styles['institution-name']}>
+            {getInstitutionDisplayName(offer)}
+          </p>
+        </>
+      ) : (
+        <p>
+          Votre offre est désormais visible et réservable par les enseignants et
+          chefs d'établissements des établissements scolaires qui sont dans la
+          ou les zones de mobilité sélectionnées.
+        </p>
+      )}
+    </>
+  ),
+  icon: (
+    <SvgIcon
+      src={fullValidateIcon}
+      alt=""
+      className={cn(
+        styles['confirmation-icon'],
+        styles['confirmation-icon-validate']
+      )}
+    />
+  ),
+})
+
+const pendingOffer = {
+  title: 'Offre en cours de validation !',
+  description: (
+    <>
+      <p>Nous vérifions actuellement la conformité de votre offre.</p>
+      <p className={styles['text-bold']}>
+        Cette vérification pourra prendre jusqu’à 72h.
+      </p>
+      <p className={styles['text-bold']}>
+        Vous ne pouvez pas effectuer de modification pour l’instant.
+      </p>
+      <p>
+        Vous recevrez un e-mail de confirmation une fois votre offre validée.
+      </p>
+    </>
+  ),
+  icon: (
+    <SvgIcon
+      src={fullWaitIcon}
+      alt=""
+      className={styles['confirmation-icon']}
+    />
+  ),
+}
+
+const showcaseOffer = () => ({
+  title: 'Votre offre a été publiée sur ADAGE',
+  description: (
+    <p>
+      Votre offre est visible uniquement par les enseignants et chefs
+      d’établissement de l’Éducation Nationale qui peuvent désormais prendre
+      contact avec vous pour co-construire une offre adaptée à leurs classes.
+    </p>
+  ),
+  icon: (
+    <SvgIcon
+      src={fullValidateIcon}
+      alt=""
+      className={cn(
+        styles['confirmation-icon'],
+        styles['confirmation-icon-validate']
+      )}
+    />
+  ),
+})
+
+const showcaseOfferWithShareLink = (
+  offer: MandatoryCollectiveOfferFromParamsProps['offer']
+) => ({
+  title: 'Créer une offre',
+  description: (
+    <>
+      <p className={styles['confirmation-title']}>
+        Votre offre a été publiée sur ADAGE
+      </p>
+      <div className={styles['confirmation-description']}>
+        <p>
+          Aidez les enseignants à retrouver votre offre plus facilement sur
+          ADAGE
+        </p>
+        <ShareTemplateOfferLink offerId={offer.id} />
+      </div>
+    </>
+  ),
+  icon: (
+    <SvgIcon
+      src={fullValidateIcon}
+      alt=""
+      className={cn(
+        styles['confirmation-icon'],
+        styles['confirmation-icon-validate']
+      )}
+    />
+  ),
+})
+
+const CollectiveOfferConfirmation = ({
+  offer,
+}: MandatoryCollectiveOfferFromParamsProps): JSX.Element => {
+  const isShowcase = offer.isTemplate
+  const offerStatus = offer.displayedStatus
+  const offererId = offer.venue.managingOfferer.id
+
+  const creationUrl = offererId
+    ? `/offre/creation?structure=${offererId}`
+    : '/offre/creation'
+
+  const canShareOffer =
+    isCollectiveOfferTemplate(offer) &&
+    offer.allowedActions.includes(
+      CollectiveOfferTemplateAllowedAction.CAN_SHARE
+    )
+
+  const isOfferShared = canShareOffer
+    ? showcaseOfferWithShareLink(offer)
+    : showcaseOffer()
+  const isOfferShowcased = isShowcase ? isOfferShared : activeOffer(offer)
+  const confirmationData =
+    offerStatus === CollectiveOfferDisplayedStatus.UNDER_REVIEW
+      ? pendingOffer
+      : isOfferShowcased
+
+  return (
+    <ContentLayout>
+      <h1 className={styles['title']}>{confirmationData.title}</h1>
+      <h2 className={styles['subtitle']}>{offer.name}</h2>
+      <div className={styles['confirmation-wrapper']}>
+        <div className={styles['confirmation']}>
+          {confirmationData.icon}
+          {confirmationData.description}
+          <div className={styles['confirmation-actions']}>
+            <Button
+              as="router-link"
+              variant={ButtonVariant.SECONDARY}
+              to={isShowcase ? '/offres/vitrines' : '/offres/collectives'}
+              label="Voir mes offres"
+            />
+            <Button
+              as="router-link"
+              variant={ButtonVariant.PRIMARY}
+              to={creationUrl}
+              label="Créer une nouvelle offre"
+            />
+          </div>
+        </div>
+      </div>
+    </ContentLayout>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = withCollectiveOfferFromParams(
+  CollectiveOfferConfirmation
+)

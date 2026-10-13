@@ -1,0 +1,173 @@
+import { screen } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import * as useAnalytics from '@/app/App/analytics/firebase'
+import {
+  IndividualOfferContext,
+  type IndividualOfferContextValues,
+} from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import { INDIVIDUAL_OFFER_WIZARD_STEP_IDS } from '@/commons/core/Offers/constants'
+import { individualOfferContextValuesFactory } from '@/commons/utils/factories/individualApiFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { ActionBar, type ActionBarProps } from './ActionBar'
+
+const renderActionBar = ({
+  props,
+  url = '/creation/testUrl',
+  features = [],
+  contextValues = {},
+}: {
+  props: ActionBarProps
+  url?: string
+  features?: string[]
+  contextValues?: Partial<IndividualOfferContextValues>
+}) => {
+  const contextValue: IndividualOfferContextValues =
+    individualOfferContextValuesFactory(contextValues)
+
+  return renderWithProviders(
+    <IndividualOfferContext.Provider value={contextValue}>
+      <ActionBar {...props} />
+    </IndividualOfferContext.Provider>,
+    {
+      features: features,
+      initialRouterEntries: [url],
+    }
+  )
+}
+
+describe('IndividualOffer::ActionBar', () => {
+  let props: ActionBarProps
+  const onClickPreviousMock = vi.fn()
+  const onClickNextMock = vi.fn()
+
+  beforeEach(() => {
+    props = {
+      onClickPrevious: onClickPreviousMock,
+      onClickNext: onClickNextMock,
+      step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.LOCATION,
+      isDisabled: false,
+    }
+  })
+
+  describe('on creation', () => {
+    it('should render without accessibility violations', async () => {
+      const { container } = renderActionBar({ props })
+
+      expect(await axe(container)).toHaveNoViolations()
+    })
+
+    it('should always display a "Retour" button', async () => {
+      props.step = INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION
+      renderActionBar({ props })
+
+      const previousStepButton = screen.getByText(/Retour/)
+      await userEvent.click(previousStepButton)
+      expect(onClickPreviousMock).toHaveBeenCalled()
+    })
+
+    it('should display "Sauvegarder le brouillon" and "Publier l’offre" buttons on summary page', () => {
+      props.step = INDIVIDUAL_OFFER_WIZARD_STEP_IDS.SUMMARY
+      renderActionBar({ props })
+
+      const saveDraftButton = screen.getByRole('link', {
+        name: /Sauvegarder le brouillon/,
+      })
+      expect(saveDraftButton).toHaveAttribute('href', '/offres')
+
+      const submitButton = screen.getByRole('button', {
+        name: 'Publier l’offre',
+      })
+      expect(submitButton).toHaveAttribute('type', 'submit')
+    })
+
+    it('should display "Enregistrer et continuer" button on other pages', () => {
+      props.step = INDIVIDUAL_OFFER_WIZARD_STEP_IDS.LOCATION
+      renderActionBar({ props })
+
+      const submitButton = screen.getByRole('button', {
+        name: /Enregistrer et continuer/,
+      })
+      expect(submitButton).toHaveAttribute('type', 'submit')
+    })
+
+    it('should show draft saved indicator', () => {
+      props.dirtyForm = false
+
+      renderActionBar({ props })
+      expect(screen.getByText('Brouillon enregistré')).toBeInTheDocument()
+      expect(
+        screen.queryByText('Brouillon non enregistré')
+      ).not.toBeInTheDocument()
+    })
+
+    it('should show draft not saved indicator', () => {
+      props.dirtyForm = true
+
+      renderActionBar({ props })
+      expect(screen.queryByText('Brouillon enregistré')).not.toBeInTheDocument()
+      expect(screen.getByText('Brouillon non enregistré')).toBeInTheDocument()
+    })
+  })
+
+  describe('on edition', () => {
+    it('should render the component for details page and track modifications', async () => {
+      const expectedOfferId = 42
+      const mockLogEvent = vi.fn()
+      vi.spyOn(useAnalytics, 'useAnalytics').mockImplementationOnce(() => ({
+        logEvent: mockLogEvent,
+      }))
+
+      props.step = INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION
+
+      renderActionBar({
+        props,
+        url: '/edition/url',
+        contextValues: { offerId: expectedOfferId },
+      })
+
+      const buttonSave = screen.getByText('Enregistrer les modifications')
+      await userEvent.click(buttonSave)
+      expect(onClickNextMock).toHaveBeenCalled()
+      expect(mockLogEvent).toHaveBeenCalledWith(
+        Events.CLICKED_INDIVIDUAL_OFFER_MODIFICATION,
+        { offerId: expectedOfferId }
+      )
+    })
+
+    it('should not render "Annuler et quitter"', () => {
+      props.step = INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION
+
+      renderActionBar({
+        props,
+        url: '/edition/url',
+      })
+
+      expect(screen.queryByText('Annuler et quitter')).not.toBeInTheDocument()
+    })
+
+    it('should render the component for tarifs page', async () => {
+      props.step = INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TARIFS
+
+      renderActionBar({ props, url: '/edition/url' })
+
+      const buttonSave = screen.getByText('Enregistrer les modifications')
+      await userEvent.click(buttonSave)
+      expect(onClickNextMock).toHaveBeenCalled()
+    })
+
+    it('should render the component for summary page', () => {
+      props.step = INDIVIDUAL_OFFER_WIZARD_STEP_IDS.SUMMARY
+
+      renderActionBar({ props, url: '/edition/url' })
+
+      const buttonBack = screen.getByRole('link', {
+        name: 'Retour à la liste des offres',
+      })
+      expect(buttonBack).toHaveAttribute('href', '/offres')
+    })
+  })
+})

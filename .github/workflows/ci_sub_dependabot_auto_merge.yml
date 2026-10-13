@@ -1,0 +1,44 @@
+name: 3 [CI] Dependabot auto-merge
+
+permissions:
+  contents: write
+  pull-requests: write
+
+on:
+  workflow_call:
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: { required: true }
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: { required: true }
+
+jobs:
+  dependabot:
+    runs-on: ubuntu-22.04
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    steps:
+      - name: Authenticate through github app ghactionci
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: github-token
+        with:
+          app-id: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+          private-key: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # Liste des repositories à cloner
+          repositories: |
+            pass-culture-main
+          permission-contents: write
+          permission-pull-requests: write
+      - name: "Dependabot metadata"
+        id: "metadata"
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          github-token: "${{ steps.github-token.outputs.token }}"
+      - name: "Approve the PR"
+        run: gh pr review --approve "$PR_URL"
+        env:
+          PR_URL: ${{github.event.pull_request.html_url}}
+          GITHUB_TOKEN: ${{ steps.github-token.outputs.token }}
+      - name: "Merge Dependabot PR"
+        run: gh pr merge --rebase "$PR_URL"
+        env:
+          PR_URL: ${{github.event.pull_request.html_url}}
+          GITHUB_TOKEN: ${{ steps.github-token.outputs.token }}

@@ -1,0 +1,47 @@
+import homeShell from '../../assets/partner-home-shell.png'
+import partnerShell from '../../assets/partner-shell.png'
+import { ImagePreview } from '../../ImagePreview'
+import { ImagePreviewsWrapper } from '../../ImagePreviewsWrapper'
+import homeStyle from './HomeScreenPreview.module.scss'
+import offerStyle from './OfferScreenPreview.module.scss'
+
+interface AppPreviewVenueProps {
+  imageUrl: string
+}
+
+export const AppPreviewVenue = ({
+  imageUrl,
+}: AppPreviewVenueProps): JSX.Element => (
+  <ImagePreviewsWrapper>
+    <ImagePreview title="Page d’accueil">
+      <img
+        alt=""
+        aria-hidden
+        className={homeStyle['image-preview-shell']}
+        src={homeShell}
+      />
+      <img
+        data-testid="app-preview-offer-img-home"
+        alt=""
+        aria-hidden
+        className={homeStyle['image-preview-home-preview']}
+        src={imageUrl}
+      />
+    </ImagePreview>
+    <ImagePreview title="Détails de l’offre">
+      <img
+        alt=""
+        aria-hidden
+        className={offerStyle['image-preview-shell']}
+        src={partnerShell}
+      />
+      <img
+        data-testid="app-preview-offer-img"
+        alt=""
+        aria-hidden
+        className={offerStyle['image-preview-offer-preview']}
+        src={imageUrl}
+      />
+    </ImagePreview>
+  </ImagePreviewsWrapper>
+)

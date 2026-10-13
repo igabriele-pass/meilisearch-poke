@@ -1,0 +1,245 @@
+import dataclasses
+import datetime
+import decimal
+import typing
+
+import pydantic as pydantic_v2
+from pydantic.v1.fields import Field
+
+from pcapi.core.categories.models import EacFormat
+from pcapi.core.educational import models
+from pcapi.core.educational.utils import format_collective_additional_fee_type
+from pcapi.routes.serialization import BaseModel
+from pcapi.routes.serialization import HttpBodyModel
+from pcapi.serialization.utils import to_camel
+from pcapi.utils.date import format_into_utc_date
+
+
+class AdageBaseResponseModel(BaseModel):
+    class Config:
+        json_encoders = {datetime.datetime: format_into_utc_date}
+
+
+class AdageCulturalPartner(BaseModel):
+    id: int
+    venueId: int | None
+    siret: str | None
+    regionId: int | None
+    academieId: str | None
+    statutId: int | None
+    labelId: int | None
+    typeId: int | None
+    communeId: str | None
+    libelle: str
+    adresse: str | None
+    siteWeb: str | None
+    latitude: float | None
+    longitude: float | None
+    statutLibelle: str | None
+    labelLibelle: str | None
+    typeIcone: str | None
+    typeLibelle: str | None
+    communeLibelle: str | None
+    communeDepartement: str | None
+    academieLibelle: str | None
+    regionLibelle: str | None
+    domaines: str | None
+    actif: int | None
+    dateModification: datetime.datetime
+    synchroPass: int | None
+    domaineIds: str | None
+
+
+class Contact(AdageBaseResponseModel):
+    email: str | None
+    phone: str | None
+
+
+class Redactor(AdageBaseResponseModel):
+    email: str
+    redactorFirstName: str | None
+    redactorLastName: str | None
+    redactorCivility: str | None
+
+
+CollectiveBookingRefused = typing.Literal["REFUSED"]
+
+
+class AdditionalFeeResponse(AdageBaseResponseModel):
+    label: str
+    amount: decimal.Decimal
+
+    @classmethod
+    def build(cls, fee: models.CollectiveAdditionalFee) -> typing.Self:
+        label = fee.label if fee.label else format_collective_additional_fee_type(fee.type)
+
+        return cls(label=label, amount=fee.amount)
+
+
+class AdditionalFeeResponseV2(HttpBodyModel):
+    label: str
+    amount: float
+
+    @classmethod
+    def build(cls, fee: models.CollectiveAdditionalFee) -> typing.Self:
+        label = fee.label if fee.label else format_collective_additional_fee_type(fee.type)
+
+        return cls(label=label, amount=float(fee.amount))
+
+
+class EducationalBookingResponse(AdageBaseResponseModel):
+    accessibility: str = Field(description="Accessibility of the offer")
+    address: str = Field(description="Adresse of event")
+    startDatetime: datetime.datetime = Field(description="Start date of event")
+    endDatetime: datetime.datetime = Field(description="End date of event")
+    cancellationDate: datetime.datetime | None = Field(description="Date of cancellation if prebooking is cancelled")
+    cancellationLimitDate: datetime.datetime | None = Field(description="Limit date to cancel the prebooking")
+    confirmationDate: datetime.datetime | None = Field(description="Date of confirmation if prebooking is confirmed")
+    confirmationLimitDate: datetime.datetime = Field(description="Limit date to confirm the prebooking")
+    contact: Contact = Field(description="Contact of the prebooking")
+    creationDate: datetime.datetime
+    description: str | None = Field(description="Offer description")
+    additionalDetails: str | None = Field(description="Practical information on the offer")
+    durationMinutes: int | None = Field(description="Offer's duration in minutes")
+    id: int = Field(description="pass Culture's prebooking id")
+    venueName: str = Field(description="Name of cultural venue proposing the event")
+    name: str = Field(description="Name of event")
+    numberOfTickets: int = Field(description="Number of students")
+    numberOfTeachers: int = Field(description="Number of adults accompanying the students")
+    price: decimal.Decimal = Field(description="Total price of the prebooking")
+    servicePrice: decimal.Decimal = Field(description="Total price minus the additional fees")
+    additionalFees: list[AdditionalFeeResponse] = Field(description="Fees related to transport, accommodation...")
+    redactor: Redactor
+    UAICode: str = Field(description="Educational institution UAI code")
+    yearId: int = Field(description="Shared year id")
+    status: models.CollectiveBookingStatus | CollectiveBookingRefused
+    cancellationReason: models.CollectiveBookingCancellationReasons | None = Field(
+        description="Reason when a prebooking order is cancelled"
+    )
+    participants: list[str] = Field(description="List of class levels which can participate")
+    priceDetail: str | None = Field(description="Offer's stock price detail")
+    venueTimezone: str
+    domain_ids: list[int]
+    domain_labels: list[str]
+    interventionArea: list[str]
+    imageCredit: str | None = Field(description="Credit for the source image")
+    imageUrl: str | None = Field(description="Url for offer image")
+    venueId: int
+    offererName: str
+    formats: list[EacFormat]
+
+    class Config:
+        title = "Prebooking detailed response"
+        alias_generator = to_camel
+        allow_population_by_field_name = True
+
+
+class EducationalBookingEdition(EducationalBookingResponse):
+    updatedFields: list[str] = Field(description="List of fields updated")
+
+
+class AdageReimbursementNotification(EducationalBookingResponse):
+    reimbursementReason: str
+    reimbursedValue: decimal.Decimal
+    reimbursementDetails: str
+
+
+class RedactorInformation(pydantic_v2.BaseModel):
+    civility: str | None
+    lastname: str | None
+    firstname: str | None
+    email: str
+    uai: str
+
+
+class EducationalBookingsResponse(AdageBaseResponseModel):
+    prebookings: list[EducationalBookingResponse]
+
+    class Config:
+        title = "List of prebookings"
+
+
+class EducationalDepositPeriodResponse(AdageBaseResponseModel):
+    start: datetime.datetime
+    end: datetime.datetime
+
+
+class EducationalDepositPeriodResponseV2(HttpBodyModel):
+    start: datetime.datetime
+    end: datetime.datetime
+
+
+@dataclasses.dataclass(kw_only=True, slots=True, frozen=True)
+class CollectiveOffersFilter:
+    user_id: int
+    offerer_id: int | None = None
+    statuses: list[models.CollectiveOfferDisplayedStatus] | None = None
+    venue_id: int | None = None
+    provider_id: int | None = None
+    name_keywords: str | None = None
+    period_beginning_date: datetime.date | None = None
+    period_ending_date: datetime.date | None = None
+    formats: list[EacFormat] | None = None
+    location_type: models.CollectiveLocationType | None = None
+    offerer_address_id: int | None = None
+
+
+class AdageEducationalInstitution(AdageBaseResponseModel):
+    uai: str
+    sigle: str
+    libelle: str
+    communeLibelle: str
+    courriel: str | None
+    telephone: str | None
+    codePostal: str
+    latitude: decimal.Decimal | None
+    longitude: decimal.Decimal | None
+
+
+class AdageCollectiveOfferContact(AdageBaseResponseModel):
+    email: str | None
+    phone: str | None
+
+
+class AdageRedactor(AdageBaseResponseModel):
+    email: str | None
+    redactorCivility: str | None
+    redactorFirstName: str | None
+    redactorLastName: str | None
+
+
+class AdageCollectiveOffer(AdageBaseResponseModel):
+    UAICode: str
+    address: str
+    startDatetime: datetime.datetime
+    endDatetime: datetime.datetime
+    contact: AdageCollectiveOfferContact
+    description: str | None
+    additionalDetails: str | None
+    durationMinutes: int | None
+    id: int
+    name: str
+    numberOfTickets: int
+    numberOfTeachers: int
+    participants: list[models.StudentLevels]
+    price: decimal.Decimal
+    servicePrice: decimal.Decimal
+    additionalFees: list[AdditionalFeeResponse]
+    priceDetail: str | None
+    venueName: str
+    venueTimezone: str
+    redactor: AdageRedactor | None
+
+
+class AdageCollectiveRequest(AdageBaseResponseModel):
+    redactorEmail: str
+    requestPhoneNumber: str | None
+    requestedDate: datetime.date | None
+    totalStudents: int | None
+    totalTeachers: int | None
+    offerContactEmail: str | None
+    offerContactPhoneNumber: str | None
+    offererName: str
+    venueName: str
+    offerName: str
+    comment: str

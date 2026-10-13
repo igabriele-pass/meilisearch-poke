@@ -1,0 +1,178 @@
+from datetime import datetime
+from datetime import timedelta
+
+import pytest
+from flask import url_for
+
+from pcapi.core.educational import factories
+from pcapi.core.educational import models
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.testing import assert_num_queries
+from pcapi.utils import date as date_utils
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+stock_date = datetime(2021, 5, 15)
+educational_year_dates = {"start": datetime(2020, 9, 1), "end": datetime(2021, 8, 31)}
+
+
+UAI = "1234UAI"
+EMAIL = "toto@mail.com"
+
+
+@pytest.fixture(name="eac_client")
+def eac_client_fixture(client):
+    return client.with_adage_token(email=EMAIL, uai=UAI)
+
+
+@pytest.fixture(name="redactor")
+def redactor_fixture():
+    return factories.EducationalRedactorFactory(email=EMAIL)
+
+
+class CollectiveOfferTest:
+    num_queries = 1  # fetch redactor
+    num_queries += 1  # fetch collective offer and related data
+    num_queries += 1  # selectinload additional fees
+
+    def test_get_collective_offer_for_my_institution(self, eac_client, redactor):
+        START_DATE = datetime.today() + timedelta(days=3)
+        venue = offerers_factories.VenueFactory()
+        institution = factories.EducationalInstitutionFactory(institutionId=UAI)
+        stocks = factories.CollectiveStockFactory.create_batch(
+            3,
+            startDatetime=START_DATE,
+            collectiveOffer__institution=institution,
+            collectiveOffer__venue=venue,
+            collectiveOffer__locationType=models.CollectiveLocationType.ADDRESS,
+            collectiveOffer__offererAddress=offerers_factories.OfferLocationFactory(
+                address=venue.offererAddress.address, venue=venue, label=None
+            ),
+        )
+        # this archived offer should not appear in the result
+        stocks[2].collectiveOffer.dateArchived = date_utils.get_naive_utc_now() - timedelta(days=1)
+        stocks[2].collectiveOffer.isActive = False
+
+        # cancelled booking should not appear in the result
+        stock_with_cancelled_booking = factories.CollectiveStockFactory(
+            startDatetime=START_DATE,
+            collectiveOffer__institution=institution,
+            collectiveOffer__venue=venue,
+            collectiveOffer__locationType=models.CollectiveLocationType.ADDRESS,
+            collectiveOffer__offererAddress=stocks[0].collectiveOffer.offererAddress,
+        )
+        factories.CancelledCollectiveBookingFactory(collectiveStock=stock_with_cancelled_booking)
+
+        dst = url_for("adage_iframe.get_collective_offers_for_my_institution")
+
+        with assert_num_queries(self.num_queries):
+            response = eac_client.get(dst)
+
+        assert response.status_code == 200
+        response_data = sorted(response.json["collectiveOffers"], key=lambda offer: offer["id"])
+        assert len(response_data) == 2, response_data
+
+        assert response_data[0]["id"] == stocks[0].collectiveOffer.id
+        assert response_data[0]["educationalInstitution"]["id"] == institution.id
+        assert response_data[0]["stock"]["id"] == stocks[0].id
+        venue = stocks[0].collectiveOffer.venue
+        assert response_data[0]["venue"] == {
+            "adageId": None,
+            "address": venue.offererAddress.address.street,
+            "city": venue.offererAddress.address.city,
+            "coordinates": {
+                "latitude": float(venue.offererAddress.address.latitude),
+                "longitude": float(venue.offererAddress.address.longitude),
+            },
+            "id": venue.id,
+            "imgAlternativeText": None,
+            "imgUrl": None,
+            "managingOfferer": {"name": venue.managingOfferer.name},
+            "name": venue.name,
+            "postalCode": venue.offererAddress.address.postalCode,
+            "departmentCode": venue.offererAddress.address.departmentCode,
+            "publicName": venue.publicName,
+        }
+
+        assert response_data[1]["id"] == stocks[1].collectiveOffer.id
+        assert response_data[1]["educationalInstitution"]["id"] == institution.id
+        assert response_data[1]["stock"]["id"] == stocks[1].id
+        venue = stocks[1].collectiveOffer.venue
+        assert response_data[1]["venue"] == {
+            "adageId": None,
+            "address": venue.offererAddress.address.street,
+            "city": venue.offererAddress.address.city,
+            "coordinates": {
+                "latitude": float(venue.offererAddress.address.latitude),
+                "longitude": float(venue.offererAddress.address.longitude),
+            },
+            "id": venue.id,
+            "imgAlternativeText": None,
+            "imgUrl": None,
+            "managingOfferer": {"name": venue.managingOfferer.name},
+            "name": venue.name,
+            "postalCode": venue.offererAddress.address.postalCode,
+            "departmentCode": venue.offererAddress.address.departmentCode,
+            "publicName": venue.publicName,
+        }
+
+    def test_location_address_venue(self, eac_client, redactor):
+        institution = factories.EducationalInstitutionFactory(institutionId=UAI)
+        venue = offerers_factories.VenueFactory()
+        factories.PublishedCollectiveOfferFactory(
+            venue=venue,
+            locationType=models.CollectiveLocationType.ADDRESS,
+            locationComment=None,
+            offererAddress=offerers_factories.OfferLocationFactory(
+                address=venue.offererAddress.address, venue=venue, label=None
+            ),
+            interventionArea=None,
+            institution=institution,
+        )
+
+        dst = url_for("adage_iframe.get_collective_offers_for_my_institution")
+        with assert_num_queries(self.num_queries):
+            response = eac_client.get(dst)
+
+        assert response.status_code == 200
+        [result] = response.json["collectiveOffers"]
+        response_location = result["location"]
+        assert response_location["locationType"] == "ADDRESS"
+        assert response_location["locationComment"] is None
+        assert response_location["location"] is not None
+        assert response_location["location"]["isVenueLocation"] is True
+        assert response_location["location"]["label"] is None
+        assert response_location["location"]["banId"] == venue.offererAddress.address.banId
+
+    def test_price_fields(self, eac_client, redactor):
+        institution = factories.EducationalInstitutionFactory(institutionId=UAI)
+        venue = offerers_factories.VenueFactory()
+        stock = factories.CollectiveStockFactory(
+            price=200,
+            servicePrice=120,
+            numberOfTeachers=3,
+            collectiveOffer__additionalDetails="Informations pratiques importantes",
+            collectiveOffer__venue=venue,
+            collectiveOffer__institution=institution,
+        )
+        factories.CollectiveAdditionalFeeFactory(
+            collectiveStock=stock, type=models.CollectiveAdditionalFeeType.TRAVEL, amount=50
+        )
+        factories.CollectiveAdditionalFeeCustomFactory(collectiveStock=stock, label="nice fee", amount=30)
+
+        dst = url_for("adage_iframe.get_collective_offers_for_my_institution")
+        with assert_num_queries(self.num_queries):
+            response = eac_client.get(dst)
+
+        assert response.status_code == 200
+        [result] = response.json["collectiveOffers"]
+        assert result["additionalDetails"] == "Informations pratiques importantes"
+        assert result["stock"]["price"] == 20_000
+        assert result["stock"]["servicePrice"] == 12_000
+        assert result["stock"]["numberOfTeachers"] == 3
+        assert sorted(result["stock"]["collectiveAdditionalFees"], key=lambda f: f["amount"]) == [
+            {"type": models.CollectiveAdditionalFeeType.OTHER.value, "label": "nice fee", "amount": 3000},
+            {"type": models.CollectiveAdditionalFeeType.TRAVEL.value, "label": None, "amount": 5000},
+        ]

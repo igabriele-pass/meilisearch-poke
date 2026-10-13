@@ -1,0 +1,18 @@
+{% from "components/forms.html" import build_form_fields_group with context %}
+{% extends "layouts/connected.html" %}
+{% block page %}
+  <div class="pt-3 px-5">
+    <h1>Déplacer un SIRET d’un partenaire culturel à un autre</h1>
+    <div class="col-12 py-4">
+      <form action="{{ dst }}"
+            name="{{ dst | action_to_name }}"
+            method="post">
+        {{ build_form_fields_group(form) }}
+        <div class="d-flex justify-content-end">
+          <button type="submit"
+                  class="btn btn-primary">Continuer</button>
+        </div>
+      </form>
+    </div>
+  </div>
+{% endblock page %}

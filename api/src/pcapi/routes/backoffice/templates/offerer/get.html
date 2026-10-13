@@ -1,0 +1,353 @@
+{% set use_new_tab_ui = true %}
+{% from "components/badges.html" import build_offerer_badges with context %}
+{% from "components/forms.html" import build_form_fields_group with context %}
+{% from "components/generic_modal.html" import build_modal_form with context %}
+{% from "components/generic_modal.html" import build_simple_modal_form with context %}
+{% from "components/presentation/details/tabs.html" import build_details_tab with context %}
+{% from "components/presentation/details/tabs.html" import build_details_tabs_wrapper with context %}
+{% from "components/presentation/details/tabs.html" import build_details_tab_content with context %}
+{% from "components/presentation/details/tabs.html" import build_details_tabs_content_wrapper with context %}
+{% from "components/dynamic/modal.html" import build_lazy_modal with context %}
+{% from "components/dynamic/spinner.html" import build_loading_spinner with context %}
+{% from "components/connect_as.html" import build_connect_as_link %}
+{% from "components/details.html" import action_bar_button %}
+{% from "components/details.html" import action_bar_additional_button %}
+{% from "components/description.html" import description %}
+{% import "components/links.html" as links with context %}
+{% import "components/clipboard.html" as clipboard %}
+{% extends "layouts/pro.html" %}
+{% set edit_offerer_aria_described_by_id = random_hash() %}
+{% set delete_offerer_aria_described_by_id = random_hash() %}
+{% set sync_zsell_aria_described_by_id = random_hash() %}
+{% set page_title = offerer.name %}
+{% block pro_main_content %}
+  <div class="row row-cols-1 g-4 py-3 pc-strip-query-string">
+    <div class="col">
+      <div class="card">
+        <div class="card-body p-4 d-flex vstack gap-4">
+          <div class="d-flex flex-fill hstack">
+            <h2 class="card-title m-0 p-0">
+              {{ offerer.name }}
+              {{ build_offerer_badges(offerer, has_fraudulent_booking, has_reimbursement_suspended) }}
+              {{ offerer.tags | sort(attribute="label") | format_tag_object_list }}
+            </h2>
+          </div>
+          <div class="btn-group align-self-start"
+               role="group">
+            {% if allowed_actions.actions.CONNECT_AS in allowed_actions.inline_actions %}
+              {{ action_bar_button("briefcase", "Accéder PC Pro", submit_form=connect_as.formName) }}
+            {% endif %}
+            {% if allowed_actions.actions.UPDATE in allowed_actions.inline_actions %}
+              {{ action_bar_button("pencil-square", "Modifier les infos", modal_id="#edit-offerer-modal") }}
+            {% endif %}
+            {% if allowed_actions.actions.ERP_SYNCHRONISATION in allowed_actions.inline_actions %}
+              {{ action_bar_button("arrow-repeat", "Sync Zendesk Sell", modal_id="#pc-sync-zsell-modal") }}
+            {% endif %}
+            {% if allowed_actions.actions.VALIDATE in allowed_actions.inline_actions %}
+              {{ action_bar_button("check-square", "Valider", modal_id="#validate-modal-"~offerer.id) }}
+            {% endif %}
+            {% if allowed_actions.actions.PAUSE in allowed_actions.inline_actions %}
+              {{ action_bar_button("hourglass-bottom", "Mettre en attente", modal_id="#pending-modal-"~ offerer.id) }}
+            {% endif %}
+            {% if allowed_actions.actions.REJECT in allowed_actions.inline_actions %}
+              {{ action_bar_button("x-square", "Rejeter", modal_id="#reject-modal-"~offerer.id) }}
+            {% endif %}
+            {% if allowed_actions.actions.CLOSE in allowed_actions.inline_actions %}
+              {{ action_bar_button("door-closed", "Fermer l'entité juridique", modal_id="#close-modal-"~offerer.id) }}
+            {% endif %}
+            {% if allowed_actions.actions.SUSPEND in allowed_actions.inline_actions %}
+              {{ action_bar_button("pause-circle", "Suspendre l'entité juridique", modal_id="#suspend-offerer-modal") }}
+            {% endif %}
+            {% if allowed_actions.actions.UNSUSPEND in allowed_actions.inline_actions %}
+              {{ action_bar_button("play-circle", "Reactiver l'entité juridique", modal_id="#unsuspend-offerer-modal") }}
+            {% endif %}
+            {% if allowed_actions.actions.DELETE in allowed_actions.inline_actions %}
+              {{ action_bar_button("trash", "Supprimer l'entité juridique", modal_id="#delete-offerer-modal") }}
+            {% endif %}
+            <!-- ADDITIONAL BUTTONS TO PUT IN DROPDOWN MENU -->
+            {% if allowed_actions.additional_actions %}
+              <ul class="dropdown-menu">
+                {% if allowed_actions.actions.CONNECT_AS in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("briefcase", "Accéder PC Pro", submit_form=connect_as.formName) }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.UPDATE in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("pencil-square", "Modifier les infos", modal_id="#edit-offerer-modal") }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.ERP_SYNCHRONISATION in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("arrow-repeat", "Sync Zendesk Sell", modal_id="#pc-sync-zsell-modal") }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.VALIDATE in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("check-square", "Valider", modal_id="#validate-modal-"~offerer.id) }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.PAUSE in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("hourglass-bottom", "Mettre en attente", modal_id="#pending-modal-"~ offerer.id) }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.REJECT in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("x-square", "Rejeter", modal_id="#reject-modal-"~offerer.id) }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.CLOSE in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("door-closed", "Fermer l'entité juridique", modal_id="#close-modal-"~offerer.id) }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.SUSPEND in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("pause-circle", "Suspendre l'entité juridique", modal_id="#suspend-offerer-modal") }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.UNSUSPEND in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("play-circle", "Réactiver l'entité juridique", modal_id="#unsuspend-offerer-modal") }}</li>
+                {% endif %}
+                {% if allowed_actions.actions.DELETE in allowed_actions.additional_actions %}
+                  <li>{{ action_bar_additional_button("trash", "Supprimer l'entité juridique", modal_id="#delete-offerer-modal") }}</li>
+                {% endif %}
+              </ul>
+              <button type="button"
+                      class="btn btn-outline-primary-subtle-bg d-flex gap-2"
+                      data-bs-toggle="dropdown">
+                Plus d'actions
+                <i class="bi bi-three-dots-vertical"></i>
+              </button>
+            {% endif %}
+          </div>
+          <div class="d-flex hstack gap-56">
+            <div class="d-flex hstack gap-1">
+              {% if offerer.rid7 %}
+                <div class="text-secondary">RID7</div>
+                : {{ offerer.rid7 }}
+                <a href="https://data.gouv.nc/explore/dataset/entreprises-actives-au-ridet/table/?q={{ offerer.rid7 }}"
+                   target="_blank"
+                   rel="noreferrer noopener"
+                   title="Rechercher dans l'open data de la Nouvelle Calédonie"
+                   class="link-primary"><i class="bi bi-box-arrow-up-right btn btn-outline-primary-subtle-bg border-0 px-2 py-1"></i></a>
+                {{ clipboard.copy_to_clipboard(offerer.rid7, "Copier le RID7 du partenaire culturel") }}
+              {% else %}
+                <div class="text-secondary">SIREN</div>
+                : {{ offerer.siren }}
+                <a href="https://annuaire-entreprises.data.gouv.fr/entreprise/{{ offerer.siren }}"
+                   target="_blank"
+                   rel="noreferrer noopener"
+                   title="Visualiser dans l'Annuaire des Entreprises"
+                   class="link-primary"><i class="bi bi-box-arrow-up-right btn btn-outline-primary-subtle-bg border-0 px-2 py-1"></i></a>
+                {{ clipboard.copy_to_clipboard(offerer.siren, "Copier le SIREN du partenaire culturel") }}
+              {% endif %}
+            </div>
+            <div class="d-flex hstack gap-1">
+              <div class="text-secondary">Offerer ID</div>
+              : {{ offerer.id }} {{ clipboard.copy_to_clipboard(offerer.id, "Copier l'ID du partenaire culturel") }}
+            </div>
+          </div>
+          <div class="mt-2 row">
+            <!-- Column 1 -->
+            <div class="col-4">
+              <h4 class="mb-2">Coordonnées</h4>
+              {% call description("Région" + regions | length | pluralize) %}
+                {% if regions %}
+                  {{ regions | sort | format_string_list(150) }}
+                {% else %}
+                  {{ none | placeholder_if_empty(is_feminine=true) }}
+                {% endif %}
+              {% endcall %}
+              {% if offerer.department_codes %}
+                {% call description("Département" + offerer.department_codes | length | pluralize) %}
+                  {{ offerer.department_codes | sort | format_string_list(140) }}
+                {% endcall %}
+              {% else %}
+                {% call description("Département") %}
+                  {{ none | placeholder_if_empty }}
+                {% endcall %}
+              {% endif %}
+              {% if offerer.cities %}
+                {% call description("Ville" + offerer.cities | length | pluralize) %}
+                  {{ offerer.cities | sort | format_string_list(150) }}
+                {% endcall %}
+              {% else %}
+                {% call description("Ville") %}
+                  {{ none | placeholder_if_empty(is_feminine=true) }}
+                {% endcall %}
+              {% endif %}
+              {% call description("Numéro d'inscription") %}
+                {{ creator_phone_number | placeholder_if_empty }}
+              {% endcall %}
+            </div>
+            <!-- Column 2 -->
+            <div class="col-4">
+              <h4 class="mb-2">Informations EAC</h4>
+              {% if not offerer.is_caledonian %}
+                {% call description("PC cartographiés sur ADAGE") %}
+                  {{ adage_information }}
+                {% endcall %}
+              {% endif %}
+              {% call description("Peut créer une offre EAC") %}
+                {{ offerer.allowedOnAdage | format_bool_badge }}
+              {% endcall %}
+            </div>
+            <!-- Column 3 -->
+            <div class="col-4">
+              <h4 class="mb-2">Informations bancaires</h4>
+              {% call description("Présence CB dans les partenaires culturels") %}
+                {{ bank_information_status.ok or 0 }} OK / {{ bank_information_status.ko or 0 }} KO
+              {% endcall %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="mt-4">
+      <div id="total_revenue_frame"
+           hx-trigger="load"
+           hx-get="{{ url_for('backoffice.offerer.get_stats', offerer_id=offerer.id) }}">{{ build_loading_spinner() }}</div>
+    </div>
+    <div class="mt-4">
+      {% call build_details_tabs_wrapper() %}
+        {{ build_details_tab("history", "Historique du compte", active_tab == 'history') }}
+        {% if show_subscription_tab %}
+          {{ build_details_tab("subscription", "Parcours auto-entrepreneur", active_tab == 'subscription') }}
+        {% endif %}
+        {% if not offerer.rid7 and has_permission("READ_PRO_ENTREPRISE_INFO") %}
+          {{ build_details_tab("entreprise", "Données Entreprise", active_tab == 'entreprise') }}
+        {% endif %}
+        {{ build_details_tab("pro-users", "Comptes pro", active_tab == 'users') }}
+        {{ build_details_tab("managed-venues", "Partenaires culturels", active_tab == 'managed_venues') }}
+        {% if not offerer.is_caledonian %}{{ build_details_tab("dms-adage", "Dossiers DMS ADAGE", active_tab == 'dms_adage') }}{% endif %}
+        {{ build_details_tab("bank-accounts", "Comptes bancaires", active_tab == 'bank_accounts') }}
+        {{ build_details_tab("invoices", "Justificatifs", active_tab == 'invoices') }}
+        {{ build_details_tab("settlements", "Virements", active_tab == 'settlements') }}
+      {% endcall %}
+      {% call build_details_tabs_content_wrapper() %}
+        {% call build_details_tab_content("history", active_tab == 'history') %}
+          <div id="offerer_history_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.offerer.get_history', offerer_id=offerer.id) }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% if show_subscription_tab %}
+          {% call build_details_tab_content("subscription", active_tab == 'subscription') %}
+            <div id="offerer_subscription_frame"
+                 hx-trigger="intersect once"
+                 hx-get="{{ url_for('backoffice.offerer.get_individual_subscription', offerer_id=offerer.id) }}">
+              {{ build_loading_spinner() }}
+            </div>
+          {% endcall %}
+        {% endif %}
+        {% if not offerer.rid7 and has_permission("READ_PRO_ENTREPRISE_INFO") %}
+          {% call build_details_tab_content("entreprise", active_tab == 'entreprise') %}
+            <div id="offerer_entreprise_frame"
+                 hx-trigger="intersect once"
+                 hx-get="{{ url_for('backoffice.offerer.get_entreprise_info', offerer_id=offerer.id) }}">
+              {{ build_loading_spinner() }}
+            </div>
+          {% endcall %}
+        {% endif %}
+        {% call build_details_tab_content("pro-users", active_tab == 'users') %}
+          <div id="offerer_users_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.offerer.get_pro_users', offerer_id=offerer.id) }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% call build_details_tab_content("managed-venues", active_tab == 'managed_venues') %}
+          <div id="offerer_venues_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.offerer.get_managed_venues', offerer_id=offerer.id) }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% if not offerer.is_caledonian %}
+          {% call build_details_tab_content("dms-adage", active_tab == 'dms_adage') %}
+            <div id="offerer_collective_dms_applications_frame"
+                 hx-trigger="intersect once"
+                 hx-get="{{ url_for('backoffice.offerer.get_collective_dms_applications', offerer_id=offerer.id) }}">
+              {{ build_loading_spinner() }}
+            </div>
+          {% endcall %}
+        {% endif %}
+        {% call build_details_tab_content("bank-accounts", active_tab == 'bank_accounts') %}
+          <div id="offerer_bank_accounts_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.offerer.get_bank_accounts', offerer_id=offerer.id) }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% call build_details_tab_content("invoices", active_tab == 'invoices') %}
+          <div id="offerer_invoices_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.offerer.get_invoices', offerer_id=offerer.id) }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% call build_details_tab_content("settlements", active_tab == 'settlements') %}
+          <div id="offerer_settlements_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.offerer.get_settlements', offerer_id=offerer.id) }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+      {% endcall %}
+    </div>
+  </div>
+{% endblock pro_main_content %}
+{% block hidden_content %}
+  {% if allowed_actions.actions.CONNECT_AS in allowed_actions %}
+    <form name="{{ connect_as.formName }}"
+          class="d-none"
+          target="_blank"
+          rel="noopener"
+          action="{{ url_for('backoffice.pro.connect_as') }}"
+          method="post">
+      {% for field in connect_as.form %}{{ field }}{% endfor %}
+    </form>
+  {% endif %}
+  {% if allowed_actions.actions.UPDATE in allowed_actions %}
+    {{ build_simple_modal_form("edit-offerer", url_for("backoffice.offerer.update_offerer", offerer_id=offerer.id) ,
+      edit_offerer_form, "Modifier les informations de l'entité juridique", "Enregistrer") }}
+  {% endif %}
+  {% if allowed_actions.actions.ERP_SYNCHRONISATION in allowed_actions %}
+    <div class="modal modal-lg fade"
+         id="pc-sync-zsell-modal"
+         tabindex="-1"
+         aria-describedby="{{ sync_zsell_aria_described_by_id }}"
+         aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <form action="{{ url_for('backoffice.zendesk_sell.update_offerer', offerer_id=offerer.id) }}"
+                name="{{ url_for('backoffice.zendesk_sell.update_offerer', offerer_id=offerer.id) | action_to_name }}"
+                method="post">
+            {{ zendesk_sell_synchronisation_form.csrf_token }}
+            <div class="modal-header"
+                 id="{{ sync_zsell_aria_described_by_id }}">
+              <h5 class="modal-title">Synchroniser l'entité juridique {{ offerer.name }} sur Zendesk Sell</h5>
+            </div>
+            <div class="modal-body row">
+              <div class="d-flex align-items-center">
+                <i class="bi bi-exclamation-diamond-fill text-warning align-middle me-3 ms-2"
+                   style="font-size: 3.1rem"></i>
+                <div>
+                  N'oubliez pas de vérifier que l'ID <b>{{ offerer.id }}</b> est bien renseigné dans «&thinsp;Produit Offerer ID&thinsp;» sur Zendesk Sell.
+                </div>
+              </div>
+              {{ build_form_fields_group(zendesk_sell_synchronisation_form) }}
+            </div>
+            <div class="modal-footer">
+              <button type="button"
+                      class="btn btn-outline-primary-subtle-bg"
+                      data-bs-dismiss="modal">Annuler</button>
+              <button type="submit"
+                      class="btn btn-primary">Confirmer</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+  {% if allowed_actions.actions.PAUSE in allowed_actions %}
+    {{ build_lazy_modal(url_for('backoffice.validation.get_offerer_pending_form', offerer_id=offerer.id) , "pending-modal-" ~ offerer.id) }}
+  {% endif %}
+  {% if allowed_actions.actions.VALIDATE in allowed_actions %}
+    {{ build_lazy_modal(url_for('backoffice.validation.get_validate_offerer_form', offerer_id=offerer.id) , "validate-modal-" ~ offerer.id) }}
+  {% endif %}
+  {% if allowed_actions.actions.REJECT in allowed_actions %}
+    {{ build_lazy_modal(url_for('backoffice.validation.get_reject_offerer_form', offerer_id=offerer.id) , "reject-modal-" ~ offerer.id) }}
+  {% endif %}
+  {% if allowed_actions.actions.CLOSE in allowed_actions %}
+    {{ build_lazy_modal(url_for('backoffice.offerer.get_close_offerer_form', offerer_id=offerer.id) , "close-modal-" ~ offerer.id) }}
+  {% endif %}
+  {% if allowed_actions.actions.SUSPEND in allowed_actions %}
+    {{ build_simple_modal_form("suspend-offerer", url_for("backoffice.offerer.suspend_offerer", offerer_id=offerer.id) ,
+      suspension_form, "Suspendre l'entité juridique", "Confirmer la suspension") }}
+  {% endif %}
+  {% if allowed_actions.actions.UNSUSPEND in allowed_actions %}
+    {{ build_simple_modal_form("unsuspend-offerer", url_for("backoffice.offerer.unsuspend_offerer", offerer_id=offerer.id) ,suspension_form, "Réactiver l'entité juridique", "Confirmer la réactivation") }}
+  {% endif %}
+  {% if allowed_actions.actions.DELETE in allowed_actions %}
+    {% set form_description = "L'entité juridique <strong>"|safe + offerer.name + "</strong> ("|safe + offerer.id|string + ") sera définitivement supprimée de la base de données. Veuillez confirmer ce choix." %}
+    {{ build_simple_modal_form("delete-offerer", url_for("backoffice.offerer.delete_offerer", offerer_id=offerer.id) ,
+      delete_offerer_form, "Supprimer l'entité juridique " + offerer.name,
+      "Confirmer", form_description) }}
+  {% endif %}
+{% endblock hidden_content %}

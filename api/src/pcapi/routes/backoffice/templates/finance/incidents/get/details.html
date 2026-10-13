@@ -1,0 +1,25 @@
+{% from "components/presentation/details/tabs.html" import build_details_tab %}
+{% from "components/presentation/details/tabs.html" import build_details_tabs_wrapper %}
+{% from "components/presentation/details/tabs.html" import build_details_tab_content %}
+{% from "components/presentation/details/tabs.html" import build_details_tabs_content_wrapper %}
+{% from "components/dynamic/spinner.html" import build_loading_spinner with context %}
+{% call build_details_tabs_wrapper() %}
+  {{ build_details_tab("bookings", "Réservations", active_tab == "bookings") }}
+  {{ build_details_tab("history", "Historique", active_tab == "history") }}
+{% endcall %}
+{% call build_details_tabs_content_wrapper() %}
+  {% call build_details_tab_content("bookings", active_tab == 'bookings') %}
+    {% if incident.relates_to_collective_bookings %}
+      {% include "finance/incidents/get/details/collective_bookings.html" %}
+    {% else %}
+      {% include "finance/incidents/get/details/bookings.html" %}
+    {% endif %}
+  {% endcall %}
+  {% call build_details_tab_content("history", active_tab == 'history') %}
+    <div id="incident_history_frame"
+         hx-trigger="intersect once"
+         hx-get="{{ url_for('backoffice.finance_incidents.get_history', finance_incident_id=incident.id) }}">
+      {{ build_loading_spinner() }}
+    </div>
+  {% endcall %}
+{% endcall %}

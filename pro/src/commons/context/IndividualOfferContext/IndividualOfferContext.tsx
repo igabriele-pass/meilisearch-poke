@@ -1,0 +1,162 @@
+import type React from 'react'
+import { createContext, useContext, useMemo, useState } from 'react'
+import { useNavigate, useParams } from 'react-router'
+import useSWR, { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import type {
+  CategoryResponseModel,
+  GetIndividualOfferResponseModel,
+  SubcategoryResponseModel,
+} from '@/apiClient/v1'
+import {
+  GET_ACTIVE_VENUE_OFFER_BY_EAN_QUERY_KEY,
+  GET_CATEGORIES_QUERY_KEY,
+  GET_OFFER_QUERY_KEY,
+} from '@/commons/config/swrQueryKeys'
+import type { OfferExtraData } from '@/commons/core/Offers/types'
+import { isOfferProductBasedButNotSynchronized } from '@/commons/core/Offers/utils/typology'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { Spinner } from '@/ui-kit/Spinner/Spinner'
+
+export interface IndividualOfferContextValues {
+  // TODO (igabriele, 2025-09-09): We should be able to ensure a defined `offer` by setting aside the only case where offer is null (1st creation step).
+  offer: GetIndividualOfferResponseModel | null
+  offerId: number | null
+  categories: CategoryResponseModel[]
+  subCategories: SubcategoryResponseModel[]
+  isEvent: boolean | null
+  setIsControlledEvent: (isEvent: boolean | null) => void
+  /** Real boolean guarded by early `<Splinner />` return while fetching offer data in context provider. */
+  hasPublishedOfferWithSameEan: boolean
+}
+
+export const IndividualOfferContext =
+  createContext<IndividualOfferContextValues>({
+    categories: [],
+    hasPublishedOfferWithSameEan: false,
+    isEvent: null,
+    offer: null,
+    offerId: null,
+    setIsControlledEvent: () => undefined,
+    subCategories: [],
+  })
+
+export const useIndividualOfferContext = () => {
+  return useContext(IndividualOfferContext)
+}
+
+interface IndividualOfferContextProviderProps {
+  children: React.ReactNode
+}
+
+export const IndividualOfferContextProvider = ({
+  children,
+}: IndividualOfferContextProviderProps) => {
+  const [isControlledEvent, setIsControlledEvent] = useState<boolean | null>(
+    null
+  )
+  const { offerId: offerIdAsString } = useParams<{
+    offerId: string
+  }>()
+  const offerId =
+    offerIdAsString && offerIdAsString !== 'creation'
+      ? Number(offerIdAsString)
+      : null
+
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+
+  const SWRConfig = useSWRConfig()
+
+  const navigate = useNavigate()
+
+  const offerQuery = useSWR(
+    // TODO (igabriele, 2025-08-18): Use the `mode` via `useOfferWizardMode` hook to keep a single source of truth.
+    offerId && offerIdAsString !== 'creation'
+      ? [GET_OFFER_QUERY_KEY, Number(offerId)]
+      : null,
+    ([, offerIdParam]) => api.getOffer({ path: { offer_id: offerIdParam } }),
+    {
+      onError: (error, key) => {
+        if (error.status === 404) {
+          void navigate('/404', { state: { from: 'offer' } })
+          return
+        }
+        SWRConfig.onError(error, key, SWRConfig)
+      },
+    }
+  )
+  const offer = offerQuery.data
+  const extraData = offer?.extraData as OfferExtraData | undefined
+  const offerEan = extraData?.ean
+
+  //  Get the offer on the venue with the same EAN if it exists
+  const publishedOfferWithSameEANQuery = useSWR(
+    isOfferProductBasedButNotSynchronized(offer) && offerEan
+      ? [
+          GET_ACTIVE_VENUE_OFFER_BY_EAN_QUERY_KEY,
+          selectedPartnerVenue.id,
+          offerEan,
+        ]
+      : null,
+    ([, venueId, ean]) =>
+      api.getActiveVenueOfferByEan({
+        path: { venue_id: venueId, ean },
+      }),
+    {
+      onError: (error) => {
+        if (error.status === 404) {
+          return
+        }
+      },
+      shouldRetryOnError: false,
+    }
+  )
+
+  const categoriesQuery = useSWR(
+    [GET_CATEGORIES_QUERY_KEY],
+    () => api.getCategories(),
+    { fallbackData: { categories: [], subcategories: [] } }
+  )
+
+  //  Only consider a puslished offer that is different from the one we are editing or creating now
+  const publishedOfferWithSameEAN =
+    offer && publishedOfferWithSameEANQuery.data?.id !== offer.id
+      ? publishedOfferWithSameEANQuery.data
+      : undefined
+
+  const contextValue = useMemo(
+    () => ({
+      categories: categoriesQuery.data.categories,
+      hasPublishedOfferWithSameEan: Boolean(publishedOfferWithSameEAN),
+      isEvent: offer?.isEvent ?? isControlledEvent,
+      offer: offer ?? null,
+      offerId,
+      setIsControlledEvent,
+      subCategories: categoriesQuery.data.subcategories,
+    }),
+    [
+      categoriesQuery.data.categories,
+      categoriesQuery.data.subcategories,
+      publishedOfferWithSameEAN,
+      offer,
+      isControlledEvent,
+      offerId,
+    ]
+  )
+
+  if (
+    offerQuery.isLoading ||
+    categoriesQuery.isLoading ||
+    publishedOfferWithSameEANQuery.isLoading
+  ) {
+    return <Spinner />
+  }
+
+  return (
+    <IndividualOfferContext.Provider value={contextValue}>
+      {children}
+    </IndividualOfferContext.Provider>
+  )
+}

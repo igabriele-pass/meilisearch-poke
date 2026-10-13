@@ -1,0 +1,283 @@
+[project]
+name = "pcapi"
+version = "0.0.0"
+description = "The backend of the pass Culture"
+license = "MPL-2.0"
+authors = [
+  { name = "Equipe pass Culture", email = "<contact@passculture.app>" },
+]
+requires-python = ">=3.13,<3.14"
+
+dependencies = [
+  "alembic==1.20.0",
+  "algoliasearch==4.47.0",
+  "authlib==1.8.0",
+  "babel ==2.18.0",
+  "bcrypt ==5.0.0",
+  "beautifulsoup4==4.15.0",
+  "boto3 ==1.43.6",
+  "brevo-python==5.0.2",
+  "celery[redis] ==5.6.3",
+  "click==8.5.0",
+  "clickhouse-connect[sqlalchemy]==1.9.0",
+  "cryptography==50.0.2",
+  "ecdsa ==0.19.2",
+  "email-validator ==2.3.0",
+  "factory-boy ==3.3.3",
+  "flask ==3.1.3",
+  "flask-cors==6.0.5",
+  "flask-jwt-extended==4.7.4",
+  "flask-login ==0.6.3",
+  "flask-shell-ipython ==0.5.3",
+  "flask-sqlalchemy ==3.1.1",
+  "flask-wtf==1.3.0",
+  "geoalchemy2 ==0.20.0",
+  "google-api-python-client==2.201.0",
+  "google-auth==2.59.1",
+  "google-cloud-bigquery==3.45.2",
+  "google-cloud-iam==2.25.0",
+  "google-cloud-logging==3.16.3",
+  "google-cloud-secret-manager>=2.30.0",
+  "google-cloud-storage==3.15.1",
+  "googleapis-common-protos==1.75.5",
+  "googlemaps ==4.10.0",
+  "gql[requests] ==4.0.0",
+  "gunicorn[gevent]==26.2.0",
+  "html5lib ==1.1",
+  "ipython==9.17.1",
+  "jinja2 ==3.1.6",
+  "libsass ==0.23.0",
+  "markupsafe ==3.0.3",
+  "openpyxl ==3.1.5",
+  "phonenumberslite==9.0.40",
+  "pillow==12.3.0",
+  "prometheus-flask-exporter ==0.23.2",
+  "psycopg2==2.9.13",
+  "py7zr==1.1.3",
+  # required by schwifty, upgraded manually because of setuptools
+  "pycountry ==26.2.16",
+  "pydantic[email]==2.13.5",
+  "pyjwt[crypto]==2.15.1",
+  "pyopenssl==26.4.0",
+  "pypdf==6.19.0",
+  "pyproj==3.8.0",
+  "pysaml2 ==7.5.0",
+  # Used for iris importation
+  "pyshp==3.1.6",
+  "python-dateutil ==2.9.0.post0",
+  "python-dotenv==1.2.3",
+  "pytz==2026.4",
+  "rapidfuzz==3.14.6",
+  "redis==6.4.0",
+  "regex==2026.9.29",
+  "requests==2.34.2",
+  "schwifty==2026.7.3",
+  "semver==3.1.0",
+  "sentry-sdk[flask,celery]==2.70.0",
+  "shapely ==2.1.2",
+  "slack-sdk==3.44.1",
+  "spectree ==1.5.8",
+  # from our private fork
+  "sqlalchemy-easy-softdelete",
+  "sqlalchemy[mypy]==2.0.54",
+  "time-machine==3.5.1",
+  "transitions ==0.9.3",
+  "urllib3==2.8.0",
+  "weasyprint==70.0",
+  "werkzeug==3.1.9",
+  "wtforms ==3.2.2",
+  "wtforms-sqlalchemy ==0.4.2",
+  "xlsxwriter ==3.2.9",
+  "zeep==4.3.3",
+]
+
+[dependency-groups]
+dev = [
+  "commitizen==4.19.0",
+  "debugpy==1.8.22",
+  "djlint==1.46.4",
+  "fakeredis==2.38.0",
+  "ipdb==0.13.13",
+  "jsbeautifier==2.0.3",                  # djlint requires 1.15.1 which is broken
+  "mypy==2.3.1",
+  "pgcli==4.7.1",
+  "psycopg[binary]==3.3.6",
+  "pytest==9.1.1",
+  "pytest-dotenv ==0.5.2",
+  "pytest-flask ==1.3.0",
+  "pytest-mock==3.16.0",
+  "pytest-socket==0.8.1",
+  "pytest-split ==0.11.0",
+  "requests-mock ==1.12.1",
+  "ruff==0.16.9",
+  "squawk-cli==2.66.0",
+  "types-protobuf==7.35.1.20260906",
+  "types-python-dateutil==2.9.0.20260807",
+  "types-pytz==2026.4.0.20260926",
+  "types-pyyaml==6.0.12.20260906",
+  "types-redis ==4.6.0.20241004",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13"]
+build-backend = "uv_build"
+
+[tool.mypy]
+python_version = "3.13"
+mypy_path = "stubs/"
+disallow_untyped_defs = true
+ignore_missing_imports = true
+show_column_numbers = true
+warn_unused_ignores = true
+show_error_codes = true
+warn_redundant_casts = true
+local_partial_types = true
+plugins = "pydantic.mypy"
+exclude = """
+(?x)(
+    tests/.*
+    | src/pcapi/alembic/.*
+    | src/pcapi/scripts/local_debug_script.py
+  )
+"""
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = [
+  "C416",    # unnecessary-comprehension
+  "E711",    # non-comparison
+  "E712",    # true-false-comparison
+  "PLC2401", # non-ascii-name
+  "PLE0241", # duplicate-bases
+  "PLE0302", # unexpected-special-method-signature
+  "PLR1736", # unnecessary-list-index-lookup
+  "PLW0603", # global-statement
+  "PLW3301", # nested-min-max
+  "S704",    # unsafe-markup-use
+  "TID251",  # banned-api (requests)
+  "W291",    # trailing-whitespace
+]
+
+ignore = [
+  "BLE001",  # blind-except : Do not catch blind exception: `Exception`
+  "DTZ001",  # call-datetime-without-tzinfo : The use of `datetime.datetime()` without `tzinfo` argument is not allowed
+  "DTZ002",  # call-datetime-today : The use of `datetime.datetime.today()` is not allowed
+  "DTZ005",  # call-datetime-now-without-tzinfo : The use of `datetime.datetime.now()` without `tzinfo` argument is not allowed
+  "DTZ006",  # call-datetime-fromtimestamp : The use of `datetime.datetime.fromtimestamp()` without `tzinfo` argument is not allowed
+  "DTZ007",  # call-datetime-strptime-without-zone : The use of `datetime.datetime.strptime()` without %z must be followed by `.replace(tzinfo=)`
+  "DTZ011",  # call-date-today : The use of `datetime.date.today()` is not allowed
+  "DTZ901",  # datetime-min-max : `datetime.datetime.min` and `datetime.datetime.max` lack timezone information
+
+  # We want to ignore the following rules; if you want to activate them, don't forget to add them to extend-select
+  "E501",  # line-too-long
+  "PLR0904",  # too-many-public-methods -> preview mode only
+  "PLR0911",  # too-many-return-statements
+  "PLR0912",  # too-many-branches
+  "PLR0913",  # too-many-arguments
+  "PLR0914",  # too-many-locals -> preview mode only
+  "PLR0915",  # too-many-statements
+  "PLR0917",  # too-many-positional-arguments -> preview mode only
+
+  # a lot of rules have been added in 0.16.0, we ignore the following for now and will decide later for each rule if we fix it or leave it ignored
+  # TODO : delete following rules from this list, and fix each case (check if you need to add them to extend-select by comparing to https://docs.astral.sh/ruff/default-rules/)
+
+  # These are stylistic rules that implies many modifications
+  "E712", # Avoid equality comparisons to `True`; use `if offer.audioDisabilityCompliant:` for truth checks (issue in assert);
+  "SIM102",  # nested-if : Use a single `if` statement instead of nested `if` statements
+  "SIM117",  # multiple-with-statements : Use a single `with` statement with multiple contexts
+  "UP031",  # printf-string-formatting : Use format specifiers instead of percent format
+
+  # Do we really want that ?
+  "RUF012",  # mutable-class-default : Mutable class attributes should be annotated with `typing.ClassVar`
+  "RUF010",  # explicit-f-string-type-conversion : Use explicit conversion flag
+  "RUF015",  # unnecessary-iterable-allocation-for-first-element : Prefer `next(iter(...))` over single element slice
+
+  # This implies a choice from the code's owner
+  "B019",  # cached-instance-method : Use of `functools.lru_cache` or `functools.cache` on methods can lead to memory leaks
+  "PIE794",  # duplicate-class-field-definition : Class field is defined multiple times
+  "PIE796",  # non-unique-enums : Enum contains duplicate value
+  "S110",  # try-except-pass : `try`-`except`-`pass` detected, consider logging the exception
+  "SIM115",  # open-file-with-context-handler : Use context handler for opening files
+  "T100",  # debugger : Trace found: `breakpoint` used
+  "TRY002",  # raise-vanilla-class : Create your own exception
+  "TRY004",  # type-check-without-type-error : Prefer `TypeError` exception for invalid type
+  "TRY201",  # verbose-raise : Use `raise` without specifying exception name
+  "TRY401",  # verbose-log-message : Redundant exception object included in `logging.exception` call
+  "UP047",  # non-pep695-generic-function : Generic function uses `TypeVar` instead of the `type` keyword
+
+  # These seem doable
+  "PGH005",  # invalid-mock-access : Mock objects have no attribute
+  "PYI036",  # bad-exit-annotation : Star-args in `__exit__` should be annotated with `object`
+  "RUF017",  # quadratic-list-summation : Avoid quadratic list summation
+  "UP006",  # non-pep585-annotation : Use standard library generic types instead of typing module
+  "UP007",  # non-pep604-annotation : Use `X | Y` for type annotations
+  "UP028",  # yield-in-for-loop : Replace `yield` over `for` loop with `yield from` 
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"requests".msg = "Use `pcapi.utils.requests` instead."
+
+[tool.ruff.lint.per-file-ignores]
+"*/__init__.py" = ["F401"] # unused-import -> required in some init files
+
+[tool.ruff.lint.isort]
+case-sensitive = true
+force-single-line = true
+lines-after-imports = 2
+section-order = [
+  "future",
+  "standard-library",
+  "third-party",
+  "first-party",
+  "tests",
+  "local-folder",
+]
+
+[tool.ruff.lint.isort.sections]
+tests = ["tests"]
+
+[tool.pytest.ini_options]
+addopts = [
+  "--verbose",
+  "--tb=short",
+  "--disable-socket",
+  # Use network range 172.16.0.0/12 once pytest-socket supports it (https://github.com/miketheman/pytest-socket/pull/185)
+  "--allow-hosts=127.0.0.1,::1,172.18.0.2,172.18.0.3,172.18.0.4,172.19.0.2,172.19.0.3,172.19.0.4,172.20.0.2,172.20.0.3,172.20.0.4,172.21.0.2,192.168.16.2", # allow connections to local Redis
+  "-p no:warnings",
+  "--pdbcls=IPython.terminal.debugger:TerminalPdb", # use ipdb as default debugger in pytest
+]
+filterwarnings = [
+  # Mark warnings as errors
+  "error",
+]
+testpaths = ["tests"]
+norecursedirs = [".git", "venv", ".pytest_cache"]
+python_files = ["*test.py", "test*.py"]
+python_classes = ["*Test"]
+python_functions = ["test_*", "when_*", "expect_*", "should_*"]
+env_files = ["local_test_env_file"]
+junit_family = "xunit1"
+markers = ["backoffice", "features", "settings"]
+requests_mock_case_sensitive = true
+verbosity_assertions = 2
+
+[tool.djlint]
+profile="jinja"
+
+[tool.uv]
+exclude-newer = "7 days"
+override-dependencies = [
+    "pyopenssl>=26.0.0",
+]
+
+[tool.uv.sources]
+sqlalchemy-easy-softdelete = { git = "https://github.com/pass-culture/sqlalchemy-easy-softdelete.git" }

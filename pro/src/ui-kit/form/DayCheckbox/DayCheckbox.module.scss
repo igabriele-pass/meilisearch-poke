@@ -1,0 +1,83 @@
+@use "styles/variables/_forms.scss" as forms;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_outline.scss" as outline;
+@use "styles/mixins/_a11y.scss" as a11y;
+
+$checkbox-size: rem.torem(40px);
+
+.checkbox {
+  width: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--size-border-radius-pill);
+  cursor: pointer;
+
+  &:hover:not(&.disabled) {
+    .checkbox-input {
+      box-shadow: var(--shadow-overlay);
+    }
+  }
+
+  &.error:not(&.disabled) {
+    .checkbox-input {
+      border-color: var(--color-border-error);
+    }
+
+    color: var(--color-text-error);
+  }
+
+  &.disabled {
+    cursor: not-allowed;
+  }
+}
+
+.checkbox-label {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.checkbox-input {
+  appearance: none;
+  position: relative;
+  width: $checkbox-size;
+  height: $checkbox-size;
+  background-color: var(--color-background-default);
+  border: rem.torem(1px) solid var(--color-border-default);
+  border-radius: var(--size-border-radius-pill);
+  cursor: pointer;
+
+  &:focus-within {
+    @include outline.focus-outline;
+  }
+
+  &:checked {
+    @include fonts.button;
+
+    border: rem.torem(3px) solid var(--color-border-brand-primary);
+    background-color: var(--color-background-info);
+
+    &:focus {
+      border: rem.torem(3px) solid var(--color-border-brand-primary);
+      border-radius: var(--size-border-radius-pill);
+      background-color: var(--color-background-info);
+    }
+  }
+
+  &:disabled {
+    cursor: not-allowed;
+    background-color: var(--color-background-disabled);
+    color: var(--color-text-disabled);
+    border: var(--color-border-disabled);
+
+    &:checked {
+      border: rem.torem(2px) solid var(--color-text-subtle);
+    }
+  }
+}
+
+.visually-hidden {
+  @include a11y.visually-hidden;
+}

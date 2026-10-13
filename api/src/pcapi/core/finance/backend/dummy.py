@@ -1,0 +1,46 @@
+import datetime
+
+from pcapi.core.finance import models as finance_models
+from pcapi.core.finance.backend.base import BaseFinanceBackend
+from pcapi.core.finance.backend.base import InvoicePayload
+from pcapi.core.finance.backend.base import SettlementPayload
+from pcapi.models import db
+
+
+invoices: list[InvoicePayload] = []
+bank_accounts: list[finance_models.BankAccount] = []
+
+
+class DummyFinanceBackend(BaseFinanceBackend):
+    def push_invoice(self, invoice_payload: InvoicePayload) -> dict:
+        invoices.append(invoice_payload)
+        return invoice_payload.__dict__
+
+    def push_bank_account(self, bank_account: finance_models.BankAccount) -> dict:
+        bank_accounts.append(bank_account)
+        return bank_account.__dict__
+
+    def get_invoice(self, reference: str) -> dict:
+        invoice = db.session.query(finance_models.Invoice).filter(finance_models.Invoice.reference == reference).first()
+        return invoice.__dict__
+
+    def get_bank_account(self, bank_account_id: int) -> dict:
+        bank_account = db.session.get(finance_models.BankAccount, bank_account_id)
+        return bank_account.__dict__
+
+    def get_settlements(
+        self, from_date: datetime.date | None, to_date: datetime.date | None
+    ) -> list[SettlementPayload]:
+        return []
+
+    @property
+    def is_configured(self) -> bool:
+        return True
+
+
+def clear_invoices() -> None:
+    invoices.clear()
+
+
+def clear_bank_accounts() -> None:
+    bank_accounts.clear()

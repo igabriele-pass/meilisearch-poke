@@ -1,0 +1,479 @@
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { Route, Routes } from 'react-router'
+import type { SWRResponse } from 'swr'
+import { vi } from 'vitest'
+
+import { ActivityOpenToPublic, Target } from '@/apiClient/v1'
+import * as useAnalytics from '@/app/App/analytics/firebase'
+import { DEFAULT_ACTIVITY_VALUES } from '@/commons/context/SignupJourneyContext/constants'
+import {
+  SignupJourneyContext,
+  type SignupJourneyContextValues,
+} from '@/commons/context/SignupJourneyContext/SignupJourneyContext'
+import {
+  cleanSignupJourneyStorage,
+  RESTORE_ERRORS,
+  tryRestoreActivityFromStorage,
+  tryRestoreInitialAddressFromStorage,
+  tryRestoreOffererFromStorage,
+} from '@/commons/context/SignupJourneyContext/storage'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import * as useEducationalDomains from '@/commons/hooks/swr/useEducationalDomains'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import type { LOCAL_STORAGE_KEY as LocalStorageKeyType } from '@/commons/utils/localStorageManager'
+import { noop } from '@/commons/utils/noop'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+import {
+  DEFAULT_ADDRESS_FORM_VALUES,
+  DEFAULT_OFFERER_FORM_VALUES,
+} from '@/components/SignupJourneyForm/Offerer/constants'
+import { SIGNUP_STEP_IDS } from '@/components/SignupStepper/constants'
+import { SnackBarContainer } from '@/components/SnackBarContainer/SnackBarContainer'
+
+import { Activity } from '../Activity'
+
+const mockLogEvent = vi.fn()
+
+const inMemoryLocalStorage = new Map<string, string>()
+
+const initialAddress = {
+  ...DEFAULT_ADDRESS_FORM_VALUES,
+  addressAutocomplete: '3 Rue de Valois 75001 Paris',
+  'search-addressAutocomplete': '3 Rue de Valois 75001 Paris',
+  street: '3 Rue de Valois',
+  city: 'Paris',
+  postalCode: '75001',
+  inseeCode: '75111',
+  latitude: 1.23,
+  longitude: 2.34,
+} as const
+
+vi.mock('@/commons/context/SignupJourneyContext/storage', async () => {
+  const actual = await vi.importActual<
+    typeof import('@/commons/context/SignupJourneyContext/storage')
+  >('@/commons/context/SignupJourneyContext/storage')
+
+  return {
+    ...actual,
+    cleanSignupJourneyStorage: vi.fn(),
+    tryRestoreOffererFromStorage: vi.fn(),
+    tryRestoreInitialAddressFromStorage: vi.fn(),
+    tryRestoreActivityFromStorage: vi.fn(() => {
+      throw new Error(actual.RESTORE_ERRORS.NO_ACTIVITY_DATA_IN_STORAGE)
+    }),
+  }
+})
+
+vi.mock('@/commons/utils/localStorageManager', async () => {
+  const actual = await vi.importActual('@/commons/utils/localStorageManager')
+
+  return {
+    ...actual,
+    localStorageManager: {
+      getItem: vi.fn((key: LocalStorageKeyType) => {
+        return inMemoryLocalStorage.get(key) ?? null
+      }),
+      setItem: vi.fn((key: LocalStorageKeyType, value: string) => {
+        inMemoryLocalStorage.set(key, value)
+      }),
+      removeItem: vi.fn((key: LocalStorageKeyType) => {
+        inMemoryLocalStorage.delete(key)
+      }),
+      clear: vi.fn(() => {
+        inMemoryLocalStorage.clear()
+      }),
+    },
+  }
+})
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    listEducationalDomains: vi.fn(),
+  },
+}))
+
+const renderActivityScreen = (
+  contextValue: SignupJourneyContextValues,
+  features: string[] = []
+) => {
+  return renderWithProviders(
+    <>
+      <SignupJourneyContext.Provider value={contextValue}>
+        <Routes>
+          <Route
+            path="/inscription/structure/identification"
+            element={<div>Authentication screen</div>}
+          />
+          <Route
+            path="/inscription/structure/activite"
+            element={<Activity />}
+          />
+          <Route
+            path="/inscription/structure/confirmation"
+            element={<div>Validation screen</div>}
+          />
+          <Route
+            path="/inscription/structure/recherche"
+            element={<div>Search screen</div>}
+          />
+        </Routes>
+      </SignupJourneyContext.Provider>
+      <SnackBarContainer />
+    </>,
+    {
+      user: sharedCurrentUserFactory(),
+      initialRouterEntries: ['/inscription/structure/activite'],
+      features,
+    }
+  )
+}
+
+Element.prototype.scrollIntoView = vi.fn()
+
+describe('screens:SignupJourney::Activity', () => {
+  let contextValue: SignupJourneyContextValues
+  beforeEach(() => {
+    inMemoryLocalStorage.clear()
+    vi.spyOn(useAnalytics, 'useAnalytics').mockReturnValue({
+      logEvent: mockLogEvent,
+    })
+    contextValue = {
+      activity: DEFAULT_ACTIVITY_VALUES,
+      offerer: {
+        name: 'Offerer Name',
+        publicName: '',
+        siret: '12345678933333',
+        hasVenueWithSiret: false,
+        isDiffusible: true,
+        isOpenToPublic: 'true',
+        ...DEFAULT_ADDRESS_FORM_VALUES,
+      },
+      setActivity: () => {},
+      setOfferer: () => {},
+      initialAddress,
+      setInitialAddress: noop,
+    }
+  })
+
+  it('should render component', async () => {
+    contextValue.activity = null
+
+    renderActivityScreen(contextValue)
+
+    expect(
+      await screen.findByRole('heading', {
+        level: 2,
+        name: 'Et enfin, définissez l’activité de votre structure',
+      })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByText('Les champs suivis d’un * sont obligatoires.')
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText(/Activité principale/)).toHaveValue('')
+    expect(screen.getAllByText('Site internet, réseau social')).toHaveLength(1)
+    expect(
+      await screen.findByRole('button', { name: 'Ajouter un lien' })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByLabelText('Aux jeunes via l’application pass Culture', {
+        exact: false,
+      })
+    ).not.toBeChecked()
+    expect(
+      screen.getByLabelText('Aux groupes scolaires via ADAGE', {
+        exact: false,
+      })
+    ).not.toBeChecked()
+    expect(
+      await screen.findByRole('button', { name: 'Continuer' })
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', { name: 'Retour' })
+    ).toBeInTheDocument()
+  })
+
+  describe('when WIP_PRE_SIGNUP_SIMULATION is enabled', () => {
+    it('should display new heading and description instead of old subtitle', async () => {
+      contextValue.activity = null
+      renderActivityScreen(contextValue, ['WIP_PRE_SIGNUP_SIMULATION'])
+
+      expect(
+        await screen.findByRole('heading', { name: 'Votre activité' })
+      ).toBeVisible()
+
+      expect(
+        screen.getByText(
+          /Ces informations déterminent la visibilité de vos offres/
+        )
+      ).toBeVisible()
+
+      expect(
+        screen.queryByRole('heading', {
+          name: /définissez l'activité de votre structure/,
+        })
+      ).not.toBeInTheDocument()
+    })
+
+    it('should log navigation events when clicking "Retour" and "Continuer" buttons', async () => {
+      contextValue.activity = null
+      renderActivityScreen(contextValue, ['WIP_PRE_SIGNUP_SIMULATION'])
+
+      const user = userEvent.setup()
+
+      await screen.findByRole('button', { name: 'Continuer' })
+
+      await user.click(screen.getByRole('button', { name: 'Continuer' }))
+
+      expect(mockLogEvent).toHaveBeenCalledWith(
+        Events.CLICKED_ONBOARDING_FORM_NAVIGATION,
+        {
+          from: location.pathname,
+          to: SIGNUP_STEP_IDS.VALIDATION,
+          used: 'Continuer',
+        }
+      )
+
+      await user.click(screen.getByRole('button', { name: 'Retour' }))
+
+      expect(mockLogEvent).toHaveBeenCalledWith(
+        Events.CLICKED_ONBOARDING_FORM_NAVIGATION,
+        {
+          from: location.pathname,
+          to: SIGNUP_STEP_IDS.STRUCTURE_IDENTIFICATION,
+          used: 'Retour',
+        }
+      )
+    })
+  })
+
+  describe('Restore contexts from storage', () => {
+    it('should try to restore offerer and initialAddress when context is missing', async () => {
+      const setOfferer = vi.fn()
+      const setInitialAddress = vi.fn()
+      contextValue.offerer = null
+      contextValue.setOfferer = setOfferer
+      contextValue.setInitialAddress = setInitialAddress
+
+      renderActivityScreen(contextValue)
+
+      await waitFor(() => {
+        expect(tryRestoreOffererFromStorage).toHaveBeenCalledWith(setOfferer)
+        expect(tryRestoreInitialAddressFromStorage).toHaveBeenCalledWith(
+          setInitialAddress
+        )
+      })
+    })
+
+    it('should clean storage and navigate to search when restoring offerer/address fails', async () => {
+      contextValue.offerer = DEFAULT_OFFERER_FORM_VALUES
+      vi.mocked(tryRestoreOffererFromStorage).mockImplementation(() => {
+        throw new Error('ANY_ERROR')
+      })
+
+      renderActivityScreen(contextValue)
+
+      await waitFor(() => {
+        expect(cleanSignupJourneyStorage).toHaveBeenCalled()
+        expect(screen.getByText('Search screen')).toBeInTheDocument()
+      })
+      expect(tryRestoreActivityFromStorage).not.toHaveBeenCalled()
+    })
+
+    it('should not clean storage nor navigate when no activity data exists in storage', async () => {
+      contextValue.activity = null
+      vi.mocked(tryRestoreActivityFromStorage).mockImplementation(() => {
+        throw new Error(RESTORE_ERRORS.NO_ACTIVITY_DATA_IN_STORAGE)
+      })
+
+      renderActivityScreen(contextValue)
+
+      await waitFor(() => {
+        expect(tryRestoreActivityFromStorage).toHaveBeenCalledWith(
+          contextValue.setActivity
+        )
+      })
+      expect(cleanSignupJourneyStorage).not.toHaveBeenCalled()
+      expect(screen.queryByText('Search screen')).not.toBeInTheDocument()
+    })
+
+    it('should clean storage and navigate to search when restoring activity fails with an unexpected error', async () => {
+      contextValue.activity = null
+      vi.mocked(tryRestoreActivityFromStorage).mockImplementation(() => {
+        throw new Error('ANY_OTHER_ERROR')
+      })
+
+      renderActivityScreen(contextValue)
+
+      await waitFor(() => {
+        expect(cleanSignupJourneyStorage).toHaveBeenCalled()
+        expect(screen.getByText('Search screen')).toBeInTheDocument()
+      })
+    })
+  })
+
+  it('should display validation screen on click next step button', async () => {
+    contextValue.activity = {
+      activity: ActivityOpenToPublic.MUSEUM,
+      socialUrls: ['http://example.com'],
+      targetCustomer: Target.INDIVIDUAL_AND_EDUCATIONAL,
+      phoneNumber: '0605120510',
+      culturalDomains: undefined,
+    }
+
+    renderActivityScreen(contextValue)
+
+    expect(
+      await screen.findByRole('heading', {
+        level: 2,
+        name: 'Et enfin, définissez l’activité de votre structure',
+      })
+    ).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Continuer' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Validation screen')).toBeInTheDocument()
+    })
+  })
+
+  it('should go next step with individual target customer', async () => {
+    contextValue.activity = {
+      activity: ActivityOpenToPublic.MUSEUM,
+      socialUrls: ['http://example.com'],
+      targetCustomer: Target.INDIVIDUAL,
+      phoneNumber: '0605120510',
+      culturalDomains: undefined,
+    }
+
+    renderActivityScreen(contextValue)
+
+    expect(
+      await screen.findByRole('heading', {
+        level: 2,
+        name: 'Et enfin, définissez l’activité de votre structure',
+      })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByLabelText('Aux jeunes via l’application pass Culture')
+    ).toBeChecked()
+    expect(
+      screen.getByLabelText('Aux groupes scolaires via ADAGE')
+    ).not.toBeChecked()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Continuer' }))
+
+    expect(screen.getByText('Validation screen')).toBeInTheDocument()
+  })
+
+  it('should go next step with educational target customer', async () => {
+    contextValue.activity = {
+      activity: ActivityOpenToPublic.MUSEUM,
+      socialUrls: ['http://example.com'],
+      targetCustomer: Target.EDUCATIONAL,
+      phoneNumber: '0605120510',
+      culturalDomains: undefined,
+    }
+
+    renderActivityScreen(contextValue)
+
+    expect(
+      await screen.findByRole('heading', {
+        level: 2,
+        name: 'Et enfin, définissez l’activité de votre structure',
+      })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByLabelText('Aux jeunes via l’application pass Culture')
+    ).not.toBeChecked()
+    expect(
+      screen.getByLabelText('Aux groupes scolaires via ADAGE')
+    ).toBeChecked()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Continuer' }))
+
+    expect(screen.getByText('Validation screen')).toBeInTheDocument()
+  })
+
+  it('should display authentification screen on click previous step button', async () => {
+    renderActivityScreen(contextValue)
+
+    expect(
+      await screen.findByRole('heading', {
+        level: 2,
+        name: 'Et enfin, définissez l’activité de votre structure',
+      })
+    ).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retour' }))
+
+    expect(screen.getByText('Authentication screen')).toBeInTheDocument()
+  })
+
+  describe('Cultural domains', () => {
+    beforeEach(() => {
+      contextValue.offerer = {
+        name: 'test name',
+        siret: '1234567893333',
+        hasVenueWithSiret: false,
+        isDiffusible: true,
+        ...DEFAULT_ADDRESS_FORM_VALUES,
+      }
+      vi.spyOn(
+        useEducationalDomains,
+        'useEducationalDomains'
+      ).mockImplementation(() => {
+        return {
+          isLoading: false,
+          data: [
+            {
+              id: 1,
+              name: 'domaine 1',
+              nationalPrograms: [],
+            },
+            {
+              id: 2,
+              name: 'domaine b',
+              nationalPrograms: [],
+            },
+            {
+              id: 3,
+              name: 'domaine III',
+              nationalPrograms: [],
+            },
+          ],
+        } as SWRResponse
+      })
+    })
+
+    it('should render component with cultural domains required', async () => {
+      if (contextValue.offerer) {
+        contextValue.offerer.isOpenToPublic = 'false'
+      }
+      renderActivityScreen(contextValue)
+      expect(
+        await screen.findByRole('heading', {
+          level: 2,
+          name: 'Et enfin, définissez l’activité de votre structure',
+        })
+      ).toBeInTheDocument()
+      expect(screen.getByText(/Domaine\(s\) d’activité \*/)).toBeInTheDocument()
+    })
+
+    it('should render component with cultural domains NOT required', async () => {
+      if (contextValue.offerer) {
+        contextValue.offerer.isOpenToPublic = 'true'
+      }
+      renderActivityScreen(contextValue)
+      expect(
+        await screen.findByRole('heading', {
+          level: 2,
+          name: 'Et enfin, définissez l’activité de votre structure',
+        })
+      ).toBeInTheDocument()
+      expect(
+        screen.queryByText(/Domaine\(s\) d’activité \*/)
+      ).not.toBeInTheDocument()
+    })
+  })
+})

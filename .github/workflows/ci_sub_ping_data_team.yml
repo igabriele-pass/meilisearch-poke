@@ -1,0 +1,36 @@
+name: 3 [CI] Ping data team on slack
+# This action pings slack for every new PR that adds, changes or removes a db migration.
+# The ping is done on every push.
+
+on:
+  workflow_call:
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: { required: true }
+      PASSCULTURE_GITHUB_ACTION_APP_ID: { required: true }
+      SLACK_BOT_TOKEN: { required: true }
+
+jobs:
+  pr-info:
+    name: Retrieve pull request informations
+    runs-on: ubuntu-22.04
+    outputs:
+      pr_url: ${{ steps.pr.outputs.url }}
+      pr_title: ${{ steps.pr.outputs.title }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pass-culture-github-actions/pull-request@e858f4a1b944d91cd040811b24631694c8117d7c # v1.0.0
+        id: "pr"
+
+  slack-notification:
+    needs: pr-info
+    uses: ./.github/workflows/slack_post_message_workflow.yml
+    with:
+      channel: ${{vars.SLACK_DB_CHANGES_CHANNEL_ID}}
+      message: "<${{ needs.pr-info.outputs.pr_url }}|Pull Request base de données> : ${{ needs.pr-info.outputs.pr_title }}"
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+

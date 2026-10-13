@@ -1,0 +1,101 @@
+{% extends "layouts/list.html" %}
+{% from "components/forms.html" import build_filters_form_ng with context %}
+{% import "components/links.html" as links with context %}
+{% from "components/dynamic/modal.html" import build_lazy_modal with context %}
+{% set rows_count = rows|length %}
+{% block title %}Liste des avis d'impayé{% endblock %}
+{% block search_block %}
+  {{ build_filters_form_ng(form, dst) }}
+{% endblock search_block %}
+{% block before_table %}
+  <div class="col-3 mt-4">
+    <button class="btn btn-outline-primary-subtle-bg"
+            data-bs-toggle="modal"
+            data-bs-target="#create-non-payment-notice"
+            type="button">Saisir un avis d'impayé</button>
+    {{ build_lazy_modal(url_for("backoffice.non_payment_notices.get_create_non_payment_notice_form") , "create-non-payment-notice") }}
+  </div>
+{% endblock before_table %}
+{% block table_header %}
+  <th></th>
+  <th>ID</th>
+  <th>Date de création</th>
+  <th>Date de réception</th>
+  <th>État</th>
+  <th>Type d'avis</th>
+  <th>Référence</th>
+  <th>Nom de l'émetteur</th>
+  <th>Email de l'émetteur</th>
+  <th>Montant</th>
+  <th>Entité juridique</th>
+  <th>Partenaire culturel</th>
+  <th>Motif</th>
+  <th>N° de virement</th>
+{% endblock table_header %}
+{% block table_body %}
+  {% for notice in rows %}
+    <tr>
+      <td>
+        {% if has_permission("MANAGE_NON_PAYMENT_NOTICES") %}
+          <div class="dropdown">
+            <button type="button"
+                    data-bs-toggle="dropdown"
+                    aria-expanded="false"
+                    class="btn p-0">
+              <i class="bi bi-three-dots-vertical"></i>
+            </button>
+            <ul class="dropdown-menu">
+              <li class="dropdown-item p-0">
+                <a class="btn btn-sm d-block w-100 text-start px-3"
+                   data-bs-toggle="modal"
+                   data-bs-target="#edit-modal-{{ notice.id }}">Modifier les informations</a>
+              </li>
+              <li class="dropdown-item p-0">
+                <a class="btn btn-sm d-block w-100 text-start px-3"
+                   data-bs-toggle="modal"
+                   data-bs-target="#pending-modal-{{ notice.id }}">Mettre en attente de retour</a>
+              </li>
+              <li class="dropdown-item p-0">
+                <a class="btn btn-sm d-block w-100 text-start px-3"
+                   data-bs-toggle="modal"
+                   data-bs-target="#no-continuation-modal-{{ notice.id }}">Classer sans suite</a>
+              </li>
+              <li class="dropdown-item p-0">
+                <a class="btn btn-sm d-block w-100 text-start px-3"
+                   data-bs-toggle="modal"
+                   data-bs-target="#close-modal-{{ notice.id }}">Terminer</a>
+              </li>
+            </ul>
+          </div>
+        {% endif %}
+      </td>
+      <td>{{ notice.id }}</td>
+      <td>{{ notice.dateCreated | format_date }}</td>
+      <td>{{ notice.dateReceived | format_date }}</td>
+      <td>{{ notice.status | format_notice_status }}</td>
+      <td>{{ notice.noticeType | format_notice_type }}</td>
+      <td>{{ notice.reference }}</td>
+      <td>{{ notice.emitterName }}</td>
+      <td>{{ notice.emitterEmail }}</td>
+      <td>
+        {{ notice.amount | format_amount(target=notice.offerer) }}
+        {% if notice.fees %}
+          <br />
+          (dont {{ notice.fees | format_amount(target=notice.offerer) }} de frais)
+        {% endif %}
+      </td>
+      <td>{% if notice.offerer %}{{ links.build_offerer_name_to_details_link(notice.offerer) }}{% endif %}</td>
+      <td>{% if notice.venue %}{{ links.build_venue_name_to_details_link(notice.venue) }}{% endif %}</td>
+      <td>{{ notice.motivation | format_notice_status_motivation }}</td>
+      <td>{{ notice.batches | sort(attribute="id") | map(attribute="label") | join(", ") }}</td>
+    </tr>
+  {% endfor %}
+{% endblock table_body %}
+{% block after_table %}
+  {% for notice in rows %}
+    {{ build_lazy_modal(url_for("backoffice.non_payment_notices.get_edit_form", notice_id=notice.id) , "edit-modal-" + notice.id|string) }}
+    {{ build_lazy_modal(url_for("backoffice.non_payment_notices.get_set_pending_form", notice_id=notice.id) , "pending-modal-" + notice.id|string) }}
+    {{ build_lazy_modal(url_for("backoffice.non_payment_notices.get_set_no_continuation_form", notice_id=notice.id) , "no-continuation-modal-" + notice.id|string) }}
+    {{ build_lazy_modal(url_for("backoffice.non_payment_notices.get_close_form", notice_id=notice.id) , "close-modal-" + notice.id|string) }}
+  {% endfor %}
+{% endblock after_table %}

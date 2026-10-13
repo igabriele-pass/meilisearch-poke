@@ -1,0 +1,264 @@
+import { useId, useRef } from 'react'
+import { FormProvider, useForm } from 'react-hook-form'
+import { useLocation, useNavigate } from 'react-router'
+import { useSWRConfig } from 'swr'
+
+import { getHumanReadableApiError } from '@/apiClient/helpers'
+import type { GetIndividualOfferResponseModel } from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { GET_OFFER_QUERY_KEY } from '@/commons/config/swrQueryKeys'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import {
+  INDIVIDUAL_OFFER_WIZARD_STEP_IDS,
+  OFFER_WIZARD_MODE,
+} from '@/commons/core/Offers/constants'
+import { getIndividualOfferImage } from '@/commons/core/Offers/utils/getIndividualOfferImage'
+import { getIndividualOfferUrl } from '@/commons/core/Offers/utils/getIndividualOfferUrl'
+import { isOfferDisabled } from '@/commons/core/Offers/utils/isOfferDisabled'
+import { isOfferProductBasedButNotSynchronized } from '@/commons/core/Offers/utils/typology'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useFormNavigationGuard } from '@/commons/hooks/useFormNavigationGuard/useFormNavigationGuard'
+import { useOfferWizardMode } from '@/commons/hooks/useOfferWizardMode'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { UploaderModeEnum } from '@/commons/utils/imageUploadTypes'
+import { withVenueHelpers } from '@/commons/utils/withVenueHelpers'
+import { FormLayout } from '@/components/FormLayout/FormLayout'
+import { ImageDragAndDropUploader } from '@/components/ImageDragAndDropUploader/ImageDragAndDropUploader'
+import { VideoUploader } from '@/components/VideoUploader/VideoUploader'
+import { useIndividualOfferImageUpload } from '@/pages/IndividualOffer/commons/useIndividualOfferImageUpload'
+import { getAfterSubmitPath } from '@/pages/IndividualOffer/commons/utils/getAfterSubmitPath'
+import { ActionBar } from '@/pages/IndividualOffer/components/ActionBar/ActionBar'
+import { Divider } from '@/ui-kit/Divider/Divider'
+
+import { ProductBanner } from '../../components/ProductBanner/ProductBanner'
+import { buildInitialValues } from '../commons/buildInitialValues'
+import { useVideoUploaderContext } from '../commons/context/VideoUploaderContext/VideoUploaderContext'
+import styles from './IndividualOfferMediaScreen.module.scss'
+import { VideoUploaderTips } from './VideoUploaderOfferTips/VideoUploaderOfferTips'
+
+type IndividualOfferMediaScreenProps = {
+  offer: GetIndividualOfferResponseModel
+}
+
+export const IndividualOfferMediaScreen = ({
+  offer,
+}: IndividualOfferMediaScreenProps): JSX.Element => {
+  const { logEvent } = useAnalytics()
+  const { mutate } = useSWRConfig()
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
+  const isOnboarding = pathname.includes('onboarding')
+  const mode = useOfferWizardMode()
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+  const isClosed = withVenueHelpers(selectedPartnerVenue).isClosed
+  const tipsVideoUploaderId = useId()
+
+  const initialImageOffer = getIndividualOfferImage(offer)
+  const {
+    displayedImage,
+    hasUpsertedImage,
+    onImageDelete,
+    onImageUpload,
+    handleImageOnSubmit,
+  } = useIndividualOfferImageUpload(initialImageOffer)
+
+  const { handleVideoOnSubmit, videoUrl, videoData } = useVideoUploaderContext()
+  const snackBar = useSnackBar()
+  // Read by `afterSubmitState` so the success message is shown once the
+  // destination page (or this same page) has taken over, instead of racing with the navigation.
+  const hasSavedOfferRef = useRef(false)
+
+  const isProductBased = isOfferProductBasedButNotSynchronized(offer)
+
+  const form = useForm()
+
+  const hasUpdatedVideoUrl = videoUrl !== offer.videoData.videoUrl
+  const isFormDirty = hasUpdatedVideoUrl || hasUpsertedImage
+
+  const handlePreviousStep = async () => {
+    await navigate(
+      getIndividualOfferUrl({
+        offerId: offer.id,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.LOCATION,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        isOnboarding,
+      })
+    )
+  }
+
+  const onSubmit = async (): Promise<boolean> => {
+    // If only videoUrl was updated, there is an inner control on the
+    // definition of handleImageOnSubmit so thumbnail associated requests cannot be made
+    // if hasUpsertedImage=false.
+    if (!isFormDirty) {
+      return true
+    }
+
+    // Images can never be uploaded for product-based offers,
+    // the drag & drop should not be enabled so this is a safeguard.
+    if (!isProductBased) {
+      try {
+        await mutate(
+          [GET_OFFER_QUERY_KEY, offer.id],
+          handleImageOnSubmit(offer.id),
+          {
+            revalidate: false,
+            populateCache: (thumbnailResult, offer) => {
+              // If defined, the result comes from a thumbnail
+              // creation. Otherwise, its a result from a deletion.
+              // FIXME: in cache we update both offer.activeMediation and offer.thumbUrl
+              // properties, depending on the type of offer, one or another is actually updated
+              // (aka. getIndividualOfferImage) but we'd like an unique way to store this information.
+              if (thumbnailResult) {
+                return {
+                  ...offer,
+                  thumbUrl: thumbnailResult.url,
+                  activeMediation: {
+                    ...offer?.activeMediation,
+                    thumbUrl: thumbnailResult.url,
+                    credit: thumbnailResult.credit,
+                    alternativeText: thumbnailResult.alternativeText,
+                  },
+                }
+              } else {
+                return {
+                  ...offer,
+                  thumbUrl: '',
+                  activeMediation: {
+                    ...offer?.activeMediation,
+                    thumbUrl: '',
+                    credit: '',
+                    alternativeText: '',
+                  },
+                }
+              }
+            },
+          }
+        )
+      } catch (error) {
+        snackBar.error(
+          getHumanReadableApiError(
+            error,
+            'Une erreur est survenue lors de l’enregistrement de votre image'
+          )
+        )
+        return false
+      }
+    }
+
+    if (hasUpdatedVideoUrl) {
+      try {
+        await mutate([GET_OFFER_QUERY_KEY, offer.id], handleVideoOnSubmit(), {
+          revalidate: false,
+          populateCache: (videoData, offer) => {
+            return {
+              ...offer,
+              videoData,
+            }
+          },
+        })
+      } catch (error) {
+        snackBar.error(
+          getHumanReadableApiError(
+            error,
+            'Une erreur est survenue lors de l’enregistrement de votre vidéo'
+          )
+        )
+
+        return false
+      }
+    }
+
+    if (mode === OFFER_WIZARD_MODE.EDITION) {
+      hasSavedOfferRef.current = true
+    }
+
+    return true
+  }
+
+  const afterSubmitPath = () =>
+    getAfterSubmitPath({
+      offerId: offer.id,
+      mode,
+      isOnboarding,
+      followingStep: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TARIFS,
+    })
+  const afterSubmitState = () =>
+    hasSavedOfferRef.current
+      ? { successMessage: 'Votre offre a bien été modifiée.' }
+      : undefined
+  const { navigationGuardedSubmitHandler, navigationGuardDialog } =
+    useFormNavigationGuard({
+      afterSubmitPath,
+      afterSubmitState,
+      form,
+      isExternallyDirty: isFormDirty,
+      onSubmit,
+    })
+
+  const logOnImageDropOrSelected = () => {
+    logEvent(Events.DRAG_OR_SELECTED_IMAGE, {
+      imageType: UploaderModeEnum.OFFER,
+      imageCreationStage: 'add image',
+    })
+  }
+
+  return (
+    <>
+      <FormProvider {...form}>
+        <form onSubmit={navigationGuardedSubmitHandler}>
+          <FormLayout>
+            {isOfferProductBasedButNotSynchronized(offer) && <ProductBanner />}
+            <FormLayout.Section title="Illustrez votre offre">
+              <FormLayout.Row inline className={styles['media-row']}>
+                <FormLayout.SubSection
+                  title="Ajoutez une image"
+                  className={styles['media-sub-section']}
+                >
+                  <ImageDragAndDropUploader
+                    onImageUpload={onImageUpload}
+                    onImageDelete={onImageDelete}
+                    initialValues={buildInitialValues(displayedImage)}
+                    mode={UploaderModeEnum.OFFER}
+                    onImageDropOrSelected={logOnImageDropOrSelected}
+                    hideActionButtons={isProductBased || isClosed}
+                    warnBeforeDeleting={offer.isHeadlineOffer}
+                    disabled={isProductBased || isClosed}
+                  />
+                </FormLayout.SubSection>
+                <Divider
+                  orientation="vertical"
+                  className={styles['media-divider']}
+                />
+                <FormLayout.SubSection
+                  title="Ajoutez une vidéo"
+                  className={styles['media-sub-section']}
+                >
+                  <VideoUploader uploadTipsId={tipsVideoUploaderId} />
+                  {!videoData?.videoThumbnailUrl && (
+                    <div id={tipsVideoUploaderId}>
+                      <VideoUploaderTips />
+                    </div>
+                  )}
+                </FormLayout.SubSection>
+              </FormLayout.Row>
+            </FormLayout.Section>
+          </FormLayout>
+          <ActionBar
+            isEmbedded
+            onClickPrevious={handlePreviousStep}
+            step={INDIVIDUAL_OFFER_WIZARD_STEP_IDS.MEDIA}
+            isDisabled={
+              form.formState.isSubmitting ||
+              isOfferDisabled(offer) ||
+              (!isFormDirty && mode !== OFFER_WIZARD_MODE.CREATION)
+            }
+          />
+        </form>
+      </FormProvider>
+
+      {navigationGuardDialog}
+    </>
+  )
+}

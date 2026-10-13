@@ -1,0 +1,36 @@
+{% extends "layouts/connected.html" %}
+{% set table_name = "list-table" %}
+{% if self.search_block %}
+  {% set search_block = self.search_block() %}
+{% endif %}
+{% if self.before_table %}
+  {% set before_table = self.before_table() %}
+{% endif %}
+{% if self.table_header %}
+  {% set table_header = self.table_header() %}
+{% endif %}
+{% if self.table_body %}
+  {% set table_body = self.table_body() %}
+{% endif %}
+{% if self.multi_select_menu %}
+  {% set multi_select_menu = self.multi_select_menu() %}
+{% endif %}
+{% if self.after_table %}
+  {% set after_table = self.after_table() %}
+{% endif %}
+{% if self.empty %}
+  {% set empty = self.empty() %}
+{% endif %}
+{% block page %}
+  <div class="pt-3 px-5">
+    <div class="d-flex justify-content-between">
+      <div class="p-2">
+        <h1>
+          {% block title %}
+          {% endblock title %}
+        </h1>
+      </div>
+    </div>
+    {% include "components/presentation/list.html" %}
+  </div>
+{% endblock page %}

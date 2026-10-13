@@ -1,0 +1,54 @@
+# Since version 2.23, git-blame has a feature to ignore or bypass
+# certain commits.
+#
+# This file contains a list of commits that are not likely what you
+# are looking for in a blame, such as mass reformatting or renaming.
+# You can set this file as a default ignore file for blame by running
+# the following command.
+#
+#     $ git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# ... or by configuring it in your local or global Git configuration
+# file:
+#
+#    [blame]
+#    ignoreRevsFile = .git-blame-ignore-revs
+
+# Introduction of the pcapi Python package: all code (except tests) is
+# moved to a new src/pcapi directory, all internal import statements
+# are updated, etc.
+9900cd1425ccc710532b51b35b213d79e418afde
+
+# Apply isort to project
+02f7890c499f7dfde483ea264fb2c9a234e68063
+
+# Apply black to project
+95730701d69d8ab577f66ac1663d3d7ded092fdb
+
+# Move folders to api
+5e1c07945173f8f909fe917f5da4a314e12d26a4
+
+# Apply stylelint
+7987d35f4471ca652713628135a0c4faff0f14c2
+
+# Fix eslint
+f86a69ee7190c96f46af70251313bcf29d1e0ec2
+
+# Rename backoffice_v3 to backoffice
+ccf11e339eec505edd959d650dd812b0afdcd2e6
+
+# fix + revert: fix timeout when using advanced search in individual offers
+bb14f634c65d872d3cabf543cd2c1ef43de49f2e
+f93b08250f940688e822f568b8ad39a0ac666fc5
+
+# chore: rename sqla imports to sa
+85048afe13240229055856c0a8c167c46b1e04e1
+b607e44bd874dc3f830dae3ca1f983914fb761cb
+5dea9652ab0d836b888d4e62bf4c64a07199a52f
+
+# fix + revert: temporary change to fix CI
+df60db93ede71742a13f898cfeccb91927dbed63
+c2eee4de37ec816d876d340399c1b96ac863f124
+
+# Update educational imports
+36c6621f6b4e9130063c4c83f7afa437eed83bfa

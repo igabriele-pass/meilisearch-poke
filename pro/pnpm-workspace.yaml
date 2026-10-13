@@ -1,0 +1,14 @@
+allowBuilds:
+  '@firebase/util': false
+  '@parcel/watcher': false
+  esbuild: false
+  storybook-addon-remix-react-router: false
+
+# 1 week, in minutes
+minimumReleaseAge: 10080
+
+overrides:
+  esbuild@>=0.17.0 <0.28.1: '>=0.28.1'
+  esbuild@>=0.27.3 <0.28.1: '>=0.28.1'
+  # TODO: transitive DoS fix, remove once @hey-api/openapi-ts pulls js-yaml >= 4.3.2
+  js-yaml: '>=4.3.2'

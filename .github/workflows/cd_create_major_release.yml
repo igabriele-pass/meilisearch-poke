@@ -1,0 +1,178 @@
+name: 0 [CD] Create major release
+
+on:
+  schedule:
+    # https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onschedule
+    # “At 08:27 on every day-of-week from Monday through Friday.”
+    - cron: "27 8 * * 1-5"
+      timezone: "Europe/Paris"
+  workflow_dispatch:
+
+permissions: write-all
+
+env:
+  REPO_URL: "${{ github.server_url }}/${{ github.repository }}"
+  RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+jobs:
+  check-major-release-creation-is-allowed: # TODO (tcoudray-pass, 15/04/2026) Refacto when we get rid of the old workflow
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            .github/
+      - id: check-date-exclusion
+        run: ./.github/workflows/scripts/check-schedule-exclusion.sh >> "$GITHUB_OUTPUT"
+      - name: Check is allowed
+        env:
+          date_is_excluded: steps.check-date-exclusion.outputs.schedule_exclusion == 'true'
+          is_dispatch: ${{ github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [[ $is_dispatch ]] || [[ ! $date_is_excluded ]]; then
+            exit 0
+          fi
+          echo "Today is excluded – ${{ steps.check-date-exclusion.outputs.reason }}"
+          exit 1
+
+  compute-major-version-variables:
+    needs: check-major-release-creation-is-allowed
+    runs-on: ubuntu-latest
+    outputs:
+      release-number: ${{ steps.compute.outputs.release-number }}
+      sha: ${{ steps.compute.outputs.commit-hash }}
+      message-base: ${{ steps.compute.outputs.message-base }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-tags: true
+          persist-credentials: false
+          sparse-checkout: |
+            .github/
+
+      - name: Compute release number, rc info and slack message base
+        id: compute
+        run: |
+          # Check that rc tag exists
+          rc_tag="$(git tag -l "rc" | tail -n 1)"
+          if [ -z "$rc_tag" ]; then
+            echo "Pas de tag RC trouvé"
+            exit 1
+          fi
+
+          # Get all tags with format vX.X.X, sort them and keep the last one
+          latest_tag="$(git tag -l "v[0-9]*.[0-9]*.[0-9]*" | sort -V | tail -n 1)"
+
+          # Extract major version and add 1
+          major="$(echo "$latest_tag" | sed -E 's/^v([0-9]+)\..*/\1/')"
+          release_number="$((major + 1))"
+          echo "release-number=$release_number" >> "$GITHUB_OUTPUT"
+
+          # Get the rc tag info
+          commit_hash="$(git rev-list -n 1 "$rc_tag")"
+          echo "commit-hash=$commit_hash" >> "$GITHUB_OUTPUT"
+          commit_date="$(git show -s --format=%cd --date=format:'%d/%m/%Y à %H:%M' "$commit_hash")"
+          subject="$(git show -s --format=%s "$commit_hash")"
+
+          # compute Slack message base  — backtick are interpreted so we use [] around the release number
+          message_base="de la <${{ env.RUN_URL }}|release> [v$release_number] basée sur le commit <${{ env.REPO_URL }}/commit/$commit_hash|$subject> (poussé le $commit_date)"
+          echo "message-base=$message_base" >> "$GITHUB_OUTPUT"
+
+  notify-workflow-start:
+    needs: compute-major-version-variables
+    name: Notify major release creation has started
+    uses: ./.github/workflows/slack_post_message_workflow.yml
+    with:
+      channel: ${{vars.SLACK_ALERTES_DEPLOIEMENT_CHANNEL_ID}}
+      message: ":github-pending: Création ${{ needs.compute-major-version-variables.outputs.message-base }}"
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  create-release:
+    name: Create major release
+    needs: compute-major-version-variables
+    uses: ./.github/workflows/cd_sub_create_release.yml
+    with:
+      tag-number: ${{ needs.compute-major-version-variables.outputs.release-number }}.0.0
+      ref: ${{ needs.compute-major-version-variables.outputs.sha }}
+      base-ref-is-a-branch: false
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+
+  edit-maintenance-branches:
+    name: Edit maintenance branches
+    needs: [create-release, compute-major-version-variables]
+    runs-on: ubuntu-22.04
+    steps:
+      # This is needed because tags are protected and the default GITHUB_TOKEN cannot be exempted
+      # from this ruleset
+      - name: Authenticate through github app ghactionci
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: github-token
+        with:
+          app-id: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+          private-key: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          # Liste des repositories à cloner
+          repositories: |
+            pass-culture-main
+          permission-contents: write
+
+      - name: Checkout new tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ needs.compute-major-version-variables.outputs.release-number }}.0.0
+          persist-credentials: true
+          token: ${{ steps.github-token.outputs.token }}
+
+      - name: Create new maintenance branch (v${{ needs.compute-major-version-variables.outputs.release-number }}.0.0)
+        env:
+          NEW_MAINTENANCE_BRANCH: maint/v${{ needs.compute-major-version-variables.outputs.release-number }}
+        run: |
+          git checkout -b "$NEW_MAINTENANCE_BRANCH"
+          git push origin "$NEW_MAINTENANCE_BRANCH"
+      - name: Delete old maintenance branch
+        continue-on-error: true
+        run: |
+          release_number="${{ needs.compute-major-version-variables.outputs.release-number }}"
+          old_branch_number="$((release_number-2))"
+          git push origin --delete "maint/v$old_branch_number"
+
+  notify-success:
+    name: "Send workflow success notification"
+    needs:
+      - notify-workflow-start
+      - compute-major-version-variables
+      - edit-maintenance-branches
+    if: always() && !failure() && !cancelled()
+    uses: ./.github/workflows/slack_update_message_workflow.yml
+    with:
+      channel: ${{vars.SLACK_ALERTES_DEPLOIEMENT_CHANNEL_ID}}
+      message-ts: ${{ needs.notify-workflow-start.outputs.message-ts }}
+      message: ":github-success: Succès ${{ needs.compute-major-version-variables.outputs.message-base }}"
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+  notify-failure:
+    name: "Send workflow failure notification"
+    needs:
+      - notify-workflow-start
+      - compute-major-version-variables
+      - edit-maintenance-branches
+    if: always() && (failure() || cancelled())
+    uses: ./.github/workflows/slack_update_message_workflow.yml
+    with:
+      channel: ${{vars.SLACK_ALERTES_DEPLOIEMENT_CHANNEL_ID}}
+      message-ts: ${{ needs.notify-workflow-start.outputs.message-ts }}
+      message: ":github-failure: Échec ${{ needs.compute-major-version-variables.outputs.message-base }} cc <!subteam^${{vars.SLACK_SHERIF_BACK_ID}}> <!subteam^${{vars.SLACK_SHERIF_INFRA_ID}}>"
+    secrets:
+      PASSCULTURE_GITHUB_ACTION_APP_ID: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_ID }}
+      PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY: ${{ secrets.PASSCULTURE_GITHUB_ACTION_APP_PRIVATE_KEY }}
+      SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}

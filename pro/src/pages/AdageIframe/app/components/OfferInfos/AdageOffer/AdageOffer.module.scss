@@ -1,0 +1,134 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+
+.offer {
+  container: offer / inline-size;
+  position: relative;
+
+  &::before {
+    content: "";
+    width: 100%;
+    height: rem.torem(7px);
+    background-color: var(--color-background-info);
+    position: absolute;
+    top: rem.torem(132px);
+    z-index: 0;
+  }
+
+  &-header {
+    padding: 0 var(--size-spacing-xl) var(--size-spacing-xl);
+    border-bottom: rem.torem(7px) solid var(--color-background-info);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--size-spacing-xl);
+    position: relative;
+    z-index: 1;
+  }
+
+  &-body {
+    padding: var(--size-spacing-xl);
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-spacing-xl);
+  }
+
+  &-main {
+    display: flex;
+    flex-grow: 1;
+    flex-direction: column;
+    gap: var(--size-spacing-xxl);
+  }
+
+  &-side {
+    width: 100%;
+    max-width: 100%;
+    flex-shrink: 0;
+  }
+}
+
+.offer-section {
+  &-header {
+    display: flex;
+    align-items: center;
+    gap: var(--size-spacing-s);
+    margin-bottom: var(--size-spacing-l);
+
+    &-title {
+      @include fonts.title2;
+    }
+  }
+
+  &-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--size-spacing-l);
+    overflow-wrap: anywhere;
+
+    &-item {
+      &-text {
+        margin: 0;
+      }
+
+      &-subtitle {
+        @include fonts.body-accent-xs;
+
+        color: var(--color-text-subtle);
+        margin-bottom: var(--size-spacing-s);
+      }
+
+      &-description {
+        white-space: pre-line;
+        line-height: rem.torem(24px);
+
+        &-text {
+          margin: 0;
+        }
+      }
+    }
+
+    &-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--size-spacing-s);
+
+      &-pipe {
+        color: var(--separator-color-subtle);
+      }
+    }
+  }
+}
+
+@container offer (min-width: #{size.$tablet}) {
+  .offer-body {
+    flex-direction: row;
+  }
+
+  .offer-side {
+    width: rem.torem(480px);
+    max-width: 50%;
+  }
+}
+
+@container offer (width >=#{size.$tablet}) {
+  .offer-header {
+    flex-direction: row;
+    align-items: unset;
+  }
+
+  .offer::before {
+    display: none;
+  }
+}
+
+.additional-fees-list {
+  list-style-type: disc;
+  padding-left: 1rem;
+}
+
+.price-details {
+  display: flex;
+  flex-direction: column;
+  gap: rem.torem(8px);
+}

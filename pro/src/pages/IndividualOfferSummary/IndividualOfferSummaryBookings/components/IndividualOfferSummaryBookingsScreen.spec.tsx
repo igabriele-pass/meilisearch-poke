@@ -1,0 +1,221 @@
+import { screen } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import type { GetIndividualOfferResponseModel } from '@/apiClient/v1'
+import { IndividualOfferContext } from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import { DEFAULT_PRE_FILTERS } from '@/commons/core/Bookings/constants'
+import {
+  bookingRecapFactory,
+  bookingRecapStockFactory,
+  getIndividualOfferFactory,
+  getOfferManagingOffererFactory,
+  getOfferVenueFactory,
+  individualOfferContextValuesFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { IndividualOfferSummaryBookingsScreen } from './IndividualOfferSummaryBookingsScreen'
+
+const render = (offer: GetIndividualOfferResponseModel) => {
+  const contextValue = individualOfferContextValuesFactory({ offer })
+
+  return renderWithProviders(
+    <IndividualOfferContext.Provider value={contextValue}>
+      <IndividualOfferSummaryBookingsScreen offer={offer} />
+    </IndividualOfferContext.Provider>,
+    {
+      storeOverrides: {
+        user: {
+          selectedPartnerVenue: makeGetVenueResponseModel({ id: 1 }),
+        },
+      },
+    }
+  )
+}
+
+describe('IndividualOfferSummaryBookingsScreen', () => {
+  beforeEach(() => {
+    vi.spyOn(
+      api,
+      'getOfferPriceCategoriesAndSchedulesByDates'
+    ).mockResolvedValue([])
+  })
+  it('should render without accessibility violations', async () => {
+    vi.spyOn(api, 'getBookingsPro').mockResolvedValueOnce({
+      bookingsRecap: [
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+      ],
+      page: 1,
+      pages: 1,
+      total: 1,
+    })
+
+    const offer = getIndividualOfferFactory({ name: 'Offre de test' })
+    const { container } = render(offer)
+
+    await screen.findByRole('button', {
+      name: 'Télécharger les réservations',
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should render a list of bookings', async () => {
+    const offer = getIndividualOfferFactory({ name: 'Offre de test' })
+
+    vi.spyOn(api, 'getBookingsPro').mockResolvedValueOnce({
+      bookingsRecap: [
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+      ],
+      page: 1,
+      pages: 1,
+      total: 3,
+    })
+
+    render(offer)
+
+    expect(screen.getByText(/Réservations/)).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', {
+        name: 'Télécharger les réservations',
+      })
+    ).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: 'Offre de test' })).toHaveLength(
+      3
+    )
+  })
+
+  it('should render 1 bookings', async () => {
+    const offer = getIndividualOfferFactory({ name: 'Offre de test' })
+
+    vi.spyOn(api, 'getBookingsPro').mockResolvedValueOnce({
+      bookingsRecap: [
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+      ],
+      page: 1,
+      pages: 1,
+      total: 1,
+    })
+
+    render(offer)
+
+    expect(screen.getByText(/Réservations/)).toBeInTheDocument()
+    expect(
+      await screen.findByRole('button', {
+        name: 'Télécharger les réservations',
+      })
+    ).toBeInTheDocument()
+    expect(screen.getAllByRole('link', { name: 'Offre de test' })).toHaveLength(
+      1
+    )
+  })
+
+  it('should render a message when no bookings', () => {
+    const offer = getIndividualOfferFactory({ name: 'Offre de test' })
+
+    vi.spyOn(api, 'getBookingsPro').mockResolvedValueOnce({
+      bookingsRecap: [],
+      page: 1,
+      pages: 1,
+      total: 0,
+    })
+
+    render(offer)
+
+    expect(
+      screen.getByText('Vous n’avez aucune réservation pour le moment')
+    ).toBeInTheDocument()
+  })
+
+  it('should fetch bookings with the offer managingOfferer id', async () => {
+    const offer = getIndividualOfferFactory(
+      { name: 'Offre de test' },
+      getOfferVenueFactory({
+        managingOfferer: getOfferManagingOffererFactory({ id: 42 }),
+      })
+    )
+    vi.spyOn(api, 'getBookingsPro').mockResolvedValueOnce({
+      bookingsRecap: [
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+      ],
+      page: 1,
+      pages: 1,
+      total: 1,
+    })
+
+    render(offer)
+
+    await screen.findAllByRole('link', { name: 'Offre de test' })
+    expect(api.getBookingsPro).toHaveBeenCalledWith({
+      query: {
+        bookingPeriodBeginningDate: '2015-01-01',
+        bookingPeriodEndingDate: expect.any(String),
+        bookingStatusFilter: DEFAULT_PRE_FILTERS.bookingStatusFilter,
+        eventDate: undefined,
+        offerId: offer.id,
+        offererAddressId: undefined,
+        page: 1,
+        venueId: offer.venue.id,
+      },
+    })
+  })
+
+  it('should open a download modal', async () => {
+    const offer = getIndividualOfferFactory({ name: 'Offre de test' })
+
+    vi.spyOn(api, 'getBookingsPro').mockResolvedValueOnce({
+      bookingsRecap: [
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+        bookingRecapFactory({
+          stock: bookingRecapStockFactory({ offerName: 'Offre de test' }),
+        }),
+      ],
+      page: 1,
+      pages: 1,
+      total: 3,
+    })
+
+    render(offer)
+
+    const downloadButton = await screen.findByRole('button', {
+      name: 'Télécharger les réservations',
+    })
+
+    expect(downloadButton).toBeInTheDocument()
+
+    await userEvent.click(downloadButton)
+
+    expect(
+      screen.getByText('Téléchargement de vos réservations')
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Annuler' })).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Télécharger format CSV' })
+    ).toBeInTheDocument()
+    expect(
+      screen.getByRole('button', { name: 'Télécharger format Excel' })
+    ).toBeInTheDocument()
+  })
+})

@@ -1,0 +1,242 @@
+import { yupResolver } from '@hookform/resolvers/yup'
+import classNames from 'classnames'
+import { useId, useState } from 'react'
+import { useForm } from 'react-hook-form'
+import useSWR from 'swr'
+
+import { api } from '@/apiClient/api'
+import { isErrorAPIError } from '@/apiClient/helpers'
+import { OffererMemberStatus } from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { useCurrentUserPermissions } from '@/commons/auth/useCurrentUserPermissions'
+import { GET_MEMBERS_QUERY_KEY } from '@/commons/config/swrQueryKeys'
+import { OffererLinkEvents } from '@/commons/core/FirebaseEvents/constants'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { ensureSelectedAdminOfferer } from '@/commons/store/user/selectors'
+import { FormLayout } from '@/components/FormLayout/FormLayout'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonColor, ButtonVariant } from '@/design-system/Button/types'
+import { DetailedModal } from '@/design-system/DetailedModal/DetailedModal'
+import { Tag, TagVariant } from '@/design-system/Tag/Tag'
+import { TextInput } from '@/design-system/TextInput/TextInput'
+import fullDownIcon from '@/icons/full-down.svg'
+import fullUpIcon from '@/icons/full-up.svg'
+import { validationSchema } from '@/pages/Collaborators/validationSchema'
+
+import styles from './Collaborators.module.scss'
+
+const SUCCESS_MESSAGE = "L'invitation a bien été envoyée."
+const ERROR_MESSAGE = 'Une erreur est survenue lors de l’envoi de l’invitation.'
+
+type UserEmailFormValues = {
+  email: string
+}
+
+const Collaborators = () => {
+  const { logEvent } = useAnalytics()
+  const snackBar = useSnackBar()
+  const [displayAllMembers, setDisplayAllMembers] = useState(false)
+  const [isDialogOpen, setIsDialogOpen] = useState(false)
+  const formId = useId()
+
+  const selectedAdminOfferer = useAppSelector(ensureSelectedAdminOfferer)
+  const hasOpenedVenues = selectedAdminOfferer?.managedVenues.some(
+    (venue) => !venue.state
+  )
+  const userPermissions = useCurrentUserPermissions()
+
+  const offererId = selectedAdminOfferer.id
+
+  const { data } = useSWR(
+    [GET_MEMBERS_QUERY_KEY, offererId],
+    ([, offererIdParam]) =>
+      !offererIdParam || !userPermissions.isSelectedAdminOffererAssociated
+        ? null
+        : api.getOffererMembers({ path: { offerer_id: offererIdParam } }),
+    { fallbackData: null }
+  )
+  const members = data?.members ?? []
+
+  const hookForm = useForm<UserEmailFormValues>({
+    defaultValues: { email: '' },
+    resolver: yupResolver(validationSchema),
+    mode: 'onBlur',
+  })
+
+  const {
+    register,
+    handleSubmit,
+    reset,
+    setError,
+    formState: { errors, isSubmitting },
+  } = hookForm
+
+  const onSubmit = async ({ email }: { email: string }) => {
+    try {
+      if (!offererId) {
+        return
+      }
+
+      await api.inviteMember({
+        path: { offerer_id: offererId },
+        body: { email: email },
+      })
+
+      members.unshift({
+        email,
+        status: OffererMemberStatus.PENDING,
+      })
+      reset()
+      logEvent(OffererLinkEvents.CLICKED_SEND_INVITATION)
+      snackBar.success(SUCCESS_MESSAGE)
+      setIsDialogOpen(false)
+    } catch (error) {
+      if (isErrorAPIError(error) && error.status === 400 && error.body.email) {
+        setError('email', { message: error.body.email })
+      } else {
+        snackBar.error(ERROR_MESSAGE)
+      }
+    }
+  }
+
+  const MAX_COLLABORATORS = 10
+
+  return (
+    <section>
+      <h2 className={styles['main-list-title']}>Liste des collaborateurs</h2>
+
+      {members.length > 0 && (
+        <div className={styles['members-container']}>
+          <table
+            className={classNames(styles['members-list'], {
+              [styles['members-list--withMarginBottom']]:
+                members.length > MAX_COLLABORATORS,
+            })}
+          >
+            <caption className={styles['visually-hidden']}>
+              Liste des collaborateurs
+            </caption>
+            <thead>
+              <tr className={styles['members-list-tr']}>
+                <th scope="col" className={styles['members-list-th']}>
+                  Email
+                </th>
+                <th scope="col" className={styles['members-list-th']}>
+                  Statut
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {members.map(
+                ({ email, status }, index) =>
+                  !(!displayAllMembers && index > MAX_COLLABORATORS - 1) && (
+                    <tr key={email} className={styles['members-list-tr']}>
+                      <td
+                        className={classNames(
+                          styles['member-email'],
+                          styles['members-list-td']
+                        )}
+                      >
+                        {email}
+                      </td>
+                      <td
+                        className={classNames(
+                          styles['member-status'],
+                          styles['members-list-td']
+                        )}
+                      >
+                        {status === OffererMemberStatus.VALIDATED ? (
+                          <Tag variant={TagVariant.SUCCESS} label="Validé" />
+                        ) : (
+                          <Tag
+                            variant={TagVariant.DEFAULT}
+                            label="En attente"
+                          />
+                        )}
+                      </td>
+                    </tr>
+                  )
+              )}
+            </tbody>
+          </table>
+
+          {members.length > MAX_COLLABORATORS && (
+            <Button
+              onClick={() => setDisplayAllMembers(!displayAllMembers)}
+              variant={ButtonVariant.TERTIARY}
+              color={ButtonColor.NEUTRAL}
+              icon={displayAllMembers ? fullUpIcon : fullDownIcon}
+              label={
+                displayAllMembers
+                  ? 'Voir moins de collaborateurs'
+                  : 'Voir plus de collaborateurs'
+              }
+            />
+          )}
+        </div>
+      )}
+
+      <Button
+        variant={ButtonVariant.PRIMARY}
+        onClick={() => {
+          logEvent(OffererLinkEvents.CLICKED_ADD_COLLABORATOR)
+          setIsDialogOpen(true)
+        }}
+        label="Ajouter un collaborateur"
+        disabled={selectedAdminOfferer.isClosed || !hasOpenedVenues}
+      />
+
+      <DetailedModal
+        title="Ajout de collaborateurs"
+        isOpen={isDialogOpen}
+        onClose={() => setIsDialogOpen(false)}
+        description="Vous pouvez inviter des collaborateurs à rejoindre votre espace. Une
+            invitation leur sera envoyée par email. Vous serez notifié quand ils
+            auront rejoint l’espace."
+        primaryAction={
+          <Button
+            type="submit"
+            form={formId}
+            isLoading={isSubmitting}
+            data-error={errors.email?.message ? 'true' : 'false'}
+            label="Inviter le collaborateur"
+          />
+        }
+        secondaryAction={
+          <Button
+            variant={ButtonVariant.SECONDARY}
+            color={ButtonColor.NEUTRAL}
+            onClick={() => setIsDialogOpen(false)}
+            label="Annuler"
+          />
+        }
+        isFooterFixed
+      >
+        <form
+          id={formId}
+          className={styles['invitation-form']}
+          onSubmit={handleSubmit(onSubmit)}
+        >
+          <FormLayout>
+            <FormLayout.Row>
+              <TextInput
+                label="Adresse email"
+                type="email"
+                description="Format : email@exemple.com"
+                error={errors.email?.message}
+                required
+                requiredIndicator="explicit"
+                {...register('email')}
+              />
+            </FormLayout.Row>
+          </FormLayout>
+        </form>
+      </DetailedModal>
+    </section>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = Collaborators

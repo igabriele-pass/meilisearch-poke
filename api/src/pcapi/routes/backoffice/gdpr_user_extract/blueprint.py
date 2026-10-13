@@ -1,0 +1,132 @@
+import logging
+
+import sqlalchemy as sa
+import sqlalchemy.orm as sa_orm
+from flask import flash
+from flask import make_response
+from flask import redirect
+from flask import render_template
+from flask import url_for
+from sqlalchemy.orm import joinedload
+
+from pcapi import settings
+from pcapi.core import object_storage
+from pcapi.core.object_storage.backends import base as base_object_storage
+from pcapi.core.permissions import models as perm_models
+from pcapi.core.users import gdpr_api
+from pcapi.core.users import models as users_models
+from pcapi.models import db
+from pcapi.routes.backoffice import blueprint as backoffice_blueprint
+from pcapi.routes.backoffice.forms import empty as empty_forms
+from pcapi.routes.backoffice.utils import response as response_utils
+from pcapi.utils import date as date_utils
+
+
+logger = logging.getLogger(__name__)
+
+gdpr_extract_blueprint = backoffice_blueprint.child_backoffice_blueprint(
+    "gdpr_extract",
+    __name__,
+    url_prefix="/gdpr-extract",
+    permission=perm_models.Permissions.MANAGE_PUBLIC_ACCOUNT,
+)
+
+
+def _get_gdpr_data() -> list[users_models.GdprUserDataExtract]:
+    query = (
+        db.session.query(users_models.GdprUserDataExtract)
+        .options(
+            sa_orm.joinedload(users_models.GdprUserDataExtract.user).load_only(
+                users_models.User.id,
+                users_models.User.firstName,
+                users_models.User.lastName,
+            ),
+            sa_orm.joinedload(users_models.GdprUserDataExtract.authorUser).load_only(
+                users_models.User.firstName,
+                users_models.User.lastName,
+            ),
+        )
+        .order_by(users_models.GdprUserDataExtract.id.desc())
+        .filter(users_models.GdprUserDataExtract.expirationDate >= sa.func.now())
+    )
+
+    return query.all()
+
+
+@gdpr_extract_blueprint.route("", methods=["GET"])
+def list_gdpr_user_data_extract() -> response_utils.BackofficeResponse:
+    list_gdpr_data = _get_gdpr_data()
+    return render_template(
+        "gdpr_user_extract_data/list_gdpr_user_extract.html",
+        empty_form=empty_forms.EmptyForm(),
+        list_gdpr_data=list_gdpr_data,
+    )
+
+
+@gdpr_extract_blueprint.route("/<int:extract_id>/download", methods=["POST"])
+def download_gdpr_extract(extract_id: int) -> response_utils.BackofficeResponse:
+    form = empty_forms.EmptyForm()
+    if not form.validate():
+        flash(response_utils.build_form_error_msg(form), "warning")
+        return redirect(
+            url_for("backoffice.gdpr_extract.list_gdpr_user_data_extract"),
+            code=303,
+        )
+
+    extract = (
+        db.session.query(users_models.GdprUserDataExtract)
+        .filter(
+            users_models.GdprUserDataExtract.id == extract_id,
+            users_models.GdprUserDataExtract.expirationDate > date_utils.get_naive_utc_now(),
+        )
+        .options(joinedload(users_models.GdprUserDataExtract.user).load_only(users_models.User.email))
+        .one_or_none()
+    )
+
+    if not extract:
+        flash("L'extraction demandée n'existe pas ou a expiré", "warning")
+        return redirect(
+            url_for("backoffice.gdpr_extract.list_gdpr_user_data_extract"),
+            code=303,
+        )
+
+    try:
+        files = object_storage.get_public_object(
+            folder=settings.GCP_GDPR_EXTRACT_FOLDER,
+            object_id=f"{extract.id}.zip",
+            bucket=settings.GCP_GDPR_EXTRACT_BUCKET,
+        )
+    except base_object_storage.FileNotFound:
+        flash("L'extraction demandée existe mais aucune archive ne lui est associée", "warning")
+        return redirect(
+            url_for("backoffice.gdpr_extract.list_gdpr_user_data_extract"),
+            code=303,
+        )
+
+    response = make_response(files[0])
+    response.headers["Content-Type"] = "application/zip"
+    response.headers["Content-Disposition"] = f'attachment; filename="{extract.user.email}.zip"'
+    logger.info(
+        "An admin downloaded a user's data",
+        extra={
+            "user_id": extract.user.id,
+            "extract_id": extract_id,
+        },
+    )
+
+    return response
+
+
+@gdpr_extract_blueprint.route("<int:gdpr_id>/extract", methods=["POST"])
+def delete_gdpr_user_data_extract(gdpr_id: int) -> response_utils.BackofficeResponse:
+    extract = db.session.query(users_models.GdprUserDataExtract).filter_by(id=gdpr_id).one_or_none()
+    if not extract:
+        flash("L'extrait demandé n'existe pas.", "warning")
+        return redirect(url_for("backoffice.gdpr_extract.list_gdpr_user_data_extract"))
+    if not extract.dateProcessed and not extract.is_expired:
+        flash("L'extraction de données est toujours en cours pour cet utilisateur.", "warning")
+        return redirect(url_for("backoffice.gdpr_extract.list_gdpr_user_data_extract"))
+
+    gdpr_api.delete_gdpr_extract(extract.id)
+    flash("L'extraction de données a bien été effacée.", "success")
+    return redirect(url_for("backoffice.gdpr_extract.list_gdpr_user_data_extract"))

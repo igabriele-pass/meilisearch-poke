@@ -1,0 +1,98 @@
+import { screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { defaultGetVenue } from '@/commons/utils/factories/collectiveApiFactories'
+import { defaultVenueProvider } from '@/commons/utils/factories/individualApiFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import {
+  GenericCinemaProviderEdit,
+  type GenericCinemaProviderEditProps,
+} from '../GenericCinemaProviderEdit'
+
+vi.mock('@/commons/hooks/useSnackBar', () => ({
+  useSnackBar: () => ({
+    success: vi.fn(),
+    error: vi.fn(),
+  }),
+}))
+
+describe('GenericCinemaProviderEdit', () => {
+  let props: GenericCinemaProviderEditProps
+
+  beforeEach(() => {
+    props = {
+      venue: defaultGetVenue,
+      venueProvider: defaultVenueProvider,
+      showAdvancedFields: false,
+    }
+
+    vi.spyOn(api, 'updateVenueProvider').mockResolvedValue(defaultVenueProvider)
+  })
+
+  const renderComponent = async () => {
+    const renderResult = renderWithProviders(
+      <GenericCinemaProviderEdit {...props} />
+    )
+    const paramButton = screen.getByRole('button', { name: 'Paramétrer' })
+    expect(paramButton).toBeInTheDocument()
+    await userEvent.click(paramButton)
+    expect(
+      await screen.findByText('Modifier les paramètres de vos offres')
+    ).toBeInTheDocument()
+
+    return renderResult
+  }
+
+  it('should render without accessibility violations', async () => {
+    const { container } = await renderComponent()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should open dialog and display form with isDuo checkbox checked', async () => {
+    await renderComponent()
+
+    expect(
+      screen.getByText('Accepter les réservations “Duo“')
+    ).toBeInTheDocument()
+
+    const isDuoCheckbox = screen.getByLabelText(
+      /Accepter les réservations “Duo“/
+    )
+    expect(isDuoCheckbox).toBeChecked()
+  })
+
+  it('should submit updated provider values on form submit', async () => {
+    await renderComponent()
+
+    const submitButton = screen.getByRole('button', { name: 'Modifier' })
+    expect(submitButton).toBeInTheDocument()
+
+    await userEvent.click(submitButton)
+
+    await waitFor(() => {
+      expect(api.updateVenueProvider).toHaveBeenCalledWith({
+        path: { venue_provider_id: defaultVenueProvider.id },
+        body: {
+          isDuo: defaultVenueProvider.isDuo,
+          isActive: defaultVenueProvider.isActive,
+        },
+      })
+    })
+  })
+
+  it('should allow toggling isDuo checkbox', async () => {
+    await renderComponent()
+
+    const isDuoCheckbox = screen.getByLabelText(
+      /Accepter les réservations “Duo“/
+    )
+    expect(isDuoCheckbox).toBeChecked()
+
+    await userEvent.click(isDuoCheckbox)
+    expect(isDuoCheckbox).not.toBeChecked()
+  })
+})

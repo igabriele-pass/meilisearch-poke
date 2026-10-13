@@ -1,0 +1,25 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.video-uploader-tips {
+  margin-top: var(--size-spacing-xxxxl);
+}
+
+.hook {
+  @include fonts.body-accent-xs;
+
+  font-weight: 600;
+  font-style: italic;
+}
+
+.text {
+  @include fonts.body-xs;
+
+  margin-top: var(--size-spacing-s);
+}
+
+.list {
+  @include fonts.body-xs;
+
+  list-style: inside;
+  margin-top: var(--size-spacing-s);
+}

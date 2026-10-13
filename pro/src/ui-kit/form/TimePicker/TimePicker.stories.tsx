@@ -1,0 +1,53 @@
+import type { Meta, StoryObj } from '@storybook/react-vite'
+import type { PropsWithChildren } from 'react'
+import { FormProvider, useForm, useFormContext } from 'react-hook-form'
+
+import { TimePicker } from './TimePicker'
+
+const Wrapper = ({ children }: PropsWithChildren) => {
+  const hookForm = useForm<{ group: string }>({
+    defaultValues: { group: 'option1' },
+  })
+
+  return (
+    <FormProvider {...hookForm}>
+      <form>{children}</form>
+    </FormProvider>
+  )
+}
+
+const meta: Meta<typeof TimePicker> = {
+  title: '@/ui-kit/forms/TimePicker',
+  component: TimePicker,
+}
+
+export default meta
+type Story = StoryObj<typeof TimePicker>
+
+export const Default: Story = {
+  args: {
+    label: 'Select an option',
+    value: '22:11',
+    onChange: () => {
+      //    Control changes
+    },
+  },
+}
+
+export const WithinForm: Story = {
+  args: {
+    label: 'Select a time',
+  },
+  decorators: [
+    (Story: any) => (
+      <Wrapper>
+        <Story />
+      </Wrapper>
+    ),
+  ],
+  render: (args: any) => {
+    const { register } = useFormContext<{ time: string }>()
+
+    return <TimePicker {...args} {...register('time')} />
+  },
+}

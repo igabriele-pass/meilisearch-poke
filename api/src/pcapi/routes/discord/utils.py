@@ -1,0 +1,26 @@
+import random
+import typing
+
+from flask_wtf import FlaskForm
+
+from pcapi import settings
+from pcapi.utils import email as email_utils
+
+
+class PCForm(FlaskForm):
+    def filter_email(self, raw_email: str | None) -> str:
+        if not raw_email:
+            return ""
+        return email_utils.sanitize_email(raw_email)
+
+    @property
+    def raw_data(self) -> dict[str, typing.Any]:
+        return {field.name: field.raw_data for field in self}
+
+
+def random_hash() -> str:
+    return format(random.getrandbits(128), "x")
+
+
+def get_setting(setting_name: str) -> typing.Any:
+    return getattr(settings, setting_name)

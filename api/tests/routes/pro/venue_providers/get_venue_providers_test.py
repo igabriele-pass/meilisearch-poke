@@ -1,0 +1,79 @@
+from datetime import datetime
+from decimal import Decimal
+
+import pytest
+
+import pcapi.core.offerers.factories as offerers_factories
+import pcapi.core.providers.factories as providers_factories
+from pcapi.core import testing
+from pcapi.core.providers.repository import get_provider_by_local_class
+
+
+class Returns200Test:
+    num_queries = testing.AUTHENTICATION_QUERIES
+    num_queries += 1  # selected venue
+    num_queries += 1  # check user has rights on venue
+    num_queries += 1  # check a venue_providers exists
+
+    @pytest.mark.usefixtures("db_session")
+    def test_get_list_with_valid_venue_id(self, client):
+        user_offerer = offerers_factories.UserOffererFactory()
+        provider = providers_factories.PublicApiProviderFactory()
+        venue_provider = providers_factories.VenueProviderFactory(
+            venue__name="Librairie Titelive",
+            venue__managingOfferer=user_offerer.offerer,
+            provider=provider,
+            lastSyncDate=datetime(2021, 8, 16),
+            dateCreated=datetime(2021, 8, 15),
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = venue_provider.venue.id
+        with testing.assert_num_queries(self.num_queries):
+            response = auth_request.get(f"/venues/{venue_id}/venue-providers")
+            assert response.status_code == 200
+
+        assert response.json["venueProviders"][0].get("id") == venue_provider.id
+        assert response.json["venueProviders"][0].get("venueId") == venue_provider.venue.id
+        assert response.json["venueProviders"][0].get("lastSyncDate") == "2021-08-16T00:00:00Z"
+        assert response.json["venueProviders"][0].get("dateCreated") == "2021-08-15T00:00:00Z"
+
+    @pytest.mark.usefixtures("db_session")
+    def test_get_list_that_include_allocine_with_valid_venue_id(self, client):
+        # given
+        user_offerer = offerers_factories.UserOffererFactory()
+        allocine_stocks_provider = get_provider_by_local_class("AllocineStocks")
+        allocine_venue_provider = providers_factories.AllocineVenueProviderFactory(
+            venue__name="Whatever cinema",
+            venue__managingOfferer=user_offerer.offerer,
+            provider=allocine_stocks_provider,
+            price=Decimal("123.2"),
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        venue_id = allocine_venue_provider.venue.id
+        num_queries = self.num_queries + 1  # allocine_venue_provider
+        with testing.assert_num_queries(num_queries):
+            response = auth_request.get(f"/venues/{venue_id}/venue-providers")
+            assert response.status_code == 200
+
+        assert response.status_code == 200
+        assert response.json["venueProviders"][0].get("id") == allocine_venue_provider.id
+        assert response.json["venueProviders"][0].get("venueId") == allocine_venue_provider.venue.id
+        assert response.json["venueProviders"][0].get("price") == 123.2
+
+
+class Returns404Test:
+    @pytest.mark.usefixtures("db_session")
+    def when_listing_all_venues_without_venue_id_argument(self, client):
+        user_offerer = offerers_factories.UserOffererFactory()
+        provider = providers_factories.PublicApiProviderFactory()
+        providers_factories.VenueProviderFactory(
+            venue__name="Librairie Titelive",
+            venue__managingOfferer=user_offerer.offerer,
+            provider=provider,
+        )
+
+        auth_request = client.with_session_auth(email=user_offerer.user.email)
+        response = auth_request.get("/venues/404/venue-providers")
+        assert response.status_code == 404

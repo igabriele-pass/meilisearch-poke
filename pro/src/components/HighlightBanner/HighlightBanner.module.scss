@@ -1,0 +1,108 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_outline.scss" as outline;
+
+.highlight-banner-adage {
+  margin-top: var(--size-spacing-l);
+  border-radius: var(--size-border-radius-m);
+  background-color: var(--color-background-info);
+  padding: var(--size-spacing-xl);
+  position: relative;
+
+  .title {
+    width: 85%;
+    color: var(--color-text-brand-primary);
+  }
+
+  .description {
+    @include fonts.body;
+
+    margin: var(--size-spacing-s) 0 var(--size-spacing-l) 0;
+    height: max-content;
+  }
+
+  .container {
+    @include fonts.title1;
+
+    max-width: calc(100% - 350px);
+    gap: var(--size-spacing-l);
+  }
+
+  .close {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background-color: white;
+    border: none;
+    border-radius: var(--size-border-radius-pill);
+    width: rem.torem(24px);
+    height: rem.torem(24px);
+    color: var(--color-icon-brand-primary);
+    cursor: pointer;
+
+    &:focus-visible {
+      @include outline.focus-outline;
+    }
+  }
+}
+
+.highlight-banner-default {
+  width: 100%;
+  min-height: rem.torem(175px);
+  padding: var(--size-spacing-xl);
+  border-radius: var(--size-border-radius-m);
+  background: linear-gradient(180deg, #6123df 30%, #320096 70%);
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: var(--size-spacing-xl);
+  position: relative;
+
+  .container {
+    color: var(--color-text-inverted);
+    justify-content: center;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .title {
+    @include fonts.title3;
+  }
+
+  .description {
+    @include fonts.body-s;
+
+    margin-bottom: var(--size-spacing-l);
+  }
+
+  .close {
+    color: var(--color-text-inverted);
+    background: none;
+    border: none;
+    cursor: pointer;
+    min-width: rem.torem(20px);
+    min-height: rem.torem(20px);
+    margin-left: var(--size-spacing-s);
+    height: fit-content;
+
+    &-svg {
+      margin: 0 !important;
+    }
+
+    &:focus-visible {
+      outline-color: var(--color-border-inverted);
+    }
+  }
+}
+
+@media (max-width: size.$laptop) {
+  .highlight-banner-adage {
+    .img {
+      display: none;
+    }
+
+    .container {
+      max-width: unset;
+    }
+  }
+}

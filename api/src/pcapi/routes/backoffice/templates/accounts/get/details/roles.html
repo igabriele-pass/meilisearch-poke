@@ -1,0 +1,24 @@
+{% if roles %}
+  <table class="table mb-4 get-details-roles-view">
+    <thead>
+      <tr>
+        <th scope="col">Rôle</th>
+        <th scope="col">Permissions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for role in roles | sort(attribute="name") %}
+        <tr>
+          <td class="w-50">{{ role.name }}</td>
+          <td class="w-50">
+            <ul>
+              {% for permission in role.permissions %}<li>{{ permission.name | format_permission_name }}</li>{% endfor %}
+            </ul>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p class="m-5">L'utilisateur n'a aucun rôle ou ne s'est pas connecté au BackOffice depuis l'attribution de rôles</p>
+{% endif %}

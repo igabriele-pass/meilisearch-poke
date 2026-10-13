@@ -1,0 +1,48 @@
+.pc-header-top {
+  --old-primary: #eb0055;       // pink
+  --old-secondary: #320096;     // purple
+  background: linear-gradient(to right, var(--old-primary), var(--old-secondary));
+}
+
+a {
+  &.hover-text-underline:hover {
+    text-decoration: underline;
+  }
+  &.link-primary {
+    text-decoration: none;
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+}
+
+.primary-tooltip {
+  --bs-tooltip-bg: var(--bs-primary);
+}
+
+.larger-tooltip {
+  .tooltip-inner {
+    max-width: 600px !important;
+  }
+}
+
+.pc-rotate-90 {
+  -webkit-transform: rotate(-90deg);
+  -moz-transform: rotate(-90deg);
+  -ms-transform: rotate(-90deg);
+  -o-transform: rotate(-90deg);
+  vertical-align: baseline;
+ }
+
+dt {
+  font-size: $font-size-base;
+  font-weight: $font-weight-light !important;
+  color: var(--bs-secondary-color);
+  margin-bottom: 2px;
+}
+
+dd {
+  font-size: $font-size-base;
+  font-weight: $font-weight-normal;
+  color: var(--bs-body-color);
+}

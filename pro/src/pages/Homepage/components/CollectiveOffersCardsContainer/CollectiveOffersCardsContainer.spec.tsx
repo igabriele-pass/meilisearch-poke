@@ -1,0 +1,127 @@
+import { screen, waitFor } from '@testing-library/react'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import { CollectiveOfferDisplayedStatus } from '@/apiClient/v1'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import type { CollectiveOffersCardVariant } from '../types'
+import { CollectiveOffersCardsContainer } from './CollectiveOffersCardsContainer'
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getCollectiveOffersHome: vi.fn(),
+    getCollectiveOfferTemplatesHome: vi.fn(),
+  },
+}))
+
+vi.mock('../CollectiveOffersCard/CollectiveOffersCard', () => ({
+  CollectiveOffersCard: ({
+    variant,
+    isLoading,
+  }: {
+    variant: CollectiveOffersCardVariant
+    isLoading: boolean
+  }) => (
+    <div data-testid={`card-${variant.toLowerCase()}`} data-loading={isLoading}>
+      offres
+    </div>
+  ),
+}))
+
+describe('CollectiveOffersCardsContainer', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'getCollectiveOfferTemplatesHome').mockResolvedValue({
+      hasOffers: true,
+      offers: [],
+    })
+  })
+
+  it('should render without accessibility violations', async () => {
+    vi.spyOn(api, 'getCollectiveOffersHome').mockResolvedValueOnce({
+      hasOffers: true,
+      offers: [],
+    })
+
+    const { container } = renderWithProviders(
+      <CollectiveOffersCardsContainer isReadOnly={false} venueId={1} />
+    )
+
+    await waitFor(() => {
+      expect(screen.getByTestId('card-template')).toHaveAttribute(
+        'data-loading',
+        'false'
+      )
+      expect(screen.getByTestId('card-bookable')).toHaveAttribute(
+        'data-loading',
+        'false'
+      )
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should render template offers before bookable offers when venue has no bookable offers to display', async () => {
+    vi.spyOn(api, 'getCollectiveOffersHome').mockResolvedValueOnce({
+      hasOffers: true,
+      offers: [],
+    })
+
+    renderWithProviders(
+      <CollectiveOffersCardsContainer isReadOnly={false} venueId={1} />
+    )
+
+    // cards rendered with fallback data on first render while waiting for SWR to fetch data
+    const cardsFirstRender = screen.getAllByTestId(/^card-/)
+    expect(cardsFirstRender[0]).toHaveAttribute('data-testid', 'card-template')
+    expect(cardsFirstRender[1]).toHaveAttribute('data-testid', 'card-bookable')
+
+    const cardsSecondRender = cardsFirstRender
+
+    // We need waitFor here instead of findAllBy, because :
+    //   - `findAllBy` returns immediately since the elements are already there, so it returns the old ones.
+    //   - `waitFor` retries until the method it wraps returns no error. So it retries until the `expect` passes.
+    await waitFor(() => {
+      const cardsSecondRender = screen.getAllByTestId(/^card-/)
+      expect(cardsSecondRender[0]).toHaveAttribute(
+        'data-testid',
+        'card-template'
+      )
+    })
+    expect(cardsSecondRender[1]).toHaveAttribute('data-testid', 'card-bookable')
+  })
+
+  it('should render bookable offers before template offers when venue has only bookable offers to display', async () => {
+    vi.spyOn(api, 'getCollectiveOffersHome').mockResolvedValueOnce({
+      hasOffers: true,
+      offers: [
+        {
+          allowedActions: [],
+          collectiveStock: null,
+          displayedStatus: CollectiveOfferDisplayedStatus.PUBLISHED,
+          id: 1,
+          imageUrl: null,
+          name: 'mon offre réservable',
+        },
+      ],
+    })
+    renderWithProviders(
+      <CollectiveOffersCardsContainer isReadOnly={false} venueId={1} />
+    )
+
+    // cards rendered with fallback data on first render while waiting for SWR to fetch data
+    const cardsFirstRender = screen.getAllByTestId(/^card-/)
+    expect(cardsFirstRender[0]).toHaveAttribute('data-testid', 'card-template')
+    expect(cardsFirstRender[1]).toHaveAttribute('data-testid', 'card-bookable')
+
+    let cardsSecondRender = cardsFirstRender
+    await waitFor(() => {
+      cardsSecondRender = screen.getAllByTestId(/^card-/)
+      expect(cardsSecondRender[0]).toHaveAttribute(
+        'data-testid',
+        'card-bookable'
+      )
+    })
+    expect(cardsSecondRender[1]).toHaveAttribute('data-testid', 'card-template')
+  })
+})

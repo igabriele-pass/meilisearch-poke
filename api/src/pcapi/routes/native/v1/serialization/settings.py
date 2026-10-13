@@ -1,0 +1,60 @@
+import decimal
+
+import pydantic as pydantic_v2
+
+import pcapi.core.finance.conf as finance_conf
+from pcapi.core.finance.utils import XPF_TO_EUR_RATE
+from pcapi.core.finance.utils import to_cents
+from pcapi.routes.serialization import HttpBodyModel
+
+
+class DepositAmountsByAge(HttpBodyModel):
+    age_15: int
+    age_16: int
+    age_17: int
+    age_18: int
+
+    model_config = pydantic_v2.ConfigDict(alias_generator=None)
+
+
+def _convert_amount(amount: decimal.Decimal | None) -> int:
+    if amount is None:
+        return 0
+    converted_amount = to_cents(amount)
+    return converted_amount if converted_amount is not None else 0
+
+
+def get_deposit_amounts_by_age() -> DepositAmountsByAge:
+    return DepositAmountsByAge(
+        age_15=0,
+        age_16=0,
+        age_17=_convert_amount(finance_conf.GRANTED_DEPOSIT_AMOUNT_17_v3),
+        age_18=_convert_amount(finance_conf.GRANTED_DEPOSIT_AMOUNT_18_v3),
+    )
+
+
+class Rates(HttpBodyModel):
+    pacific_franc_to_euro: float = XPF_TO_EUR_RATE
+
+
+class Bonification(HttpBodyModel):
+    qf_threshold: int
+    bonus_amount: int
+
+
+class SettingsResponse(HttpBodyModel):
+    account_creation_minimum_age: int
+    account_unsuspension_limit: int
+    app_enable_autocomplete: bool
+    bonification: Bonification
+    deposit_amounts_by_age: DepositAmountsByAge
+    display_dms_redirection: bool
+    enable_front_image_resizing: bool
+    image_resizing_url: str
+    enable_native_cultural_survey: bool
+    id_check_address_autocompletion: bool
+    ineligible_postal_codes: list[str]
+    is_recaptcha_enabled: bool
+    object_storage_url: str
+    rates: Rates
+    wip_enable_credit_v3: bool

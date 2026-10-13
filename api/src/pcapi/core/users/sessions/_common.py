@@ -1,0 +1,155 @@
+import abc
+import logging
+from datetime import timedelta
+from enum import Enum
+from uuid import UUID
+
+import flask
+from redis import exceptions as redis_exceptions
+
+from pcapi import settings
+from pcapi.connectors.google_secret_manager import SecretManagerBackend
+from pcapi.connectors.google_secret_manager import SecretManagerException
+from pcapi.core.users import models as users_models
+from pcapi.models import db
+from pcapi.models.api_errors import ApiErrors
+from pcapi.utils import date as date_utils
+from pcapi.utils.redis import get_redis_client
+
+
+logger = logging.getLogger(__name__)
+
+NATIVE_FOLDERS = {
+    "/native/",
+    "/saml/educonnect/",
+}
+
+
+class Origin(Enum):
+    BACKOFFICE = "BACKOFFICE"
+    NATIVE = "NATIVE"
+    PRO = "PRO"
+
+
+class AbstractSessionManager(abc.ABC):
+    @staticmethod
+    @abc.abstractmethod
+    def stamp_session(app: flask.ctx.AppContext, user: users_models.User) -> None:
+        raise NotImplementedError
+
+    @staticmethod
+    @abc.abstractmethod
+    def discard_session(app: flask.ctx.AppContext, user: users_models.User) -> None:
+        raise NotImplementedError
+
+    @staticmethod
+    @abc.abstractmethod
+    def request_loader(request: flask.Request) -> users_models.User | None:
+        raise NotImplementedError
+
+
+class ForbiddenOrigin(Exception):
+    pass
+
+
+def get_origin() -> Origin:
+    if flask.request.host == settings.BACKOFFICE_URL:
+        return Origin.BACKOFFICE
+    for native_folder in NATIVE_FOLDERS:
+        if flask.request.path.startswith(native_folder):
+            return Origin.NATIVE
+    return Origin.PRO
+
+
+def stamp_session(*, origin: Origin, user_id: int, duration: timedelta, session_uuid: UUID) -> None:
+    flask.session["user_id"] = user_id
+    db.session.add(
+        users_models.UserSession(
+            userId=user_id,
+            uuid=session_uuid,
+            expirationDatetime=date_utils.get_naive_utc_now() + duration,
+        )
+    )
+
+
+def discard_session(*, origin: Origin, session_uuid: UUID | None) -> None:
+    if session_uuid:
+        db.session.query(users_models.UserSession).filter_by(
+            uuid=session_uuid,
+        ).delete()
+
+
+def unauthorized_handler() -> tuple[flask.Response, int]:
+    e = ApiErrors()
+    e.add_error("global", "Authentification nécessaire")
+    return flask.jsonify(e.errors), 401
+
+
+def get_user_from_session(
+    user_id: str | None, session_uuid: str | None, session_type: Origin, options: tuple = ()
+) -> users_models.User | None:
+    if not user_id or not session_uuid:
+        return None
+
+    query = (
+        db.session.query(users_models.User)
+        .join(users_models.UserSession, users_models.User.id == users_models.UserSession.userId)
+        .filter(
+            users_models.UserSession.userId == int(user_id),
+            users_models.UserSession.uuid == session_uuid,
+            users_models.UserSession.expirationDatetime > date_utils.get_naive_utc_now(),
+        )
+    )
+    if options:
+        query = query.options(*options)
+
+    return query.one_or_none()
+
+
+def delete_expired_sessions() -> None:
+    db.session.query(users_models.UserSession).filter(
+        users_models.UserSession.expirationDatetime < date_utils.get_naive_utc_now()
+    ).delete(synchronize_session=False)
+
+
+def disconnect_user_session(user_id: int, session_uuid: UUID | None = None) -> int:
+    query = db.session.query(users_models.UserSession).filter(users_models.UserSession.userId == user_id)
+    if session_uuid:
+        query = query.filter(users_models.UserSession.uuid == session_uuid)
+
+    return query.delete(synchronize_session=False)
+
+
+def configure_session_keys(*, default_session_key: str, session_keys_secret: str, redis_key: str) -> None:
+    if session_keys_secret:
+        key_dict: dict[str, str] = {}
+
+        secret_manager = SecretManagerBackend()
+        try:
+            for secret in secret_manager.get_last_secret_versions(secret_name=session_keys_secret):
+                key_dict[str(secret.creation_timestamp)] = secret.value
+        except SecretManagerException:
+            logger.exception("Error while building the session keyring")
+            key_dict = get_redis_client().hgetall(redis_key)
+
+        if not key_dict:
+            raise ValueError("Error while building the session keyring, no backup available in redis")
+
+        try:
+            get_redis_client().hset(redis_key, mapping=key_dict)  # type: ignore [arg-type]
+        except redis_exceptions.ConnectionError:
+            logger.warning("Could not connect to redis, session keyring fallback not updated")
+
+        flask.current_app.config["SECRET_KEY"] = key_dict.pop(  # the newest key will be used to sign new sessions
+            max(key_dict.keys())
+        )
+        flask.current_app.config["SECRET_KEY_FALLBACKS"] = list(
+            key_dict.values()
+        )  # all the other keys can be used as fallback
+
+        if default_session_key:
+            flask.current_app.config["SECRET_KEY_FALLBACKS"].append(default_session_key)
+    elif default_session_key:
+        flask.current_app.config["SECRET_KEY"] = default_session_key
+    else:
+        raise ValueError("A session key or a secret pointing on a list of session keys is needed")

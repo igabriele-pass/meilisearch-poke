@@ -1,0 +1,70 @@
+import * as yup from 'yup'
+
+import { checkCoords } from '@/commons/utils/coords'
+
+import { SiretOrCommentValidationSchema } from '../components/SiretOrCommentFields/validationSchema'
+
+export const venueSettingsValidationSchema = yup
+  .object()
+  .shape({
+    manuallySetAddress: yup.boolean().nullable(),
+    addressAutocomplete: yup
+      .string()
+      .when(['manuallySetAddress'], (vals, schema) => {
+        const [manuallySetAddress] = vals as [boolean]
+        if (!manuallySetAddress) {
+          return schema.required(
+            'Veuillez sélectionner une adresse parmi les suggestions'
+          )
+        }
+        return schema
+      }),
+    street: yup
+      .string()
+      .trim()
+      .required('Veuillez renseigner une adresse postale'),
+    postalCode: yup
+      .string()
+      .trim()
+      .required('Veuillez renseigner un code postal')
+      .min(5, 'Veuillez renseigner un code postal valide')
+      .max(5, 'Veuillez renseigner un code postal valide'),
+
+    city: yup.string().trim().required('Veuillez renseigner une ville'),
+    coords: yup
+      .string()
+      .trim()
+      .when(['manuallySetAddress'], (vals, schema) => {
+        const [manuallySetAddress] = vals as [boolean]
+        if (manuallySetAddress) {
+          return schema
+            .required('Veuillez renseigner les coordonnées GPS')
+            .test('coords', 'Veuillez respecter le format attendu', (value) =>
+              checkCoords(value)
+            )
+        }
+        return schema
+      }),
+    name: yup
+      .string()
+      .required(`Veuillez renseigner la raison sociale de votre structure`),
+    activity: yup
+      .string()
+      .nullable()
+      .required('Veuillez sélectionner une activité parmi les suggestions'),
+    culturalDomains: yup
+      .array()
+      .of(yup.string().defined())
+      .when('isOpenToPublic', {
+        is: (open: string) => open === 'false',
+        then: (schema) =>
+          schema.nullable().test({
+            name: 'has-at-least-one-domain',
+            message:
+              'Veuillez sélectionner un ou plusieurs domaines d’activité',
+            test: (value) => Boolean(value?.filter(Boolean).length),
+          }),
+        otherwise: (schema) => schema.nullable(),
+      }),
+  })
+  .concat(SiretOrCommentValidationSchema)

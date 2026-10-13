@@ -1,0 +1,47 @@
+{% from "components/presentation/details/tabs.html" import build_details_tab %}
+{% from "components/presentation/details/tabs.html" import build_details_tabs_wrapper %}
+{% from "components/presentation/details/tabs.html" import build_details_tab_content %}
+{% from "components/presentation/details/tabs.html" import build_details_tabs_content_wrapper %}
+{% from "components/dynamic/spinner.html" import build_loading_spinner with context %}
+{% extends "layouts/connected.html" %}
+{% block page %}
+  <div class="pt-3 px-5">
+    <h1>Synchronisation Pivot</h1>
+    <div class="mt-4">
+      {% call build_details_tabs_wrapper() %}
+        {{ build_details_tab("allocine", "Pivot Allociné", active_tab == 'allocine') }}
+        {{ build_details_tab("boost", "Pivot Boost", active_tab == 'boost') }}
+        {{ build_details_tab("cgr", "Pivot CGR", active_tab == 'cgr') }}
+        {{ build_details_tab("cineoffice", "Pivot Ciné Office", active_tab == 'cineoffice') }}
+        {{ build_details_tab("ems", "Pivot EMS", active_tab == 'ems') }}
+      {% endcall %}
+      {% call build_details_tabs_content_wrapper() %}
+        {% call build_details_tab_content("allocine", active_tab == 'allocine') %}
+          <div id="allocine_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.pivots.list_pivots', name='allocine') }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% call build_details_tab_content("boost", active_tab == 'boost') %}
+          <div id="boost_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.pivots.list_pivots', name='boost') }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% call build_details_tab_content("cgr", active_tab == 'cgr') %}
+          <div id="cgr_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.pivots.list_pivots', name='cgr') }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% call build_details_tab_content("cineoffice", active_tab == 'cineoffice') %}
+          <div id="cineoffice_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.pivots.list_pivots', name='cineoffice') }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+        {% call build_details_tab_content("ems", active_tab == 'ems') %}
+          <div id="ems_frame"
+               hx-trigger="intersect once"
+               hx-get="{{ url_for('backoffice.pivots.list_pivots', name='ems') }}">{{ build_loading_spinner() }}</div>
+        {% endcall %}
+      {% endcall %}
+    </div>
+  </div>
+{% endblock page %}

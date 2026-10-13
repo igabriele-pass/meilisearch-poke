@@ -1,0 +1,694 @@
+import { screen, waitFor } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { expect } from 'vitest'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import type {
+  GetVenueAddressResponseModel,
+  ListOffersOfferResponseModel,
+} from '@/apiClient/v1'
+import { OfferStatus, VenueState } from '@/apiClient/v1'
+import { HeadlineOfferContextProvider } from '@/commons/context/HeadlineOfferContext/HeadlineOfferContext'
+import {
+  ALL_OFFERER_ADDRESS_OPTION,
+  DEFAULT_SEARCH_FILTERS,
+} from '@/commons/core/Offers/constants'
+import { computeAddressDisplayName } from '@/commons/format/venuesService'
+import * as useSnackBar from '@/commons/hooks/useSnackBar'
+import {
+  getIndividualOfferFactory,
+  listOffersOfferFactory,
+} from '@/commons/utils/factories/individualApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import {
+  makeGetVenueResponseModel,
+  venueAddressFactory,
+} from '@/commons/utils/factories/venueFactories'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+
+import type { IndividualOffersFilters } from '../common/types'
+import {
+  IndividualOffersContainer,
+  type IndividualOffersContainerProps,
+} from './IndividualOffersContainer'
+
+const LABELS = {
+  nameSearchInput: /Nom de l’offre/,
+}
+
+const renderOffers = (
+  props: IndividualOffersContainerProps,
+  options?: RenderWithProvidersOptions
+) => {
+  const user = sharedCurrentUserFactory()
+  return renderWithProviders(
+    <HeadlineOfferContextProvider>
+      <IndividualOffersContainer {...props} />
+    </HeadlineOfferContextProvider>,
+
+    {
+      user,
+      storeOverrides: {
+        user: {
+          currentUser: user,
+          selectedPartnerVenue: makeGetVenueResponseModel({ id: 2 }),
+        },
+      },
+      ...options,
+    }
+  )
+}
+
+const categoriesAndSubcategories = {
+  categories: [
+    { id: 'CINEMA', proLabel: 'Cinéma', isSelectable: true },
+    { id: 'JEU', proLabel: 'Jeux', isSelectable: true },
+    { id: 'TECHNIQUE', proLabel: 'Technique', isSelectable: false },
+  ],
+  subcategories: [],
+}
+
+const venueAddress: GetVenueAddressResponseModel[] = [
+  venueAddressFactory(2, {
+    label: 'Label',
+  }),
+  venueAddressFactory(2, {
+    city: 'New York',
+  }),
+]
+const venueAddressOptions = [
+  { value: 1, label: 'Label - 1 rue de paris 75001 Paris' },
+  { value: 2, label: '1 rue de paris 75001 New York' },
+]
+
+vi.mock('@/commons/utils/date', async () => {
+  return {
+    ...(await vi.importActual('@/commons/utils/date')),
+    getToday: vi
+      .fn()
+      .mockImplementation(() => new Date('2020-12-15T12:00:00Z')),
+  }
+})
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getOffer: vi.fn(),
+    getVenueHeadlineOffer: vi.fn(),
+    upsertHeadlineOffer: vi.fn(),
+    deleteHeadlineOffer: vi.fn(),
+    listOfferersNames: vi.fn().mockReturnValue({}),
+    deleteDraftOffers: vi.fn(),
+    patchAllOffersActiveStatus: vi.fn(),
+  },
+}))
+
+describe('IndividualOffersScreen', () => {
+  let props: IndividualOffersContainerProps
+  let offersRecap: ListOffersOfferResponseModel[]
+
+  const snackBarError = vi.fn()
+  const snackBarSuccess = vi.fn()
+  beforeEach(async () => {
+    window.sessionStorage.clear()
+    offersRecap = [listOffersOfferFactory()]
+
+    props = {
+      currentPageNumber: 1,
+      isLoading: false,
+      offers: offersRecap,
+      initialSearchFilters: DEFAULT_SEARCH_FILTERS,
+      redirectWithSelectedFilters: vi.fn(),
+      venueAddresses: venueAddressOptions,
+      categories: categoriesAndSubcategories.categories.map(
+        ({ id, proLabel }) => ({ value: id, label: proLabel })
+      ),
+    }
+
+    const snackBarsImport = (await vi.importActual(
+      '@/commons/hooks/useSnackBar'
+    )) as ReturnType<typeof useSnackBar.useSnackBar>
+    vi.spyOn(useSnackBar, 'useSnackBar').mockImplementation(() => ({
+      ...snackBarsImport,
+      error: snackBarError,
+      success: snackBarSuccess,
+    }))
+  })
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderOffers(props)
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display column titles when offers are returned', () => {
+    renderOffers(props)
+
+    const headers = screen.getAllByRole('columnheader')
+    expect(headers[1].textContent).toEqual('Nom de l’offre')
+    expect(headers[2].textContent).toEqual('Localisation')
+    expect(headers[3].textContent).toEqual('Stocks')
+    expect(headers[4].textContent).toEqual('Publication')
+    expect(headers[5].textContent).toEqual('Réservations')
+    expect(headers[6].textContent).toEqual('Actions')
+  })
+
+  it('should display the Publication column', () => {
+    renderOffers(props)
+
+    expect(
+      screen.getByRole('columnheader', { name: 'Publication' })
+    ).toBeInTheDocument()
+  })
+
+  it('should render as much offers as returned by the api', () => {
+    const firstOffer = listOffersOfferFactory()
+    const secondOffer = listOffersOfferFactory()
+
+    renderOffers({
+      ...props,
+      offers: [firstOffer, secondOffer],
+    })
+
+    expect(screen.getByLabelText(firstOffer.name)).toBeInTheDocument()
+    expect(screen.getByLabelText(secondOffer.name)).toBeInTheDocument()
+  })
+
+  it('should display an unchecked by default checkbox to select all offers', () => {
+    const firstOffer = listOffersOfferFactory()
+    const secondOffer = listOffersOfferFactory()
+
+    renderOffers({
+      ...props,
+      offers: [firstOffer, secondOffer],
+    })
+
+    const selectAllOffersCheckbox = screen.queryByLabelText('Tout sélectionner')
+    expect(selectAllOffersCheckbox).toBeInTheDocument()
+    expect(selectAllOffersCheckbox).not.toBeChecked()
+    expect(selectAllOffersCheckbox).not.toBeDisabled()
+  })
+
+  it('should not display selection checkboxes when the selected venue is closed', () => {
+    const offer = listOffersOfferFactory()
+
+    renderOffers(
+      {
+        ...props,
+        offers: [offer],
+      },
+      {
+        storeOverrides: {
+          user: {
+            currentUser: sharedCurrentUserFactory(),
+            selectedPartnerVenue: makeGetVenueResponseModel({
+              id: 2,
+              state: VenueState.CLOSED,
+            }),
+          },
+        },
+      }
+    )
+
+    expect(screen.getByText(offer.name)).toBeVisible()
+    expect(screen.queryByLabelText('Tout sélectionner')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('checkbox', { name: offer.name })
+    ).not.toBeInTheDocument()
+  })
+
+  it('should display total number of offers in plural if multiple offers', () => {
+    renderOffers({
+      ...props,
+      offers: [...offersRecap, listOffersOfferFactory()],
+    })
+
+    screen.getByLabelText(offersRecap[0].name)
+    expect(screen.getByText('2 offres')).toBeInTheDocument()
+  })
+
+  it('should display total number of offers in singular if one or no offer', async () => {
+    renderOffers({
+      ...props,
+      offers: offersRecap,
+    })
+
+    screen.getByLabelText(offersRecap[0].name)
+    expect(await screen.findByText('1 offre')).toBeInTheDocument()
+  })
+
+  it('should display 100+ for total number of offers if more than 500 offers are fetched', async () => {
+    offersRecap = Array.from({ length: 101 }, () => listOffersOfferFactory())
+
+    renderOffers({
+      ...props,
+      offers: offersRecap,
+    })
+
+    screen.getByLabelText(offersRecap[0].name)
+    expect(await screen.findByText('100+ offres')).toBeInTheDocument()
+  })
+
+  it('should send correct information when filling filter fields', async () => {
+    const redirectWithSelectedFiltersSpy = vi.spyOn(
+      props,
+      'redirectWithSelectedFilters'
+    )
+
+    renderOffers(props)
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    const searchAndChecked = async (
+      params: Partial<IndividualOffersFilters>
+    ) => {
+      await userEvent.click(screen.getByRole('button', { name: 'Rechercher' }))
+      expect(redirectWithSelectedFiltersSpy).toHaveBeenCalled()
+      expect(redirectWithSelectedFiltersSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ...DEFAULT_SEARCH_FILTERS,
+          ...params,
+        })
+      )
+    }
+
+    await searchAndChecked({})
+
+    expect(
+      screen.getByRole('searchbox', {
+        name: LABELS.nameSearchInput,
+      })
+    ).toBeInTheDocument()
+
+    await userEvent.type(
+      screen.getByRole('searchbox', {
+        name: LABELS.nameSearchInput,
+      }),
+      'Test'
+    )
+
+    await searchAndChecked({ nameOrIsbn: 'Test' })
+
+    expect(screen.getByLabelText(/Localisation/)).toBeInTheDocument()
+    await userEvent.selectOptions(screen.getByLabelText(/Localisation/), '1')
+
+    await searchAndChecked({
+      nameOrIsbn: 'Test',
+      offererAddressId: 1,
+    })
+
+    await userEvent.selectOptions(screen.getByLabelText(/Localisation/), '2')
+
+    await userEvent.click(screen.getByText('Rechercher'))
+
+    await searchAndChecked({
+      nameOrIsbn: 'Test',
+      offererAddressId: 2,
+    })
+
+    expect(screen.getByLabelText(/Mode de création/)).toBeInTheDocument()
+
+    await userEvent.selectOptions(
+      screen.getByLabelText(/Mode de création/),
+      'imported'
+    )
+
+    await searchAndChecked({
+      nameOrIsbn: 'Test',
+      offererAddressId: 2,
+      creationMode: 'imported',
+    })
+
+    expect(screen.getByLabelText('Date de début')).toBeInTheDocument()
+    expect(screen.getByLabelText('Date de fin')).toBeInTheDocument()
+
+    const beginningDate = screen.getByLabelText('Date de début')
+    const endingDate = screen.getByLabelText('Date de fin')
+    await userEvent.type(beginningDate, '2025-02-02')
+    await userEvent.type(endingDate, '2025-02-03')
+    expect(beginningDate).toHaveValue('2025-02-02')
+    expect(endingDate).toHaveValue('2025-02-03')
+
+    await searchAndChecked({
+      nameOrIsbn: 'Test',
+      offererAddressId: 2,
+      creationMode: 'imported',
+      periodBeginningDate: '2025-02-02',
+      periodEndingDate: '2025-02-03',
+    })
+
+    expect(screen.getByRole('combobox', { name: 'Statut' })).toBeInTheDocument()
+    await userEvent.selectOptions(
+      screen.getByRole('combobox', { name: 'Statut' }),
+      OfferStatus.ACTIVE
+    )
+
+    await searchAndChecked({
+      nameOrIsbn: 'Test',
+      offererAddressId: 2,
+      creationMode: 'imported',
+      periodBeginningDate: '2025-02-02',
+      periodEndingDate: '2025-02-03',
+      status: OfferStatus.ACTIVE,
+    })
+
+    expect(screen.getByText(/Réinitialiser les filtres/)).toBeInTheDocument()
+    await userEvent.click(screen.getByText(/Réinitialiser les filtres/))
+
+    await searchAndChecked({})
+
+    redirectWithSelectedFiltersSpy.mockRestore()
+  })
+
+  it('should render offerer address filter with default option selected and given venues as options', async () => {
+    const expectedSelectOptions = [
+      {
+        id: [ALL_OFFERER_ADDRESS_OPTION.value],
+        value: ALL_OFFERER_ADDRESS_OPTION.label,
+      },
+      {
+        id: [venueAddress[0].id],
+        // TODO (amine) to remove once model migrated to Pydantic V2
+        // @ts-expect-error
+        value: computeAddressDisplayName(venueAddress[0]),
+      },
+      {
+        id: [venueAddress[1].id],
+        // TODO (amine) to remove once model migrated to Pydantic V2
+        // @ts-expect-error
+        value: computeAddressDisplayName(venueAddress[1]),
+      },
+    ]
+
+    renderOffers(props)
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    const addressSelect = screen.getByLabelText('Localisation')
+    expect(addressSelect).not.toBeDisabled()
+
+    const addressOptions = addressSelect.querySelectorAll('option')
+    expect(addressOptions).toHaveLength(expectedSelectOptions.length)
+  })
+
+  it('should render creation mode filter with given creation mode selected', async () => {
+    renderOffers({
+      ...props,
+      initialSearchFilters: {
+        ...DEFAULT_SEARCH_FILTERS,
+        creationMode: 'imported',
+      },
+    })
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    expect(screen.getByDisplayValue('Synchronisé')).toBeInTheDocument()
+  })
+
+  it('should allow user to select manual creation mode filter', async () => {
+    renderOffers(props)
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    const creationModeSelect = screen.getByLabelText('Mode de création')
+
+    await userEvent.selectOptions(creationModeSelect, 'Manuel')
+
+    expect(screen.getByDisplayValue('Manuel')).toBeInTheDocument()
+  })
+
+  it('should allow user to select imported creation mode filter', async () => {
+    renderOffers(props)
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    const creationModeSelect = screen.getByRole('combobox', {
+      name: 'Mode de création',
+    })
+
+    await userEvent.selectOptions(creationModeSelect, 'imported')
+
+    expect(screen.getByDisplayValue('Synchronisé')).toBeInTheDocument()
+  })
+
+  it('should display event period filter with no default option', async () => {
+    renderOffers(props)
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    expect(screen.getByLabelText('Date de début')).toBeVisible()
+    expect(screen.getByLabelText('Date de fin')).toBeVisible()
+  })
+
+  it('should not display status filters modal', async () => {
+    renderOffers(props)
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    expect(
+      screen.getByRole('combobox', {
+        name: 'Statut',
+      })
+    ).toBeInTheDocument()
+    expect(screen.queryByText('Afficher les offres')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Tous')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Publiée')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Désactivée')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Épuisée')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Expirée')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Appliquer')).not.toBeInTheDocument()
+    expect(
+      screen.queryByLabelText('Validation en attente')
+    ).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Refusée')).not.toBeInTheDocument()
+  })
+
+  it('should hide status filters when clicking outside the modal', async () => {
+    renderOffers(props)
+
+    await userEvent.click(screen.getByRole('button', { name: /Filtrer/ }))
+
+    await userEvent.click(
+      screen.getByRole('combobox', {
+        name: 'Statut',
+      })
+    )
+
+    await userEvent.click(screen.getByText('Rechercher'))
+
+    expect(screen.queryByText('Afficher les offres')).not.toBeInTheDocument()
+  })
+
+  it('should indicate that user has no offers yet', () => {
+    renderOffers({ ...props, offers: [] })
+
+    const noOffersText = screen.getByText('Vous n’avez pas encore créé d’offre')
+    expect(noOffersText).toBeInTheDocument()
+  })
+
+  it('should disabled checkbox when offer is rejected or pending for validation', () => {
+    const offers = [
+      listOffersOfferFactory({ status: OfferStatus.REJECTED }),
+      listOffersOfferFactory({ status: OfferStatus.PENDING }),
+      listOffersOfferFactory({ status: OfferStatus.ACTIVE }),
+    ]
+
+    renderOffers({
+      ...props,
+      offers: offers,
+    })
+
+    expect(screen.queryByLabelText(offers[0].name)).toBeDisabled()
+    expect(screen.queryByLabelText(offers[1].name)).toBeDisabled()
+    expect(screen.queryByLabelText(offers[2].name)).toBeEnabled()
+  })
+
+  it('should display actionsBar when at least one offer is selected', async () => {
+    renderOffers(props)
+
+    const checkbox = screen.getByLabelText(offersRecap[0].name)
+    await userEvent.click(checkbox)
+
+    const actionBar = await screen.findByTestId('actions-bar')
+    expect(actionBar).toBeInTheDocument()
+
+    await userEvent.click(checkbox)
+
+    expect(actionBar).not.toBeInTheDocument()
+  })
+
+  describe('on click on select all offers checkbox', () => {
+    it('should apply bulk actions to all pages when "Tout sélectionner" is used', async () => {
+      // Many offers to ensure multiple pages are implied
+      const manyOffers = Array.from({ length: 20 }, (_, i) =>
+        listOffersOfferFactory({
+          name: `Offer ${i + 1}`,
+          status: OfferStatus.INACTIVE,
+        })
+      )
+
+      const patchSpy = vi.spyOn(api, 'patchAllOffersActiveStatus')
+
+      renderOffers({
+        ...props,
+        offers: manyOffers,
+      })
+
+      // Select all across all pages
+      await userEvent.click(screen.getByLabelText('Tout sélectionner'))
+
+      // Trigger a bulk action that should target all selected offers (across pages)
+      await userEvent.click(screen.getByText('Publier'))
+
+      // Expect a bulk, filter-based call (not per-page / per-id)
+      expect(patchSpy).toHaveBeenCalledTimes(1)
+      expect(patchSpy).toHaveBeenCalledWith({
+        body: {
+          categoryId: undefined,
+          creationMode: undefined,
+          isActive: true,
+          nameOrIsbn: undefined,
+          offererAddressId: undefined,
+          offererId: undefined,
+          periodBeginningDate: undefined,
+          periodEndingDate: undefined,
+          status: undefined,
+          venueId: 2,
+        },
+      })
+    })
+
+    it('should activate only inactive offers when trying to activate draft or active offers', async () => {
+      const patchSpy = vi.spyOn(api, 'patchAllOffersActiveStatus')
+
+      const offers = [
+        listOffersOfferFactory({ status: OfferStatus.DRAFT }),
+        listOffersOfferFactory({ status: OfferStatus.ACTIVE }),
+        listOffersOfferFactory({ status: OfferStatus.INACTIVE }),
+      ]
+
+      renderOffers({
+        ...props,
+        offers: offers,
+      })
+
+      await userEvent.click(screen.getByLabelText('Tout sélectionner'))
+      await userEvent.click(screen.getByText('Publier'))
+
+      expect(snackBarSuccess).toHaveBeenCalledWith(
+        'Une offre est en cours d’activation, veuillez rafraichir dans quelques instants.',
+        expect.any(String)
+      )
+      expect(patchSpy).toHaveBeenCalledWith({
+        body: {
+          categoryId: undefined,
+          creationMode: undefined,
+          isActive: true,
+          nameOrIsbn: undefined,
+          offererAddressId: undefined,
+          offererId: undefined,
+          periodBeginningDate: undefined,
+          periodEndingDate: undefined,
+          status: undefined,
+          venueId: 2,
+        },
+      })
+    })
+
+    it('should check all validated offers checkboxes', async () => {
+      // Given
+      const offers = [
+        listOffersOfferFactory(),
+        listOffersOfferFactory(),
+        listOffersOfferFactory({ status: OfferStatus.REJECTED }),
+        listOffersOfferFactory({ status: OfferStatus.PENDING }),
+      ]
+
+      renderOffers({
+        ...props,
+        offers: offers,
+      })
+
+      const firstOfferCheckbox = screen.getByLabelText(offers[0].name)
+      const secondOfferCheckbox = screen.getByLabelText(offers[1].name)
+      const thirdOfferCheckbox = screen.getByLabelText(offers[2].name)
+      const fourthOfferCheckbox = screen.getByLabelText(offers[3].name)
+
+      await userEvent.click(screen.getByLabelText('Tout sélectionner'))
+
+      expect(firstOfferCheckbox).toBeChecked()
+      expect(secondOfferCheckbox).toBeChecked()
+      expect(thirdOfferCheckbox).toBeDisabled()
+      expect(fourthOfferCheckbox).toBeDisabled()
+
+      await userEvent.click(screen.getByLabelText('Tout désélectionner'))
+
+      expect(firstOfferCheckbox).not.toBeChecked()
+      expect(secondOfferCheckbox).not.toBeChecked()
+      expect(thirdOfferCheckbox).not.toBeChecked()
+      expect(fourthOfferCheckbox).not.toBeChecked()
+    })
+  })
+
+  it('should not display onboarding banner for archivage when we are in individual offer list ', () => {
+    renderOffers(props)
+
+    expect(
+      screen.queryByText(
+        'C’est nouveau ! Vous pouvez désormais archiver vos offres collectives.'
+      )
+    ).not.toBeInTheDocument()
+  })
+
+  it('should delete anyway even with active status', async () => {
+    vi.spyOn(api, 'deleteDraftOffers').mockResolvedValueOnce()
+
+    renderOffers({
+      ...props,
+      offers: [
+        listOffersOfferFactory({ status: OfferStatus.ACTIVE }),
+        listOffersOfferFactory({ status: OfferStatus.DRAFT }),
+        listOffersOfferFactory({ status: OfferStatus.DRAFT }),
+      ],
+    })
+
+    await userEvent.click(screen.getByLabelText('Tout sélectionner'))
+    await userEvent.click(screen.getByRole('button', { name: 'Supprimer' }))
+    await userEvent.click(screen.getByText('Supprimer ces brouillons'))
+
+    expect(api.deleteDraftOffers).toHaveBeenCalledTimes(1)
+    expect(snackBarSuccess).toHaveBeenCalledWith(
+      '2 brouillons ont bien été supprimés',
+      expect.any(String)
+    )
+  })
+
+  it('should display headline offer block when feature is available', async () => {
+    vi.spyOn(api, 'getVenueHeadlineOffer').mockResolvedValue({
+      id: 42,
+      name: 'My offer',
+      venueId: 1,
+    })
+    vi.spyOn(api, 'getOffer').mockResolvedValue(
+      getIndividualOfferFactory({ id: 42 })
+    )
+
+    renderOffers(props)
+
+    await waitFor(() => {
+      expect(screen.getByText('Votre offre à la une')).toBeInTheDocument()
+    })
+
+    expect(screen.getByText('My offer')).toBeInTheDocument()
+  })
+
+  it('should display the publication and booking columns', () => {
+    renderOffers({ ...props, offers: [listOffersOfferFactory()] })
+
+    expect(screen.getByText('Publication')).toBeInTheDocument()
+    expect(screen.getByText('Réservations')).toBeInTheDocument()
+  })
+})

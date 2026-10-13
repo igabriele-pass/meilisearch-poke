@@ -1,0 +1,855 @@
+import datetime
+import logging
+from dataclasses import asdict
+from operator import attrgetter
+from unittest.mock import patch
+
+import pytest
+import time_machine
+
+import pcapi.core.mails.testing as mails_testing
+from pcapi.core.finance import external
+from pcapi.core.finance import factories as finance_factories
+from pcapi.core.finance import models as finance_models
+from pcapi.core.finance.backend.base import ExternalType
+from pcapi.core.finance.backend.base import InvoicePayload
+from pcapi.core.finance.backend.base import SettlementPayload
+from pcapi.core.finance.backend.base import SettlementType
+from pcapi.core.finance.backend.dummy import DummyFinanceBackend
+from pcapi.core.finance.backend.dummy import bank_accounts as dummy_bank_accounts
+from pcapi.core.finance.backend.dummy import invoices as dummy_invoices
+from pcapi.core.finance.backend.dummy import invoices as test_invoices
+from pcapi.core.mails.transactional.brevo_template_ids import TransactionalEmail
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.models import db
+from pcapi.utils import date as date_utils
+
+
+pytestmark = [
+    pytest.mark.usefixtures("db_session", "clean_dummy_backend_data"),
+    pytest.mark.features(
+        ENABLE_BANK_ACCOUNT_SYNC=True,
+        ENABLE_INVOICE_SYNC=True,
+    ),
+]
+
+
+class PushBankAccountsTest:
+    def test_push_bank_accounts(self):
+        offerer = offerers_factories.OffererFactory(name="Association de coiffeurs", siren="853318459")
+        bank_account = finance_factories.BankAccountFactory(offerer=offerer)
+        assert bank_account.lastCegidSyncDate is None
+
+        now = date_utils.get_naive_utc_now()
+        with time_machine.travel(now, tick=False):
+            external.push_bank_accounts(10)
+        db.session.flush()
+        db.session.refresh(bank_account)
+        assert bank_account.lastCegidSyncDate == now
+        assert len(dummy_bank_accounts) == 1
+        assert dummy_bank_accounts[0] == bank_account
+
+
+class PushInvoicesTest:
+    def test_push_invoices(self):
+        batch = finance_factories.CashflowBatchFactory(cutoff=datetime.date(2026, 5, 30), label="VIRXXX")
+        invoice1 = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PENDING,
+            cashflows=[finance_factories.CashflowFactory(batch=batch)],
+            bankAccount=finance_factories.BankAccountFactory(),
+        )
+        invoice2 = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PAID, cashflows=[finance_factories.CashflowFactory(batch=batch)]
+        )
+        invoice3 = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+            cashflows=[finance_factories.CashflowFactory(batch=batch)],
+        )
+        free_invoice = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PENDING,
+            cashflows=[finance_factories.CashflowFactory(batch=batch)],
+            amount=0,
+        )
+
+        external.push_invoices(10)
+        db.session.flush()
+        db.session.refresh(invoice1)
+        db.session.refresh(invoice2)
+        db.session.refresh(invoice3)
+        db.session.refresh(free_invoice)
+        assert invoice1.status == finance_models.InvoiceStatus.PAID
+        assert invoice2.status == finance_models.InvoiceStatus.PAID
+        assert invoice3.status == finance_models.InvoiceStatus.PENDING_PAYMENT
+        assert free_invoice.status == finance_models.InvoiceStatus.PAID
+
+        assert sorted(dummy_invoices, key=attrgetter("invoice_id")) == [
+            InvoicePayload(
+                invoice_id=invoice1.id,
+                reference=invoice1.reference,
+                bank_account_id=str(invoice1.bankAccountId),
+                invoice_date=invoice1.date,
+                description="VIRXXX - 16/05-31/05",
+                invoice_external_type=ExternalType.INV,
+            ),
+            InvoicePayload(
+                invoice_id=free_invoice.id,
+                reference=free_invoice.reference,
+                bank_account_id=str(free_invoice.bankAccountId),
+                invoice_date=free_invoice.date,
+                description="VIRXXX - 16/05-31/05",
+                invoice_external_type=ExternalType.INV,
+            ),
+        ]
+
+    @pytest.mark.features(WIP_ENABLE_FINANCE_SETTLEMENTS=True)
+    def test_push_invoices_with_FF(self):
+        batch = finance_factories.CashflowBatchFactory(cutoff=datetime.date(2026, 5, 30), label="VIRXXX")
+        invoice1 = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PENDING, cashflows=[finance_factories.CashflowFactory(batch=batch)]
+        )
+        invoice2 = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PAID, cashflows=[finance_factories.CashflowFactory(batch=batch)]
+        )
+        invoice3 = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+            cashflows=[finance_factories.CashflowFactory(batch=batch)],
+        )
+        free_invoice = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PENDING,
+            cashflows=[finance_factories.CashflowFactory(batch=batch)],
+            amount=0,
+        )
+
+        external.push_invoices(10)
+        db.session.flush()
+        db.session.refresh(invoice1)
+        db.session.refresh(invoice2)
+        db.session.refresh(invoice3)
+        db.session.refresh(free_invoice)
+        assert invoice1.status == finance_models.InvoiceStatus.PENDING_PAYMENT
+        assert invoice2.status == finance_models.InvoiceStatus.PAID
+        assert invoice3.status == finance_models.InvoiceStatus.PENDING_PAYMENT
+        assert free_invoice.status == finance_models.InvoiceStatus.PAID
+
+        assert sorted(dummy_invoices, key=attrgetter("invoice_id")) == [
+            InvoicePayload(
+                invoice_id=invoice1.id,
+                reference=invoice1.reference,
+                bank_account_id=str(invoice1.bankAccountId),
+                invoice_date=invoice1.date,
+                description="VIRXXX - 16/05-31/05",
+                invoice_external_type=ExternalType.INV,
+            ),
+            InvoicePayload(
+                invoice_id=free_invoice.id,
+                reference=free_invoice.reference,
+                bank_account_id=str(free_invoice.bankAccountId),
+                invoice_date=free_invoice.date,
+                description="VIRXXX - 16/05-31/05",
+                invoice_external_type=ExternalType.INV,
+            ),
+        ]
+
+    @pytest.mark.settings(SLACK_GENERATE_INVOICES_FINISHED_CHANNEL="channel")
+    @patch("pcapi.core.internal_notifications.transactional.notify_invoices_finished.send_internal_message")
+    def test_push_invoices_sends_slack_notification(self, mock_send_internal_message):
+        invoices = finance_factories.InvoiceFactory.create_batch(
+            5, status=finance_models.InvoiceStatus.PENDING, cashflows=[finance_factories.CashflowFactory()]
+        )
+
+        external.push_invoices(10)
+        batch = invoices[0].cashflows[0].batch
+        assert mock_send_internal_message.call_count == 1
+
+        call_kwargs = mock_send_internal_message.call_args.kwargs
+        assert len(call_kwargs["blocks"]) == 1
+        call_block = call_kwargs["blocks"][0]
+        assert (
+            call_block["text"]["text"]
+            == f"L'envoi des factures du ({batch.label}) sur l'outil comptable est terminé avec succès"
+        )
+        assert call_block["text"]["type"] == "mrkdwn"
+        assert call_block["type"] == "section"
+
+        assert call_kwargs["channel"] == "channel"
+        assert call_kwargs["icon_emoji"] == ":large_green_circle:"
+
+    @pytest.mark.parametrize(
+        "check_value,expected_status",
+        [
+            (False, finance_models.InvoiceStatus.PENDING),
+            (True, finance_models.InvoiceStatus.PAID),
+        ],
+    )
+    def test_push_invoices_doesnt_run_during_work_hours(self, monkeypatch, check_value, expected_status):
+        invoice = finance_factories.InvoiceFactory(
+            status=finance_models.InvoiceStatus.PENDING, cashflows=[finance_factories.CashflowFactory()]
+        )
+
+        def check_can_push_invoice(self):
+            return check_value
+
+        monkeypatch.setattr(DummyFinanceBackend, "check_can_push_invoice", check_can_push_invoice)
+
+        external.push_invoices(0)
+        db.session.flush()
+        db.session.refresh(invoice)
+
+        assert invoice.status == expected_status
+
+
+class GetSettlementsTest:
+    def test_get_settlements(self):
+        now = date_utils.get_naive_utc_now()
+
+        first_bank_account = offerers_factories.VenueBankAccountLinkFactory(bankAccount__label="First").bankAccount
+        second_bank_account = offerers_factories.VenueBankAccountLinkFactory().bankAccount
+        other_bank_account = offerers_factories.VenueBankAccountLinkFactory().bankAccount
+        refund_bank_account = offerers_factories.VenueBankAccountLinkFactory().bankAccount
+        invoice = finance_factories.InvoiceFactory(
+            bankAccount=first_bank_account,
+            cashflows=[finance_factories.CashflowFactory()],
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+        )
+        other_invoice = finance_factories.InvoiceFactory(
+            bankAccount=other_bank_account,
+            cashflows=[finance_factories.CashflowFactory()],
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+        )
+        another_invoice = finance_factories.InvoiceFactory(
+            bankAccount=other_bank_account,
+            cashflows=[finance_factories.CashflowFactory()],
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+        )
+        refund_invoice = finance_factories.InvoiceFactory(
+            bankAccount=refund_bank_account,
+            cashflows=[finance_factories.CashflowFactory()],
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+        )
+        additional_bank_account = offerers_factories.VenueBankAccountLinkFactory(
+            bankAccount__label="Additional"
+        ).bankAccount
+        old_additional_ba_status_history = finance_factories.BankAccountStatusHistoryFactory(
+            bankAccount=additional_bank_account,
+            status=finance_models.BankAccountApplicationStatus.ACCEPTED,
+            timespan=[
+                now - datetime.timedelta(days=2),
+            ],
+        )
+        additional_invoice = finance_factories.InvoiceFactory(
+            bankAccount=additional_bank_account,
+            cashflows=[finance_factories.CashflowFactory()],
+            status=finance_models.InvoiceStatus.PAID,
+        )
+        existing_settlement = finance_factories.SettlementFactory(
+            bankAccount=additional_bank_account,
+            amount=-30000,
+            settlementDate=datetime.date.today() - datetime.timedelta(days=5),
+            invoices=[additional_invoice],
+            status=finance_models.SettlementStatus.EXECUTED,
+            batch__dateValidated=datetime.date.today() - datetime.timedelta(days=4),
+        )
+
+        mock_get_settlements_payload = [
+            SettlementPayload(
+                bank_account_id=first_bank_account.id,
+                external_settlement_id="0032596",
+                invoice_external_reference=invoice.reference,
+                settlement_type=SettlementType.PAYMENT,
+                settlement_batch_external_id=existing_settlement.batch.externalId,
+                settlement_batch_name=existing_settlement.batch.name,
+                settlement_batch_label=existing_settlement.batch.label,
+                settlement_date=date_utils.get_naive_utc_now().date(),
+                amount=-98280,
+            ),
+            SettlementPayload(
+                bank_account_id=first_bank_account.id,
+                external_settlement_id="0032596",
+                invoice_external_reference=invoice.reference,
+                settlement_type=SettlementType.VOIDED_PAYMENT,
+                settlement_batch_external_id=existing_settlement.batch.externalId,
+                settlement_batch_name=existing_settlement.batch.name,
+                settlement_batch_label=existing_settlement.batch.label,
+                settlement_date=date_utils.get_naive_utc_now().date(),
+                amount=98280,
+            ),
+            SettlementPayload(
+                bank_account_id=second_bank_account.id,
+                external_settlement_id="0032598",
+                invoice_external_reference=invoice.reference,
+                settlement_type=SettlementType.PAYMENT,
+                settlement_batch_external_id=existing_settlement.batch.externalId,
+                settlement_batch_name=existing_settlement.batch.name,
+                settlement_batch_label=existing_settlement.batch.label,
+                settlement_date=date_utils.get_naive_utc_now().date(),
+                amount=-98280,
+            ),
+            SettlementPayload(
+                bank_account_id=other_bank_account.id,
+                external_settlement_id="0052634",
+                invoice_external_reference=other_invoice.reference,
+                settlement_type=SettlementType.PAYMENT,
+                settlement_batch_external_id=existing_settlement.batch.externalId,
+                settlement_batch_name=existing_settlement.batch.name,
+                settlement_batch_label=existing_settlement.batch.label,
+                settlement_date=date_utils.get_naive_utc_now().date(),
+                amount=-45000,
+            ),
+            SettlementPayload(
+                bank_account_id=other_bank_account.id,
+                external_settlement_id="0052634",
+                invoice_external_reference=another_invoice.reference,
+                settlement_type=SettlementType.PAYMENT,
+                settlement_batch_external_id=existing_settlement.batch.externalId,
+                settlement_batch_name=existing_settlement.batch.name,
+                settlement_batch_label=existing_settlement.batch.label,
+                settlement_date=date_utils.get_naive_utc_now().date(),
+                amount=-45000,
+            ),
+            SettlementPayload(
+                bank_account_id=additional_bank_account.id,
+                external_settlement_id=existing_settlement.externalSettlementId,
+                invoice_external_reference=additional_invoice.reference,
+                settlement_type=SettlementType.VOIDED_PAYMENT,
+                settlement_batch_external_id=existing_settlement.batch.externalId,
+                settlement_batch_name=existing_settlement.batch.name,
+                settlement_batch_label=existing_settlement.batch.label,
+                settlement_date=date_utils.get_naive_utc_now().date(),
+                amount=30000,
+            ),
+            SettlementPayload(
+                bank_account_id=refund_bank_account.id,
+                external_settlement_id="0052640",
+                invoice_external_reference=refund_invoice.reference,
+                settlement_type=SettlementType.REFUND,
+                settlement_batch_external_id="UNKNOWN",
+                settlement_batch_name="UNKNOWN",
+                settlement_batch_label="UNKNOWN",
+                settlement_date=date_utils.get_naive_utc_now().date(),
+                amount=7000,
+            ),
+        ]
+
+        with patch(
+            "pcapi.core.finance.backend.dummy.DummyFinanceBackend.get_settlements",
+            return_value=mock_get_settlements_payload,
+        ):
+            external.sync_settlements(datetime.date.today(), datetime.date.today())
+
+        assert db.session.query(finance_models.SettlementBatch).count() == 1
+        settlement_batch = db.session.query(finance_models.SettlementBatch).one()
+
+        assert db.session.query(finance_models.Settlement).count() == 5
+
+        first_settlement = (
+            db.session.query(finance_models.Settlement)
+            .filter(
+                finance_models.Settlement.externalSettlementId == "0032596",
+                finance_models.Settlement.bankAccountId == first_bank_account.id,
+            )
+            .one()
+        )
+        assert first_settlement.invoices == [invoice]
+        assert first_settlement.settlementDate == datetime.date.today()
+        assert first_settlement.dateImported.timestamp() == pytest.approx(now.timestamp(), rel=1)
+        assert first_settlement.dateRejected.timestamp() == pytest.approx(now.timestamp(), rel=1)
+        assert first_settlement.amount == -98280
+        assert first_settlement.status == finance_models.SettlementStatus.REJECTED
+        assert first_settlement.batch == settlement_batch
+        assert first_bank_account.venueLinks[0].timespan.upper is not None
+        assert first_bank_account.status == finance_models.BankAccountApplicationStatus.REFUSED
+        assert first_bank_account.label == "REJET BANCAIRE - First"
+        assert (
+            db.session.query(finance_models.BankAccountStatusHistory)
+            .filter(finance_models.BankAccountStatusHistory.bankAccountId == first_bank_account.id)
+            .count()
+            == 1
+        )
+        first_ba_status_history = (
+            db.session.query(finance_models.BankAccountStatusHistory)
+            .filter(finance_models.BankAccountStatusHistory.bankAccountId == first_bank_account.id)
+            .one()
+        )
+        assert first_ba_status_history.status == finance_models.BankAccountApplicationStatus.REFUSED
+        assert first_ba_status_history.timespan.lower.timestamp() == pytest.approx(now.timestamp(), rel=1)
+
+        second_settlement = (
+            db.session.query(finance_models.Settlement)
+            .filter(
+                finance_models.Settlement.externalSettlementId == "0032598",
+                finance_models.Settlement.bankAccountId == second_bank_account.id,
+            )
+            .one()
+        )
+        assert second_settlement.invoices == [invoice]
+        assert second_settlement.settlementDate == datetime.date.today()
+        assert second_settlement.dateImported.timestamp() == pytest.approx(now.timestamp(), rel=1)
+        assert second_settlement.dateRejected is None
+        assert second_settlement.amount == -98280
+        assert second_settlement.status == finance_models.SettlementStatus.ISSUED
+        assert second_settlement.batch == settlement_batch
+        assert invoice.status == finance_models.InvoiceStatus.PENDING_PAYMENT
+        assert second_bank_account.venueLinks[0].timespan.upper is None
+        assert second_bank_account.status == finance_models.BankAccountApplicationStatus.ACCEPTED
+
+        other_settlement = (
+            db.session.query(finance_models.Settlement)
+            .filter(
+                finance_models.Settlement.externalSettlementId == "0052634",
+                finance_models.Settlement.bankAccountId == other_bank_account.id,
+            )
+            .one()
+        )
+        assert set(other_settlement.invoices) == {other_invoice, another_invoice}
+        assert other_settlement.settlementDate == datetime.date.today()
+        assert other_settlement.dateImported.timestamp() == pytest.approx(now.timestamp(), rel=1)
+        assert other_settlement.dateRejected is None
+        assert other_settlement.amount == -45000
+        assert other_settlement.status == finance_models.SettlementStatus.ISSUED
+        assert other_settlement.batch == settlement_batch
+        assert other_invoice.status == finance_models.InvoiceStatus.PENDING_PAYMENT
+        assert another_invoice.status == finance_models.InvoiceStatus.PENDING_PAYMENT
+        assert other_bank_account.venueLinks[0].timespan.upper is None
+        assert other_bank_account.status == finance_models.BankAccountApplicationStatus.ACCEPTED
+
+        assert existing_settlement.dateRejected.timestamp() == pytest.approx(now.timestamp(), rel=1)
+        assert existing_settlement.status == finance_models.SettlementStatus.REJECTED
+        assert additional_invoice.status == finance_models.InvoiceStatus.PENDING_PAYMENT
+        assert additional_bank_account.venueLinks[0].timespan.upper is not None
+        assert additional_bank_account.status == finance_models.BankAccountApplicationStatus.REFUSED
+        assert additional_bank_account.label == "REJET BANCAIRE - Additional"
+        assert (
+            db.session.query(finance_models.BankAccountStatusHistory)
+            .filter(finance_models.BankAccountStatusHistory.bankAccountId == additional_bank_account.id)
+            .count()
+            == 2
+        )
+        assert old_additional_ba_status_history.timespan.upper.timestamp() == pytest.approx(now.timestamp(), rel=1)
+        new_additional_ba_status_history = (
+            db.session.query(finance_models.BankAccountStatusHistory)
+            .filter(
+                finance_models.BankAccountStatusHistory.bankAccountId == first_bank_account.id,
+                finance_models.BankAccountStatusHistory.id != old_additional_ba_status_history.id,
+            )
+            .one()
+        )
+        assert new_additional_ba_status_history.status == finance_models.BankAccountApplicationStatus.REFUSED
+        assert new_additional_ba_status_history.timespan.lower.timestamp() == pytest.approx(now.timestamp(), rel=1)
+
+        refund_settlement = (
+            db.session.query(finance_models.Settlement)
+            .filter(
+                finance_models.Settlement.externalSettlementId == "0052640",
+                finance_models.Settlement.bankAccountId == refund_bank_account.id,
+            )
+            .one()
+        )
+        assert refund_settlement.invoices == [refund_invoice]
+        assert refund_settlement.settlementDate == datetime.date.today()
+        assert refund_settlement.dateImported.timestamp() == pytest.approx(now.timestamp(), rel=1)
+        assert refund_settlement.dateRejected is None
+        assert refund_settlement.amount == 7000
+        assert refund_settlement.status == finance_models.SettlementStatus.EXECUTED
+        assert refund_settlement.batch is None
+        assert refund_invoice.status == finance_models.InvoiceStatus.PAID
+
+        assert len(mails_testing.outbox) == 3
+        assert mails_testing.outbox[0]["To"] == refund_bank_account.venueLinks[0].venue.bookingEmail
+        assert mails_testing.outbox[0]["template"] == asdict(TransactionalEmail.REFUND_SETTLEMENT_RECEIVED.value)
+        assert mails_testing.outbox[0]["params"] == {
+            "FORMATTED_MONTANT_REMBOURSEMENT": "70 €",
+            "SETTLEMENT_DATE": date_utils.get_date_formatted_for_email(refund_settlement.settlementDate),
+            "REFERENCE": refund_invoice.reference,
+        }
+
+        assert mails_testing.outbox[1]["To"] == first_bank_account.venueLinks[0].venue.bookingEmail
+        assert mails_testing.outbox[1]["template"] == asdict(TransactionalEmail.SETTLEMENT_REJECTED.value)
+        assert mails_testing.outbox[1]["params"] == {
+            "DATE_VIREMENT": date_utils.get_date_formatted_for_email(existing_settlement.batch.dateValidated)
+        }
+
+        assert mails_testing.outbox[2]["To"] == additional_bank_account.venueLinks[0].venue.bookingEmail
+        assert mails_testing.outbox[2]["template"] == asdict(TransactionalEmail.SETTLEMENT_REJECTED.value)
+        assert mails_testing.outbox[2]["params"] == {
+            "DATE_VIREMENT": date_utils.get_date_formatted_for_email(existing_settlement.batch.dateValidated)
+        }
+
+    def test_get_settlements_create_new_batch(self):
+        bank_account = offerers_factories.VenueBankAccountLinkFactory().bankAccount
+        invoice = finance_factories.InvoiceFactory(
+            bankAccount=bank_account,
+            cashflows=[finance_factories.CashflowFactory()],
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+        )
+        now = date_utils.get_naive_utc_now()
+        yesterday_datetime = now - datetime.timedelta(days=1)
+        yesterday_date = yesterday_datetime.date()
+
+        with patch(
+            "pcapi.core.finance.backend.dummy.DummyFinanceBackend.get_settlements",
+            return_value=[
+                SettlementPayload(
+                    bank_account_id=bank_account.id,
+                    external_settlement_id="0032596",
+                    invoice_external_reference=invoice.reference,
+                    settlement_type=SettlementType.PAYMENT,
+                    settlement_batch_external_id="123456",
+                    settlement_batch_name="VIR123",
+                    settlement_batch_label="VIR123 Label",
+                    settlement_date=yesterday_date,
+                    amount=10000,
+                )
+            ],
+        ):
+            external.sync_settlements(yesterday_date, yesterday_date)
+
+        settlement_batch = db.session.query(finance_models.SettlementBatch).one()
+        assert settlement_batch.externalId == "123456"
+        assert settlement_batch.name == "VIR123"
+        assert settlement_batch.label == "VIR123 Label"
+        assert settlement_batch.dateImported.timestamp() == pytest.approx(now.timestamp(), rel=1)
+        assert settlement_batch.dateValidated is None
+
+        settlement = db.session.query(finance_models.Settlement).one()
+        assert settlement.invoices == [invoice]
+        assert settlement.settlementDate == yesterday_date
+        assert settlement.batch == settlement_batch
+
+        assert invoice.status == finance_models.InvoiceStatus.PENDING_PAYMENT
+        assert bank_account.venueLinks[0].timespan.upper is None
+
+    def test_get_settlements_ignore_when_no_bank_account_found(self, caplog):
+        invoice = finance_factories.InvoiceFactory()
+        settlement_batch = finance_factories.SettlementBatchFactory()
+
+        now = date_utils.get_naive_utc_now()
+
+        mock_get_settlements_payload = [
+            SettlementPayload(
+                bank_account_id=12345678,
+                external_settlement_id="0032596",
+                invoice_external_reference=invoice.reference,
+                settlement_type=SettlementType.PAYMENT,
+                settlement_batch_external_id=settlement_batch.externalId,
+                settlement_batch_name=settlement_batch.name,
+                settlement_batch_label=settlement_batch.label,
+                settlement_date=now.date(),
+                amount=30000,
+            )
+        ]
+
+        with patch(
+            "pcapi.core.finance.backend.dummy.DummyFinanceBackend.get_settlements",
+            return_value=mock_get_settlements_payload,
+        ):
+            external.sync_settlements(datetime.date.today(), datetime.date.today())
+
+        assert db.session.query(finance_models.Settlement).count() == 0
+
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelname == "WARNING"
+        assert caplog.records[0].message == "No bank account found on our side for this bank account id"
+
+    def test_get_settlements_ignore_when_no_invoice_found(self, caplog):
+        bank_account = finance_factories.BankAccountFactory()
+        settlement_batch = finance_factories.SettlementBatchFactory()
+
+        now = date_utils.get_naive_utc_now()
+
+        mock_get_settlements_payload = [
+            SettlementPayload(
+                bank_account_id=bank_account.id,
+                external_settlement_id="0032597",
+                invoice_external_reference="FINCONNUE",
+                settlement_type=SettlementType.PAYMENT,
+                settlement_batch_external_id=settlement_batch.externalId,
+                settlement_batch_name=settlement_batch.name,
+                settlement_batch_label=settlement_batch.label,
+                settlement_date=now.date(),
+                amount=30000,
+            )
+        ]
+
+        with patch(
+            "pcapi.core.finance.backend.dummy.DummyFinanceBackend.get_settlements",
+            return_value=mock_get_settlements_payload,
+        ):
+            with caplog.at_level(logging.INFO):
+                external.sync_settlements(datetime.date.today(), datetime.date.today())
+
+        assert db.session.query(finance_models.Settlement).count() == 0
+
+        assert len(caplog.records) == 2
+        assert caplog.records[0].levelname == "INFO"
+        assert caplog.records[0].message == "get_settlements called"
+        assert caplog.records[1].levelname == "INFO"
+        assert caplog.records[1].message == "No invoice found on our side for this reference"
+
+    def test_get_settlements_ignore_when_no_batch_found(self, caplog):
+        bank_account = finance_factories.BankAccountFactory()
+        invoice = finance_factories.InvoiceFactory(
+            bankAccount=bank_account,
+            cashflows=[finance_factories.CashflowFactory()],
+        )
+
+        now = date_utils.get_naive_utc_now()
+
+        mock_get_settlements_payload = [
+            SettlementPayload(
+                bank_account_id=bank_account.id,
+                external_settlement_id="0032597",
+                invoice_external_reference=invoice.reference,
+                settlement_type=SettlementType.PAYMENT,
+                settlement_batch_external_id=None,
+                settlement_batch_name=None,
+                settlement_batch_label=None,
+                settlement_date=now.date(),
+                amount=30000,
+            )
+        ]
+
+        with patch(
+            "pcapi.core.finance.backend.dummy.DummyFinanceBackend.get_settlements",
+            return_value=mock_get_settlements_payload,
+        ):
+            external.sync_settlements(datetime.date.today(), datetime.date.today())
+
+        assert db.session.query(finance_models.Settlement).count() == 0
+
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelname == "WARNING"
+        assert caplog.records[0].message == "No settlement batch in the payload"
+
+    def test_get_settlements_ignore_when_no_payment_settlement_found(self, caplog):
+        bank_account = finance_factories.BankAccountFactory()
+        invoice = finance_factories.InvoiceFactory(bankAccount=bank_account)
+        settlement_batch = finance_factories.SettlementBatchFactory()
+
+        now = date_utils.get_naive_utc_now()
+
+        mock_get_settlements_payload = [
+            SettlementPayload(
+                bank_account_id=bank_account.id,
+                external_settlement_id="0032597",
+                invoice_external_reference=invoice.reference,
+                settlement_type=SettlementType.VOIDED_PAYMENT,
+                settlement_batch_external_id=settlement_batch.externalId,
+                settlement_batch_name=settlement_batch.name,
+                settlement_batch_label=settlement_batch.label,
+                settlement_date=now.date(),
+                amount=-30000,
+            )
+        ]
+
+        with patch(
+            "pcapi.core.finance.backend.dummy.DummyFinanceBackend.get_settlements",
+            return_value=mock_get_settlements_payload,
+        ):
+            external.sync_settlements(datetime.date.today(), datetime.date.today())
+
+        assert db.session.query(finance_models.Settlement).count() == 0
+
+        assert len(caplog.records) == 1
+        assert caplog.records[0].levelname == "WARNING"
+        assert caplog.records[0].message == "No settlement to cancel found"
+
+
+class TransferDebtAfterRejectedSettlementsTest:
+    def test_transfer_debt_after_rejected_settlements(self):
+        now = date_utils.get_naive_utc_now()
+        day_1 = now - datetime.timedelta(days=45)
+        day_2 = now - datetime.timedelta(days=30)
+        day_3 = now - datetime.timedelta(days=10)
+        day_4 = now - datetime.timedelta(days=5)
+        day_5 = now - datetime.timedelta(days=2)
+
+        venue = offerers_factories.VenueFactory()
+        venue_2 = offerers_factories.VenueFactory(managingOfferer=venue.managingOfferer)
+
+        old_ba = offerers_factories.VenueBankAccountLinkFactory(
+            venue=venue,
+            timespan=(day_1, day_4),
+        ).bankAccount
+        offerers_factories.VenueBankAccountLinkFactory(venue=venue_2, timespan=(day_1, day_3))
+        paid_invoice = finance_factories.InvoiceFactory(date=day_2, status=finance_models.InvoiceStatus.PAID)
+        pending_invoice_1 = finance_factories.InvoiceFactory(
+            date=day_3, status=finance_models.InvoiceStatus.PENDING_PAYMENT
+        )
+        pending_invoice_2 = finance_factories.InvoiceFactory(
+            date=day_3, status=finance_models.InvoiceStatus.PENDING_PAYMENT
+        )
+        offerers_factories.VenueBankAccountLinkFactory(venue=venue_2, timespan=(day_3,))
+        offerers_factories.VenueBankAccountLinkFactory(venue=venue, timespan=(day_4, day_5))
+        new_ba = offerers_factories.VenueBankAccountLinkFactory(venue=venue, timespan=(day_5,)).bankAccount
+
+        finance_factories.SettlementFactory(
+            bankAccount=old_ba, invoices=[paid_invoice], status=finance_models.SettlementStatus.EXECUTED
+        )
+        finance_factories.SettlementFactory(
+            bankAccount=old_ba, invoices=[pending_invoice_1], status=finance_models.SettlementStatus.ISSUED
+        )
+        finance_factories.SettlementFactory(
+            bankAccount=old_ba, invoices=[pending_invoice_2], status=finance_models.SettlementStatus.REJECTED
+        )
+
+        external.transfer_debt_after_rejected_settlements()
+
+        assert len(test_invoices) == 2
+        for payload in test_invoices:
+            assert isinstance(payload, InvoicePayload)
+            assert payload.invoice_id == pending_invoice_2.id
+            assert payload.invoice_date.timestamp() == pytest.approx(now.timestamp(), rel=1)
+            assert (
+                payload.description
+                == f"REC_{pending_invoice_2.reference} - Changement BA de {old_ba.id} \xe0 {new_ba.id}"
+            )
+        assert test_invoices[0].reference == f"{pending_invoice_2.reference}_A"
+        assert test_invoices[0].bank_account_id == str(old_ba.id)
+        assert test_invoices[0].invoice_external_type == ExternalType.ADR.value
+        assert test_invoices[1].reference == f"{pending_invoice_2.reference}_R"
+        assert test_invoices[1].bank_account_id == str(new_ba.id)
+        assert test_invoices[1].invoice_external_type == ExternalType.ACR.value
+
+    def test_transfer_debt_select_first_link_which_replaces(self):
+        now = date_utils.get_naive_utc_now()
+        day_1 = now - datetime.timedelta(days=45)
+        day_2 = now - datetime.timedelta(days=30)
+        day_3 = now - datetime.timedelta(days=10)
+        day_4 = now - datetime.timedelta(days=5)
+
+        old_ba = finance_factories.BankAccountFactory()
+        venue_1 = offerers_factories.VenueFactory(managingOfferer=old_ba.offerer)
+        venue_2 = offerers_factories.VenueFactory(managingOfferer=old_ba.offerer)
+        offerers_factories.VenueBankAccountLinkFactory(venue=venue_1, bankAccount=old_ba, timespan=(day_1, day_4))
+        offerers_factories.VenueBankAccountLinkFactory(venue=venue_2, bankAccount=old_ba, timespan=(day_1, day_3))
+        invoice = finance_factories.InvoiceFactory(date=day_2, status=finance_models.InvoiceStatus.PENDING_PAYMENT)
+        offerers_factories.VenueBankAccountLinkFactory(venue=venue_2, timespan=(day_3,))
+        new_ba = offerers_factories.VenueBankAccountLinkFactory(venue=venue_1, timespan=(day_4,)).bankAccount
+        finance_factories.SettlementFactory(
+            bankAccount=old_ba, invoices=[invoice], status=finance_models.SettlementStatus.REJECTED
+        )
+
+        external.transfer_debt_after_rejected_settlements()
+
+        assert len(test_invoices) == 2
+        for payload in test_invoices:
+            assert isinstance(payload, InvoicePayload)
+            assert payload.invoice_id == invoice.id
+            assert payload.invoice_date.timestamp() == pytest.approx(now.timestamp(), rel=1)
+            assert payload.description == f"REC_{invoice.reference} - Changement BA de {old_ba.id} \xe0 {new_ba.id}"
+        assert test_invoices[0].reference == f"{invoice.reference}_A"
+        assert test_invoices[0].bank_account_id == str(old_ba.id)
+        assert test_invoices[0].invoice_external_type == ExternalType.ADR.value
+        assert test_invoices[1].reference == f"{invoice.reference}_R"
+        assert test_invoices[1].bank_account_id == str(new_ba.id)
+        assert test_invoices[1].invoice_external_type == ExternalType.ACR.value
+
+    @pytest.mark.parametrize("timespan_end", [None, date_utils.get_naive_utc_now() - datetime.timedelta(days=10)])
+    def test_transfer_debt_no_new_bank_account(self, timespan_end):
+        venue = offerers_factories.VenueFactory()
+        old_ba = offerers_factories.VenueBankAccountLinkFactory(
+            venue=venue, timespan=(date_utils.get_naive_utc_now() - datetime.timedelta(days=60), timespan_end)
+        ).bankAccount
+        invoice = finance_factories.InvoiceFactory(
+            date=date_utils.get_naive_utc_now() - datetime.timedelta(days=15),
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+        )
+        finance_factories.SettlementFactory(
+            bankAccount=old_ba, invoices=[invoice], status=finance_models.SettlementStatus.REJECTED
+        )
+
+        external.transfer_debt_after_rejected_settlements()
+
+        assert len(test_invoices) == 0
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            status
+            for status in finance_models.BankAccountApplicationStatus
+            if status != finance_models.BankAccountApplicationStatus.ACCEPTED
+        ],
+    )
+    def test_transfer_debt_new_bank_account_not_accepted(self, status):
+        now = date_utils.get_naive_utc_now()
+        venue = offerers_factories.VenueFactory()
+        old_ba = offerers_factories.VenueBankAccountLinkFactory(
+            venue=venue,
+            timespan=(now - datetime.timedelta(days=60), now - datetime.timedelta(days=10)),
+        ).bankAccount
+        invoice = finance_factories.InvoiceFactory(
+            date=now - datetime.timedelta(days=15),
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+        )
+        finance_factories.SettlementFactory(
+            bankAccount=old_ba, invoices=[invoice], status=finance_models.SettlementStatus.REJECTED
+        )
+        offerers_factories.VenueBankAccountLinkFactory(
+            venue=venue, bankAccount__status=status, timespan=(now - datetime.timedelta(days=10),)
+        )
+
+        external.transfer_debt_after_rejected_settlements()
+
+        assert len(test_invoices) == 0
+
+    def test_transfer_debt_new_bank_account_does_not_replace_old(self):
+        now = date_utils.get_naive_utc_now()
+        venue_1 = offerers_factories.VenueFactory()
+        venue_2 = offerers_factories.VenueFactory()
+        old_ba = offerers_factories.VenueBankAccountLinkFactory(
+            venue=venue_1, timespan=(now - datetime.timedelta(days=60), now - datetime.timedelta(days=10))
+        ).bankAccount
+        invoice = finance_factories.InvoiceFactory(
+            date=now - datetime.timedelta(days=15),
+            status=finance_models.InvoiceStatus.PENDING_PAYMENT,
+        )
+        finance_factories.SettlementFactory(
+            bankAccount=old_ba, invoices=[invoice], status=finance_models.SettlementStatus.REJECTED
+        )
+        offerers_factories.VenueBankAccountLinkFactory(venue=venue_2, timespan=(now - datetime.timedelta(days=10),))
+
+        external.transfer_debt_after_rejected_settlements()
+
+        assert len(test_invoices) == 0
+
+
+class ExternalFinanceCommandTest:
+    def test_push_bank_accounts_command(self, run_command, mocker):
+        push_bank_accounts_mock = mocker.patch("pcapi.core.finance.external.push_bank_accounts")
+        run_command("push_bank_accounts", raise_on_error=True)
+
+        assert push_bank_accounts_mock.call_count == 1
+
+    @pytest.mark.features(ENABLE_BANK_ACCOUNT_SYNC=False)
+    def test_push_bank_accounts_command_feature_toggle(self, run_command, mocker):
+        push_bank_accounts_mock = mocker.patch("pcapi.core.finance.external.push_bank_accounts")
+        run_command("push_bank_accounts", raise_on_error=True)
+
+        assert push_bank_accounts_mock.call_count == 0
+
+    def test_push_invoices_command(self, run_command, mocker):
+        push_invoices_mock = mocker.patch("pcapi.core.finance.external.push_invoices")
+        run_command("push_invoices", raise_on_error=True)
+
+        assert push_invoices_mock.call_count == 1
+
+    @pytest.mark.features(ENABLE_INVOICE_SYNC=False)
+    def test_push_invoices_command_feature_toggle(self, run_command, mocker):
+        push_invoices_mock = mocker.patch("pcapi.core.finance.external.push_invoices")
+        run_command("push_invoices", raise_on_error=True)
+
+        assert push_invoices_mock.call_count == 0
+
+    @pytest.mark.features(WIP_ENABLE_FINANCE_SETTLEMENTS=True)
+    def test_sync_settlements_command(self, run_command, mocker):
+        sync_settlements_mock = mocker.patch("pcapi.core.finance.external.sync_settlements")
+        run_command("sync_settlements", raise_on_error=True)
+
+        assert sync_settlements_mock.call_count == 1
+
+    @pytest.mark.features(WIP_ENABLE_FINANCE_SETTLEMENTS=False)
+    def test_sync_settlements_command_feature_toggle(self, run_command, mocker):
+        sync_settlements_mock = mocker.patch("pcapi.core.finance.external.sync_settlements")
+        run_command("sync_settlements", raise_on_error=True)
+
+        assert sync_settlements_mock.call_count == 0

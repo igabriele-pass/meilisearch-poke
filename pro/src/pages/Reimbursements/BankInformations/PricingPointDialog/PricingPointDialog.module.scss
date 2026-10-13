@@ -1,0 +1,24 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_size.scss" as size;
+
+.dialog {
+  flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+
+  &-form {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    justify-content: space-between;
+  }
+}
+
+.callout {
+  margin: var(--size-spacing-l) 0 var(--size-spacing-xxl) 0;
+}
+
+.venues-select {
+  margin-bottom: var(--size-spacing-xl);
+}

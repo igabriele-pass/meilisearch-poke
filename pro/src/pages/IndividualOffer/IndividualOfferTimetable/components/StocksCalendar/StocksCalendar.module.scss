@@ -1,0 +1,49 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.container {
+  width: 100%;
+  padding: var(--size-spacing-xxl) 0;
+}
+
+.title {
+  @include fonts.title2;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--size-spacing-xxl);
+  flex-wrap: wrap;
+}
+
+.no-stocks-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-spacing-xxxl);
+  align-items: center;
+  padding: var(--size-spacing-xxxl) var(--size-spacing-xl);
+  border: 2px dashed var(--color-border-brand-primary);
+  border-radius: var(--size-border-radius-m);
+  margin-top: var(--size-spacing-xl);
+}
+
+.icon {
+  width: rem.torem(73.24px);
+  height: rem.torem(73.24px);
+  color: var(--color-icon-brand-primary);
+  position: relative;
+  z-index: 1;
+}
+
+.filters {
+  margin-bottom: var(--size-spacing-xxl);
+}
+
+.count {
+  margin-bottom: var(--size-spacing-s);
+}
+
+.cancel-banner {
+  margin-top: var(--size-spacing-xl);
+}

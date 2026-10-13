@@ -1,0 +1,29 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_size.scss" as size;
+
+.newsletter-container {
+  position: relative;
+  display: flex;
+  min-height: rem.torem(53px);
+  border: 2px solid var(--color-border-brand-primary);
+  border-radius: var(--size-border-radius-m);
+  width: 100%;
+  padding: var(--size-spacing-m);
+
+  @media (min-width: size.$tablet) {
+    padding: rem.torem(1px) rem.torem(108px) rem.torem(1px)
+      var(--size-spacing-m);
+  }
+
+  .newsletter-img {
+    position: absolute;
+    right: rem.torem(16px);
+    top: rem.torem(1px);
+    height: 100%;
+    visibility: hidden;
+
+    @media (min-width: size.$tablet) {
+      visibility: visible;
+    }
+  }
+}

@@ -1,0 +1,61 @@
+import { format } from 'date-fns-tz'
+
+import type { BookingRecapResponseBookingStatusHistoryModel } from '@/apiClient/v1'
+import { toDateStrippedOfTimezone } from '@/commons/utils/date'
+
+import { getBookingStatusDisplayInformations } from '../../Components/utils/bookingStatusConverter'
+import styles from './BookingStatusCellHistory.module.scss'
+
+const computeDateForStatus = (
+  item: BookingRecapResponseBookingStatusHistoryModel,
+  dateFormat: string
+) => (item.date ? format(toDateStrippedOfTimezone(item.date), dateFormat) : '-')
+
+export interface BookingStatusCellHistoryProps {
+  index: number
+  bookingStatusHistory: BookingRecapResponseBookingStatusHistoryModel[]
+}
+
+export const BookingStatusCellHistory = ({
+  index,
+  bookingStatusHistory,
+}: BookingStatusCellHistoryProps) => {
+  const bookingsStatusHistoryItems = bookingStatusHistory.map((item) => {
+    const displayInfoFromStatus = getBookingStatusDisplayInformations(
+      item.status
+    )
+
+    if (!displayInfoFromStatus || bookingStatusHistory.length < 1) {
+      return null
+    }
+
+    return (
+      <li
+        key={displayInfoFromStatus.title}
+        className={styles['booking-status-history-list-element']}
+      >
+        {`${displayInfoFromStatus.label} : ${computeDateForStatus(
+          item,
+          displayInfoFromStatus.dateFormat
+        )}`}
+      </li>
+    )
+  })
+
+  return (
+    <>
+      <p
+        id={`booking-status-history-title-${index}`}
+        className={styles['booking-status-history-title']}
+      >
+        Historique
+      </p>
+      <ul
+        aria-labelledby={`booking-status-history-title-${index}`}
+        className={styles['booking-status-history-list']}
+      >
+        {bookingsStatusHistoryItems}
+      </ul>
+    </>
+  )
+}

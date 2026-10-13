@@ -1,0 +1,404 @@
+import { addDays, isBefore } from 'date-fns'
+
+import { type DMSApplicationForEAC, DMSApplicationstatus } from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import { assertOrFrontendError } from '@/commons/errors/assertOrFrontendError'
+import { getDateToFrenchText } from '@/commons/utils/date'
+import { Banner, BannerVariants } from '@/design-system/Banner/Banner'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonColor, ButtonVariant } from '@/design-system/Button/types'
+import fullLinkIcon from '@/icons/full-link.svg'
+import { Timeline, TimelineStepType } from '@/ui-kit/Timeline/Timeline'
+
+import styles from './CollectiveDmsTimeline.module.scss'
+import { OngoingDmsApplicationWrapper } from './OngoingDmsApplicationWrapper'
+import { CollectiveDmsTimelineVariant } from './types'
+
+export const CollectiveDmsTimeline = ({
+  collectiveDmsApplication,
+  hasAdageId,
+  adageInscriptionDate,
+  variant = CollectiveDmsTimelineVariant.DEFAULT,
+}: {
+  collectiveDmsApplication: DMSApplicationForEAC
+  hasAdageId: boolean
+  adageInscriptionDate?: string | null
+  variant?: CollectiveDmsTimelineVariant
+}) => {
+  const collectiveDmsApplicationLink = `https://demarche.numerique.gouv.fr/dossiers/${collectiveDmsApplication.application}/messagerie`
+  const collectiveDmsContactSupport =
+    'https://aide.passculture.app/hc/fr/articles/8491401511708'
+
+  const hasAdageIdForMoreThan30Days = Boolean(
+    hasAdageId &&
+      adageInscriptionDate &&
+      isBefore(new Date(adageInscriptionDate), addDays(new Date(), -30))
+  )
+
+  const buildDate =
+    collectiveDmsApplication.buildDate &&
+    getDateToFrenchText(collectiveDmsApplication.buildDate)
+
+  const instructionDate =
+    collectiveDmsApplication.instructionDate &&
+    getDateToFrenchText(collectiveDmsApplication.instructionDate)
+
+  const processingDate =
+    collectiveDmsApplication.processingDate &&
+    getDateToFrenchText(collectiveDmsApplication.processingDate)
+
+  const adageDate =
+    adageInscriptionDate && getDateToFrenchText(adageInscriptionDate)
+  const { logEvent } = useAnalytics()
+  const logClickOnDmsLink = (status: DMSApplicationstatus) => {
+    logEvent(Events.CLICKED_EAC_DMS_LINK, {
+      dmsApplicationStatus: status,
+    })
+  }
+
+  const successSubmittedStep = {
+    type: TimelineStepType.SUCCESS,
+    content: (
+      <>
+        <div className={styles['timeline-step-title-disabled']}>
+          Votre dossier a été déposé
+        </div>
+        <div>{buildDate}</div>
+      </>
+    ),
+  }
+
+  const confirmationSubmittedStep = {
+    type: TimelineStepType.SUCCESS,
+    content: (
+      <>
+        <div className={styles['timeline-step-title-disabled']}>
+          Votre dossier a été déposé
+        </div>
+        <div>{buildDate}</div>
+      </>
+    ),
+  }
+  const confirmationWaitingNextStep = {
+    type: TimelineStepType.WAITING,
+    content: (
+      <>
+        <div className={styles['timeline-step-title']}>
+          Votre dossier est en attente d’instruction
+        </div>
+        <p>
+          Votre dossier doit être instruit par la commission régionale du
+          territoire dans lequel se situe votre siège social.
+        </p>
+        <Button
+          as="a"
+          variant={ButtonVariant.TERTIARY}
+          color={ButtonColor.NEUTRAL}
+          icon={fullLinkIcon}
+          to={collectiveDmsApplicationLink}
+          onClick={() =>
+            logClickOnDmsLink(DMSApplicationstatus.EN_CONSTRUCTION)
+          }
+          label="Consulter ma messagerie sur Démarche Numérique"
+        />
+        <Button
+          as="a"
+          variant={ButtonVariant.TERTIARY}
+          color={ButtonColor.NEUTRAL}
+          icon={fullLinkIcon}
+          to={collectiveDmsContactSupport}
+          label="Contacter les services des ministères de l’Éducation nationale et de la Culture"
+        />
+      </>
+    ),
+  }
+
+  const waitingInstructionStep = {
+    type: TimelineStepType.WAITING,
+    content: (
+      <>
+        <div className={styles['timeline-step-title']}>
+          Votre dossier est en cours d’instruction
+        </div>
+        <div>
+          {instructionDate}
+          <br />
+          <p>
+            Votre dossier est en cours d’instruction par la commission de
+            référencement de votre territoire. Si votre dossier concerne un
+            établissement public, il est traité par le ministère de la Culture.
+          </p>
+        </div>
+        <Button
+          as="a"
+          variant={ButtonVariant.TERTIARY}
+          color={ButtonColor.NEUTRAL}
+          icon={fullLinkIcon}
+          to={collectiveDmsApplicationLink}
+          onClick={() => logClickOnDmsLink(DMSApplicationstatus.EN_INSTRUCTION)}
+          label="Consulter ma messagerie sur Démarche Numérique"
+        />
+      </>
+    ),
+  }
+
+  const successInstructionStep = {
+    type: TimelineStepType.SUCCESS,
+    content: (
+      <>
+        <div className={styles['timeline-step-title-disabled']}>
+          Votre dossier est passé en instruction
+        </div>
+        <div>{instructionDate}</div>
+      </>
+    ),
+  }
+
+  const successDoneReferencement = {
+    type: TimelineStepType.SUCCESS,
+    content: (
+      <>
+        <div className={styles['timeline-step-title-disabled']}>
+          Votre demande de référencement a été acceptée
+        </div>
+        <div>
+          {processingDate}
+          <br />
+          <p>
+            Votre structure doit encore être référencée dans ADAGE par les
+            équipes du ministère de l’Éducation nationale. Vous recevrez un mail
+            lorsque votre référencement sera effectif.
+          </p>
+        </div>
+        <Button
+          as="a"
+          variant={ButtonVariant.TERTIARY}
+          color={ButtonColor.NEUTRAL}
+          icon={fullLinkIcon}
+          to={collectiveDmsApplicationLink}
+          onClick={() => logClickOnDmsLink(DMSApplicationstatus.ACCEPTE)}
+          label="Consulter ma messagerie sur Démarche Numérique"
+        />
+      </>
+    ),
+  }
+
+  const disabledInstructionStep = {
+    type: TimelineStepType.DISABLED,
+    content: (
+      <div className={styles['timeline-step-title-disabled']}>
+        Votre dossier est passé en instruction
+      </div>
+    ),
+  }
+  const disabledDoneStep = {
+    type: TimelineStepType.DISABLED,
+    content: (
+      <div className={styles['timeline-step-title-disabled']}>
+        Votre dossier a été traité
+      </div>
+    ),
+  }
+
+  const waitingAdageStep = {
+    type: TimelineStepType.WAITING,
+    content: (
+      <>
+        <div className={styles['timeline-step-title']}>
+          Votre structure est en cours d’ajout dans ADAGE
+        </div>
+        <p>
+          Une fois votre structure ajoutée dans ADAGE par le ministère de
+          l’Éducation nationale, vous pourrez renseigner vos informations à
+          destination des enseignants et créer des offres à destination des
+          scolaires.
+        </p>
+      </>
+    ),
+  }
+
+  const successAdageStep = {
+    type: TimelineStepType.SUCCESS,
+    content: (
+      <>
+        <div className={styles['timeline-step-title-disabled']}>
+          Votre structure a été référencée dans ADAGE par les équipes du
+          ministère de l’Éducation nationale
+        </div>
+        <div>{adageDate}</div>
+        <div className={styles['timeline-infobox']}>
+          <div className={styles['timeline-infobox-text']}>
+            Vous pouvez désormais créer des offres collectives ! Nous vous
+            invitons à vérifier les informations de votre structure qui sont
+            désormais visibles sur ADAGE par les enseignants et chefs
+            d’établissements.
+          </div>
+        </div>
+      </>
+    ),
+  }
+
+  const disabledAcceptedAdageStep = {
+    type: TimelineStepType.DISABLED,
+    content: (
+      <div className={styles['timeline-step-title-disabled']}>
+        Votre structure a été ajoutée dans ADAGE
+      </div>
+    ),
+  }
+
+  const refusedByDms = (
+    <Banner
+      variant={BannerVariants.ERROR}
+      title="Votre demande de référencement a été refusée pour la part collective"
+      actions={[
+        {
+          href: collectiveDmsApplicationLink,
+          label: 'Consulter ma messagerie sur Démarche Numérique',
+          isExternal: true,
+
+          icon: fullLinkIcon,
+          iconAlt: 'Nouvelle fenêtre',
+          type: 'link',
+          onClick: () => logClickOnDmsLink(DMSApplicationstatus.REFUSE),
+        },
+        {
+          href: collectiveDmsContactSupport,
+          label: 'Contacter les membres de la commission de mon territoire',
+          isExternal: true,
+
+          icon: fullLinkIcon,
+          iconAlt: 'Nouvelle fenêtre',
+          type: 'link',
+        },
+      ]}
+      description={`Votre demande de référencement a été refusée le ${processingDate} par la commission régionale de référencement qui rassemble des représentants du rectorat et de la DRAC de votre territoire. Nous vous invitons à consulter votre messagerie sur Démarche Numérique afin d’en savoir plus sur les raisons de ce refus.`}
+    />
+  )
+
+  const droppedByDms = (
+    <Banner
+      variant={BannerVariants.ERROR}
+      title="Votre demande de référencement a été classée sans suite"
+      actions={[
+        {
+          href: collectiveDmsApplicationLink,
+          label: 'Consulter ma messagerie sur Démarche Numérique',
+          isExternal: true,
+          icon: fullLinkIcon,
+          iconAlt: 'Nouvelle fenêtre',
+          type: 'link',
+          onClick: () => logClickOnDmsLink(DMSApplicationstatus.SANS_SUITE),
+        },
+        {
+          href: collectiveDmsContactSupport,
+          label:
+            'Contacter les services des ministères de l’Éducation nationale et de la Culture',
+          isExternal: true,
+          icon: fullLinkIcon,
+          iconAlt: 'Nouvelle fenêtre',
+          type: 'link',
+        },
+      ]}
+      description="Nous vous invitons à consulter votre messagerie sur Démarche Numérique afin d’en savoir plus."
+    />
+  )
+
+  const successDMSBanner = (
+    <div className={styles['banner']}>
+      <Banner
+        variant={BannerVariants.SUCCESS}
+        title="Votre dossier a été validé et vous pouvez dès à présent commencer votre activité avec le pass Culture"
+      />
+    </div>
+  )
+
+  const shouldShowSuccessDMSBanner =
+    variant === CollectiveDmsTimelineVariant.LITE &&
+    collectiveDmsApplication.processingDate &&
+    isBefore(
+      new Date(),
+      addDays(new Date(collectiveDmsApplication.processingDate), 30)
+    )
+
+  if (
+    hasAdageId &&
+    collectiveDmsApplication.state !== DMSApplicationstatus.ACCEPTE
+  ) {
+    return
+  }
+
+  switch (collectiveDmsApplication.state) {
+    case DMSApplicationstatus.EN_CONSTRUCTION:
+      return (
+        <OngoingDmsApplicationWrapper variant={variant}>
+          <Timeline
+            steps={[
+              confirmationSubmittedStep,
+              confirmationWaitingNextStep,
+              disabledInstructionStep,
+              disabledDoneStep,
+              disabledAcceptedAdageStep,
+            ]}
+          />
+        </OngoingDmsApplicationWrapper>
+      )
+    case DMSApplicationstatus.EN_INSTRUCTION:
+      return (
+        <OngoingDmsApplicationWrapper variant={variant}>
+          <Timeline
+            steps={[
+              successSubmittedStep,
+              waitingInstructionStep,
+              disabledDoneStep,
+              disabledAcceptedAdageStep,
+            ]}
+          />
+        </OngoingDmsApplicationWrapper>
+      )
+    case DMSApplicationstatus.ACCEPTE:
+      if (!hasAdageId) {
+        return (
+          <>
+            {shouldShowSuccessDMSBanner && successDMSBanner}
+            <Timeline
+              steps={[
+                successSubmittedStep,
+                successInstructionStep,
+                successDoneReferencement,
+                waitingAdageStep,
+              ]}
+            />
+          </>
+        )
+      }
+      if (!hasAdageIdForMoreThan30Days) {
+        return (
+          <>
+            {shouldShowSuccessDMSBanner && successDMSBanner}
+            {variant !== CollectiveDmsTimelineVariant.LITE && (
+              <Timeline
+                steps={[
+                  successSubmittedStep,
+                  successInstructionStep,
+                  successDoneReferencement,
+                  successAdageStep,
+                ]}
+              />
+            )}
+          </>
+        )
+      }
+
+      return
+    case DMSApplicationstatus.REFUSE:
+      return refusedByDms
+    case DMSApplicationstatus.SANS_SUITE:
+      return droppedByDms
+
+    /* istanbul ignore next: we dont want to test this case in unit test */
+    default:
+      assertOrFrontendError(false, 'Invalid dms status.')
+  }
+}

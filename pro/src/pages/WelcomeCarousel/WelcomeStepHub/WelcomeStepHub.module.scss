@@ -1,0 +1,27 @@
+@use "styles/mixins/_size.scss" as size;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+
+.icon {
+  &-container {
+    text-align: center;
+  }
+
+  width: rem.torem(200px);
+  color: var(--color-icon-brand-primary);
+  margin-bottom: var(--size-spacing-xxl);
+}
+
+.already-have-account {
+  display: flex;
+  justify-content: center;
+  margin-top: var(--size-spacing-xxl);
+  text-align: center;
+}
+
+.title {
+  @include fonts.title1;
+
+  margin-bottom: var(--size-spacing-s);
+  overflow-wrap: anywhere;
+}

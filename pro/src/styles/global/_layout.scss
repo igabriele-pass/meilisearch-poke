@@ -1,0 +1,30 @@
+/* stylelint-disable */
+
+@use "styles/mixins/_fonts.scss" as fonts;
+
+body {
+  color: var(--color-text-default);
+  background-color: var(--color-background-default);
+}
+
+body:has(dialog[open]) {
+  overflow: hidden;
+}
+
+body,
+button,
+input,
+select,
+p,
+textarea {
+  @include fonts.body;
+}
+
+strong,
+b {
+  font-family: var(--typography-body-accent-font-family);
+}
+
+em {
+  font-family: var(--typography-body-italic-font-family);
+}

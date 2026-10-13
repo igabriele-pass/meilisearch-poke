@@ -1,0 +1,74 @@
+import classNames from 'classnames'
+
+import { Tag, type TagProps } from '@/design-system/Tag/Tag'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import styles from './Asset.module.scss'
+
+export type AssetProps =
+  | {
+      variant: 'icon'
+      src: string
+      size?: never
+      text?: never
+      tag?: never
+    }
+  | {
+      variant: 'tag'
+      size?: never
+      text?: never
+      src?: never
+      tag: TagProps
+    }
+  | {
+      variant: 'text'
+      text: string
+      size?: never
+      src?: never
+      tag?: never
+    }
+  | {
+      variant: 'image'
+      src: string
+      text?: never
+      tag?: never
+      size?: 's' | 'm' | 'l'
+    }
+
+export function Asset({
+  className,
+  variant,
+  src,
+  size = 's',
+  text,
+  tag,
+}: { className?: string } & AssetProps) {
+  if (variant === 'icon') {
+    return (
+      <div className={classNames(styles['icon'], className)}>
+        <SvgIcon alt="" src={src} />
+      </div>
+    )
+  }
+
+  if (variant === 'image') {
+    // https://gtmetrix.com/avoid-empty-src-or-href.html
+    const sanitizedSrc = src?.trim() || undefined
+
+    return (
+      <div className={classNames(styles['image'], styles[size], className)}>
+        <img src={sanitizedSrc} alt="" aria-hidden className={styles['img']} />
+      </div>
+    )
+  }
+
+  if (variant === 'text') {
+    return <div className={classNames(styles['text'], className)}>{text}</div>
+  }
+
+  return (
+    <div className={classNames(styles['tag'], className)}>
+      <Tag {...tag} />
+    </div>
+  )
+}

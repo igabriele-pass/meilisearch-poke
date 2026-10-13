@@ -1,0 +1,83 @@
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_outline.scss" as outline;
+
+$venue-image-height: rem.torem(184px);
+$venue-image-width: rem.torem(276px);
+
+.container {
+  display: flex;
+  flex-direction: column;
+  width: $venue-image-width;
+  border: none;
+  background-color: transparent;
+  gap: 16px;
+  text-align: unset;
+
+  &:active {
+    opacity: 0.64;
+
+    .venue-image {
+      box-shadow: none;
+    }
+
+    .venue-infos-name,
+    .venue-infos-distance {
+      text-decoration: none;
+    }
+  }
+
+  &:hover {
+    .venue-image {
+      box-shadow: var(--shadow-overlay);
+    }
+
+    .venue-infos-name,
+    .venue-infos-distance {
+      text-decoration: underline;
+    }
+  }
+
+  &:focus-visible {
+    @include outline.focus-outline(rem.torem(4px));
+
+    border-radius: var(--size-border-radius-l);
+  }
+}
+
+.venue-image {
+  border: rem.torem(1px) solid var(--color-border-inverted);
+  width: $venue-image-width;
+  height: $venue-image-height;
+  border-radius: var(--size-border-radius-l);
+  object-fit: cover;
+
+  &.venue-image-fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background-color: var(--color-background-subtle);
+    color: var(--color-icon-subtle);
+  }
+}
+
+.venue-infos {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--size-spacing-xs);
+  overflow-wrap: anywhere;
+
+  &-name {
+    @include fonts.body-accent;
+
+    overflow: hidden;
+  }
+
+  &-distance {
+    @include fonts.body-accent-xs;
+
+    color: var(--color-text-subtle);
+    text-transform: uppercase;
+  }
+}

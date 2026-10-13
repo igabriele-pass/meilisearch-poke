@@ -1,0 +1,90 @@
+import type { GetOffererResponseModel } from '@/apiClient/v1'
+import { useActiveFeature } from '@/commons/hooks/useActiveFeature'
+import { useActiveStep } from '@/commons/hooks/useActiveStep'
+import fullErrorIcon from '@/icons/full-error.svg'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+import type { NavLinkItem } from '@/ui-kit/Tabs/NavLinkItems/NavLinkItems'
+import { Tabs } from '@/ui-kit/Tabs/Tabs'
+
+import {
+  STEP_ID_BANK_INFORMATIONS,
+  STEP_ID_INCOMES,
+  STEP_ID_INVOICES,
+  STEP_ID_SETTLEMENTS,
+  STEP_NAMES,
+} from './constants'
+import styles from './ReimbursementsTabs.module.scss'
+
+type ReimbursementsTabsProps = {
+  selectedOfferer: GetOffererResponseModel | null
+}
+
+export const ReimbursementsTabs = ({
+  selectedOfferer,
+}: ReimbursementsTabsProps) => {
+  const isNewSettlementsActivated = useActiveFeature(
+    'WIP_ENABLE_FINANCE_SETTLEMENTS'
+  )
+  const activeStep = useActiveStep(STEP_NAMES)
+  const hasWarning =
+    (selectedOfferer &&
+      (selectedOfferer.venuesWithNonFreeOffersWithoutBankAccounts.length > 0 ||
+        selectedOfferer.hasBankAccountWithPendingCorrections)) ??
+    false
+
+  const getSteps = () => {
+    const steps = [
+      {
+        id: STEP_ID_INVOICES,
+        label: 'Justificatifs',
+        url: '/administration/remboursements',
+      },
+      {
+        id: STEP_ID_SETTLEMENTS,
+        label: 'Virements',
+        url: '/administration/remboursements/virements',
+      },
+      {
+        id: STEP_ID_BANK_INFORMATIONS,
+        label: (
+          <>
+            Informations bancaires
+            {hasWarning && (
+              <SvgIcon
+                src={fullErrorIcon}
+                alt="Une action est requise dans cet onglet"
+                width="20"
+                className={styles['error-icon']}
+              />
+            )}
+          </>
+        ),
+        url: '/administration/remboursements/informations-bancaires',
+      },
+      {
+        id: STEP_ID_INCOMES,
+        label: 'Chiffre d’affaires',
+        url: '/administration/remboursements/revenus',
+      },
+    ]
+
+    return steps.filter(
+      (s) => isNewSettlementsActivated || s.id !== STEP_ID_SETTLEMENTS
+    )
+  }
+
+  const tabs: NavLinkItem<string>[] = getSteps().map(({ id, label, url }) => ({
+    key: id,
+    label,
+    url,
+  }))
+
+  return (
+    <Tabs
+      type="links"
+      items={tabs}
+      selectedKey={activeStep}
+      navLabel="Sous menu - Gestion financière"
+    />
+  )
+}

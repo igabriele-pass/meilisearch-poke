@@ -1,0 +1,39 @@
+@use "styles/mixins/_rem.scss" as rem;
+
+.carousel {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+
+  &-header {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 0 rem.torem(24px);
+    gap: var(--size-spacing-l);
+
+    &-arrows {
+      text-align: right;
+      flex: 1;
+      white-space: nowrap;
+    }
+  }
+
+  &-list {
+    width: 100%;
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: var(--size-spacing-l);
+    scroll-behavior: smooth;
+    padding: rem.torem(20px) var(--size-spacing-xl);
+  }
+
+  &-loading {
+    flex-grow: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+

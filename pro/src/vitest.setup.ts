@@ -1,0 +1,148 @@
+import 'regenerator-runtime/runtime'
+import axeCore from 'axe-core'
+import { expect, vi } from 'vitest'
+import '@testing-library/jest-dom/vitest'
+import type { JSDOM } from 'jsdom'
+import * as matchers from 'vitest-axe/matchers'
+import failOnConsole from 'vitest-fail-on-console'
+import createFetchMock from 'vitest-fetch-mock'
+import 'vitest-canvas-mock'
+
+expect.extend(matchers)
+
+// jsdom cannot compute color contrast (no real layout/paint),
+// so axe-core's `color-contrast` rule queries pseudo-element styles and always fails on transparent backgrounds.
+// This disables it globally (rather than per-test).
+// https://github.com/NickColley/jest-axe/issues/147#issuecomment-1300192415
+axeCore.configure({
+  rules: [{ id: 'color-contrast', enabled: false }],
+})
+
+const fetchMock = createFetchMock(vi)
+fetchMock.enableMocks()
+fetchMock.mockResponse((req) => {
+  console.error(String.raw`
+  ----------------------------------------------------------------------------
+  /!\ UNMOCKED FETCH CALL TO :  [${req.method}] ${req.url}
+  ----------------------------------------------------------------------------
+  `)
+
+  // We do not await this Promise so that Vitest considers it as
+  // an unhandled rejection and thus fails the test
+  // (otherwise the console.error will appear but not fail the test)
+  void Promise.reject(new Error('Unmocked fetch call'))
+
+  // And now return a Promise so that fetchMock is happy
+  return Promise.reject(new Error('Unmocked fetch call'))
+})
+
+// Mock the ResizeObserver for Charts
+class ResizeObserver {
+  observe() {
+    // Mock implementation
+  }
+
+  unobserve() {
+    // Mock implementation
+  }
+
+  disconnect() {
+    // Mock implementation
+  }
+}
+
+globalThis.ResizeObserver = ResizeObserver
+
+const IntersectionObserverMock = vi.fn(
+  class {
+    disconnect = vi.fn()
+    observe = vi.fn()
+    takeRecords = vi.fn()
+    unobserve = vi.fn()
+  }
+)
+
+vi.stubGlobal('IntersectionObserver', IntersectionObserverMock)
+
+// jsdom does not always implement the native <dialog> API used by BaseDialog.
+if (typeof HTMLDialogElement !== 'undefined') {
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() {
+      this.open = true
+    }
+  }
+
+  if (!HTMLDialogElement.prototype.close) {
+    HTMLDialogElement.prototype.close = function close() {
+      this.open = false
+    }
+  }
+}
+
+// Fail on console errors and warnings
+// https://github.com/thomasbrodusch/vitest-fail-on-console#readme
+failOnConsole()
+
+// @radix-ui/react-dismissable-layer >= 1.1.12 sets document.body.style.pointerEvents = "none"
+// when a layer opens with disableOutsidePointerEvents. If a test unmounts the component while
+// the dropdown is still open, the cleanup effect may not restore the body style, causing
+// @testing-library/user-event v14 to throw
+beforeEach(() => {
+  document.body.style.pointerEvents = ''
+})
+
+// Mock the dialog behavior not implemented in jsdom (showModal, close, open attribute)
+// we mock globally so we don't need it in each test
+let originalShowModal: typeof HTMLDialogElement.prototype.showModal
+let originalClose: typeof HTMLDialogElement.prototype.close
+
+// Mirrors the native <dialog> spec: showModal() remembers the element focused
+// beforehand, close() restores focus to it. jsdom does not implement this.
+const previouslyFocusedElements = new WeakMap<HTMLDialogElement, HTMLElement>()
+
+beforeAll(() => {
+  originalShowModal = HTMLDialogElement.prototype.showModal
+  HTMLDialogElement.prototype.showModal = vi.fn(function (
+    this: HTMLDialogElement
+  ) {
+    if (document.activeElement instanceof HTMLElement) {
+      previouslyFocusedElements.set(this, document.activeElement)
+    }
+    this.open = true
+    this.setAttribute('open', '')
+  })
+
+  originalClose = HTMLDialogElement.prototype.close
+  HTMLDialogElement.prototype.close = vi.fn(function (this: HTMLDialogElement) {
+    this.open = false
+    this.removeAttribute('open')
+    // Native focus restoration happens synchronously within close(), before the
+    // "close" event fires, so a refToFocusOnClose handler can still override it.
+    previouslyFocusedElements.get(this)?.focus()
+    previouslyFocusedElements.delete(this)
+    this.dispatchEvent(new Event('close'))
+  })
+})
+
+afterAll(() => {
+  HTMLDialogElement.prototype.showModal = originalShowModal
+  HTMLDialogElement.prototype.close = originalClose
+})
+
+// jsdom logs `Not implemented: navigation to another Document` whenever a test triggers a real navigation.
+// These are inherent jsdom limitations (https://github.com/jsdom/jsdom/issues/2112), not actionable test issues,
+// so we strip them at the virtualConsole level rather than hiding `console.error` downstream.
+const { virtualConsole } = (globalThis as unknown as { jsdom: JSDOM }).jsdom
+const previousListeners = virtualConsole.listeners('jsdomError')
+virtualConsole.removeAllListeners('jsdomError')
+virtualConsole.on('jsdomError', (error) => {
+  if (
+    error.message?.startsWith('Not implemented: navigation to another Document')
+  ) {
+    return
+  }
+
+  for (const listener of previousListeners) {
+    listener(error)
+  }
+})

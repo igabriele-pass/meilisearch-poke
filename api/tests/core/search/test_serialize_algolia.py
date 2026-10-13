@@ -1,0 +1,786 @@
+import datetime
+import decimal
+
+import pytest
+import time_machine
+from dateutil.relativedelta import relativedelta
+
+from pcapi.core.artist import factories as artists_factories
+from pcapi.core.artist import models as artists_models
+from pcapi.core.categories import subcategories
+from pcapi.core.chronicles import factories as chronicles_factories
+from pcapi.core.criteria import factories as criteria_factories
+from pcapi.core.educational import constants as educational_constants
+from pcapi.core.educational import factories as educational_factories
+from pcapi.core.educational import models as educational_models
+from pcapi.core.educational.academies import ACADEMIES
+from pcapi.core.geography import factories as geography_factories
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offerers.schemas import VenueTypeCode
+from pcapi.core.offers import factories as offers_factories
+from pcapi.core.offers import models as offers_models
+from pcapi.core.providers.constants import BookFormat
+from pcapi.core.reactions import factories as reactions_factories
+from pcapi.core.reactions.models import ReactionTypeEnum
+from pcapi.core.search import get_base_query_for_offer_indexation
+from pcapi.core.search import serialization
+from pcapi.core.search.backends import algolia
+from pcapi.models import db
+from pcapi.utils import date as date_utils
+from pcapi.utils.human_ids import humanize
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+@pytest.mark.settings(ALGOLIA_LAST_30_DAYS_BOOKINGS_RANGE_THRESHOLDS=[1, 2, 3, 4])
+@time_machine.travel("2024-01-01T00:00:00", tick=False)
+def test_serialize_offer():
+    rayon = "Policier / Thriller format poche"  # fetched from provider
+
+    # known values (inserted using a migration)
+    # note: some might contain trailing whitespaces. Also sections are
+    # usually lowercase whilst sections from providers might be
+    # capitalized.
+    book_macro_section = (
+        db.session.query(offers_models.BookMacroSection).filter_by(section="policier / thriller format poche").one()
+    )
+    macro_section = book_macro_section.macroSection.strip()
+
+    offer_offerer_address = offerers_factories.OfferLocationFactory(
+        address__departmentCode="86",
+        address__postalCode="86140",
+        address__city="Cernay",
+        address__latitude=-5.01,
+        address__longitude=-6.02,
+    )
+
+    offer = offers_factories.OfferFactory(
+        dateCreated=datetime.datetime(2022, 1, 1, 10, 0, 0),
+        name="Titre formidable",
+        description="Un LIVRE qu'il est bien pour le lire",
+        ean="2221001648999",
+        extraData={
+            "author": "Author",
+            "performer": "Performer",
+            "speaker": "Speaker",
+            "stageDirector": "Stage Director",
+            "rayon": rayon,
+        },
+        rankingWeight=2,
+        subcategoryId=subcategories.LIVRE_PAPIER.id,
+        offererAddress=offer_offerer_address,
+        venue__id=127,
+        venue__offererAddress__address__departmentCode="75",
+        venue__offererAddress__address__postalCode="75001",
+        venue__offererAddress__address__latitude=geography_factories.DEFAULT_LATITUDE,
+        venue__offererAddress__address__longitude=geography_factories.DEFAULT_TRUNCATED_LONGITUDE,
+        venue__name="La Moyenne Librairie SA",
+        venue__publicName="La Moyenne Librairie",
+        venue__venueTypeCode=VenueTypeCode.LIBRARY,
+        venue__activity=offerers_models.Activity.CINEMA,
+        venue__managingOfferer__name="Les Librairies Associées",
+    )
+    offers_factories.StockFactory(offer=offer, price=10)
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized == {
+        "distinct": "2221001648999",
+        "objectID": offer.id,
+        "offer": {
+            "artist": "Author Performer Speaker Stage Director",
+            "bookMacroSection": macro_section,
+            "dateCreated": offer.dateCreated.timestamp(),
+            "dates": [],
+            "description": "livre bien lire",
+            "ean": "2221001648999",
+            "indexedAt": "2024-01-01T00:00:00",
+            "hasImage": False,
+            "hasUrl": False,
+            "isDuo": False,
+            "isEducational": False,
+            "isEvent": False,
+            "isForbiddenToUnderage": offer.is_forbidden_to_underage,
+            "isPermanent": offer.isPermanent,
+            "isThing": True,
+            "last30DaysBookings": 0,
+            "last30DaysBookingsRange": serialization.Last30DaysBookingsRange.VERY_LOW.value,
+            "musicType": [],
+            "name": "Titre formidable",
+            "nativeCategoryId": ["LIVRES_PAPIER"],
+            "prices": [decimal.Decimal("10.00")],
+            "rankingWeight": 2,
+            "searchGroups": ["LIVRES"],
+            "searchGroupNamev2": ["LIVRES"],
+            "students": [],
+            "subcategoryId": offer.subcategory.id,
+            "tags": [],
+            "times": [],
+        },
+        "offerer": {
+            "name": "Les Librairies Associées",
+        },
+        "venue": {
+            "activity": offerers_models.Activity.CINEMA.name,
+            "address": offer.offererAddress.address.street,
+            "banner_url": offer.venue.bannerUrl,
+            "city": offer.offererAddress.address.city,
+            "departmentCode": "86",
+            "postalCode": offer.offererAddress.address.postalCode,
+            "id": offer.venueId,
+            "isAudioDisabilityCompliant": False,
+            "isMentalDisabilityCompliant": False,
+            "isMotorDisabilityCompliant": False,
+            "isVisualDisabilityCompliant": False,
+            "name": "La Moyenne Librairie",
+            "publicName": "La Moyenne Librairie",
+            "venue_type": VenueTypeCode.LIBRARY.name,
+            "isPermanent": True,
+        },
+        "_geoloc": {
+            "lat": -5.01,
+            "lng": -6.02,
+        },
+    }
+
+
+@pytest.mark.settings(ALGOLIA_LAST_30_DAYS_BOOKINGS_RANGE_THRESHOLDS=[1, 2, 3, 4])
+@time_machine.travel("2024-01-01T00:00:00", tick=False)
+def test_serialize_offer_legacy():
+    rayon = "Policier / Thriller format poche"  # fetched from provider
+
+    # known values (inserted using a migration)
+    # note: some might contain trailing whitespaces. Also sections are
+    # usually lowercase whilst sections from providers might be
+    # capitalized.
+    book_macro_section = (
+        db.session.query(offers_models.BookMacroSection).filter_by(section="policier / thriller format poche").one()
+    )
+    macro_section = book_macro_section.macroSection.strip()
+
+    offer = offers_factories.OfferFactory(
+        dateCreated=datetime.datetime(2022, 1, 1, 10, 0, 0),
+        name="Titre formidable",
+        description="Un LIVRE qu'il est bien pour le lire",
+        ean="2221001648999",
+        extraData={
+            "author": "Author",
+            "performer": "Performer",
+            "speaker": "Speaker",
+            "stageDirector": "Stage Director",
+            "rayon": rayon,
+        },
+        rankingWeight=2,
+        subcategoryId=subcategories.LIVRE_PAPIER.id,
+        venue__id=127,
+        venue__offererAddress__address__postalCode="86140",
+        venue__name="La Moyenne Librairie SA",
+        venue__publicName="La Moyenne Librairie",
+        venue__venueTypeCode=VenueTypeCode.LIBRARY,
+        venue__activity=offerers_models.Activity.BOOKSTORE,
+        venue__managingOfferer__name="Les Librairies Associées",
+    )
+    offers_factories.StockFactory(offer=offer, price=10)
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized == {
+        "distinct": "2221001648999",
+        "objectID": offer.id,
+        "offer": {
+            "artist": "Author Performer Speaker Stage Director",
+            "bookMacroSection": macro_section,
+            "dateCreated": offer.dateCreated.timestamp(),
+            "dates": [],
+            "description": "livre bien lire",
+            "ean": "2221001648999",
+            "indexedAt": "2024-01-01T00:00:00",
+            "hasImage": False,
+            "hasUrl": False,
+            "isDuo": False,
+            "isEducational": False,
+            "isEvent": False,
+            "isForbiddenToUnderage": offer.is_forbidden_to_underage,
+            "isPermanent": offer.isPermanent,
+            "isThing": True,
+            "last30DaysBookings": 0,
+            "last30DaysBookingsRange": serialization.Last30DaysBookingsRange.VERY_LOW.value,
+            "musicType": [],
+            "name": "Titre formidable",
+            "nativeCategoryId": ["LIVRES_PAPIER"],
+            "prices": [decimal.Decimal("10.00")],
+            "rankingWeight": 2,
+            "searchGroups": ["LIVRES"],
+            "searchGroupNamev2": ["LIVRES"],
+            "students": [],
+            "subcategoryId": offer.subcategory.id,
+            "tags": [],
+            "times": [],
+        },
+        "offerer": {
+            "name": "Les Librairies Associées",
+        },
+        "venue": {
+            "address": offer.venue.offererAddress.address.street,
+            "activity": offerers_models.Activity.BOOKSTORE.name,
+            "banner_url": offer.venue.bannerUrl,
+            "city": offer.venue.offererAddress.address.city,
+            "departmentCode": offer.venue.offererAddress.address.departmentCode,
+            "id": offer.venueId,
+            "isAudioDisabilityCompliant": False,
+            "isMentalDisabilityCompliant": False,
+            "isMotorDisabilityCompliant": False,
+            "isVisualDisabilityCompliant": False,
+            "name": "La Moyenne Librairie",
+            "postalCode": offer.venue.offererAddress.address.postalCode,
+            "publicName": "La Moyenne Librairie",
+            "venue_type": VenueTypeCode.LIBRARY.name,
+            "isPermanent": True,
+        },
+        "_geoloc": {
+            "lat": float(offer.venue.offererAddress.address.latitude),
+            "lng": float(offer.venue.offererAddress.address.longitude),
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "extra_data, expected_music_style, expected_show_type, expected_movie_genres, expected_macro_section",
+    (
+        ({"musicType": "501"}, ["Jazz"], None, None, None),
+        ({"musicType": "600"}, ["Classique"], None, None, None),
+        ({"musicType": "-1"}, ["Autre"], None, None, None),
+        ({"musicType": " "}, [], None, None, None),
+        ({"gtl_id": "04000000", "musicType": "880"}, ["ELECTRO", "Electro"], None, None, None),
+        ({"showType": "100"}, [], "Arts de la rue", None, None),
+        ({"showType": "1200"}, [], "Spectacle Jeunesse", None, None),
+        ({"showType": "-1"}, [], "Autre", None, None),
+        ({"showType": " "}, [], None, None, None),
+        ({"genres": ["DRAMA"]}, [], None, ["DRAMA"], None),
+        ({"genres": ["ADVENTURE", "DRAMA", "FAMILY"]}, [], None, ["ADVENTURE", "DRAMA", "FAMILY"], None),
+        ({"genres": []}, [], None, [], None),
+        ({"genres": None}, [], None, None, None),
+        ({"rayon": "documentaire jeunesse histoire"}, [], None, None, "Jeunesse"),
+        ({"rayon": "petits prix"}, [], None, None, "Littérature française"),
+        ({"rayon": "ce rayon n'existe pas"}, [], None, None, None),
+        ({"rayon": None}, [], None, None, None),
+    ),
+)
+def test_serialize_offer_extra_data(
+    extra_data, expected_music_style, expected_show_type, expected_movie_genres, expected_macro_section
+):
+    # given
+    offer = offers_factories.OfferFactory(extraData=extra_data)
+
+    # when
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+
+    # then
+    assert serialized["offer"].get("musicType") == expected_music_style
+    assert serialized["offer"].get("showType") == expected_show_type
+    assert serialized["offer"].get("movieGenres") == expected_movie_genres
+    assert serialized["offer"].get("bookMacroSection") == expected_macro_section
+
+
+@pytest.mark.settings(ALGOLIA_LAST_30_DAYS_BOOKINGS_RANGE_THRESHOLDS=[1, 2, 3, 4])
+@pytest.mark.parametrize(
+    "bookings_count, expected_range",
+    (
+        (0, serialization.Last30DaysBookingsRange.VERY_LOW.value),
+        (1, serialization.Last30DaysBookingsRange.LOW.value),
+        (2, serialization.Last30DaysBookingsRange.MEDIUM.value),
+        (3, serialization.Last30DaysBookingsRange.HIGH.value),
+        (4, serialization.Last30DaysBookingsRange.VERY_HIGH.value),
+        (5, serialization.Last30DaysBookingsRange.VERY_HIGH.value),
+    ),
+)
+def test_index_last_30_days_bookings(app, bookings_count, expected_range):
+    # given
+    offer = offers_factories.StockFactory().offer
+
+    # when
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, bookings_count)
+
+    # then
+    assert serialized["offer"]["last30DaysBookings"] == bookings_count
+    assert serialized["offer"]["last30DaysBookingsRange"] == expected_range
+
+
+def test_serialize_offer_event():
+    offer = offers_factories.OfferFactory(subcategoryId=subcategories.SEANCE_CINE.id)
+    dt1 = datetime.datetime(2032, 1, 4, 12, 15)
+    offers_factories.EventStockFactory(offer=offer, beginningDatetime=dt1)
+    dt2 = datetime.datetime(2032, 1, 1, 16, 30)
+    offers_factories.EventStockFactory(offer=offer, beginningDatetime=dt2)
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    # Dates are ordered, but times are not. I don't know why we order dates.
+    assert serialized["offer"]["dates"] == [dt2.timestamp(), dt1.timestamp()]
+    assert set(serialized["offer"]["times"]) == {12 * 60 * 60 + 15 * 60, 16 * 60 * 60 + 30 * 60}
+
+
+@pytest.mark.parametrize(
+    "extra_data,ean,expected_distinct",
+    (
+        [{}, None, "1"],
+        [{"allocineId": 12345, "visa": "56070"}, None, "12345"],
+        [{"visa": "56070"}, None, "56070"],
+        [{}, "1234567890999", "1234567890999"],
+    ),
+)
+def test_serialize_offer_distinct(extra_data, ean, expected_distinct):
+    product = offers_factories.ProductFactory(extraData=extra_data, ean=ean)
+    offer = offers_factories.OfferFactory(id=1, product=product)
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["distinct"] == expected_distinct
+
+
+def test_serialize_offer_tags():
+    criterion = criteria_factories.CriterionFactory(name="formidable")
+    offer = offers_factories.OfferFactory(criteria=[criterion])
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["tags"] == ["formidable"]
+
+
+def test_serialize_offer_thumb_url():
+    product = offers_factories.ProductFactory(thumbCount=1)
+    offer = offers_factories.OfferFactory(product=product)
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["thumbUrl"] == f"/storage/thumbs/products/{humanize(offer.productId)}"
+
+
+def test_serialize_offer_has_image():
+    offer = offers_factories.MediationFactory().offer
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["hasImage"]
+
+
+def test_serialize_offer_not_has_image():
+    offer = offers_factories.OfferFactory()
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert not serialized["offer"]["hasImage"]
+
+
+def test_serialize_offer_gtl():
+    product = offers_factories.ProductFactory(extraData={"gtl_id": "01030100"})
+    offer = offers_factories.OfferFactory(
+        product=product,
+        subcategoryId=subcategories.LIVRE_PAPIER.id,
+    )
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["gtl_level1"] == "Littérature"
+    assert serialized["offer"]["gtl_level2"] == "Œuvres classiques"
+    assert serialized["offer"]["gtl_level3"] == "Antiquité"
+    assert "gtl_level4" not in serialized["offer"]
+    assert serialized["offer"]["gtlCodeLevel1"] == "01000000"
+    assert serialized["offer"]["gtlCodeLevel2"] == "01030000"
+    assert serialized["offer"]["gtlCodeLevel3"] == "01030100"
+    assert serialized["offer"]["gtlCodeLevel4"] == "01030100"
+
+
+def test_use_titelive_music_type_if_offer_is_music():
+    product = offers_factories.ProductFactory(
+        extraData={"gtl_id": "01000000"}, subcategoryId=subcategories.SUPPORT_PHYSIQUE_MUSIQUE_CD.id
+    )
+    offer = offers_factories.OfferFactory(product=product)
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["gtl_level1"] == "Musique Classique"
+    assert "gtl_level2" not in serialized["offer"]
+    assert "gtl_level3" not in serialized["offer"]
+    assert "gtl_level4" not in serialized["offer"]
+    assert serialized["offer"]["gtlCodeLevel1"] == "01000000"
+    assert serialized["offer"]["gtlCodeLevel2"] == "01000000"
+    assert serialized["offer"]["gtlCodeLevel3"] == "01000000"
+    assert serialized["offer"]["gtlCodeLevel4"] == "01000000"
+
+
+def test_serialize_offer_visa():
+    offer = offers_factories.OfferFactory(
+        extraData={"visa": "2607019901"},
+    )
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["visa"] == "2607019901"
+
+
+def test_serialize_offer_release_date():
+    product = offers_factories.ProductFactory(extraData={"releaseDate": "2024-01-01"})
+    offer = offers_factories.OfferFactory(product=product)
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["releaseDate"] == 1704067200
+
+
+def test_serialize_offer_book_format():
+    product = offers_factories.ProductFactory(extraData={"bookFormat": BookFormat.BEAUX_LIVRES.name})
+    offer = offers_factories.OfferFactory(product=product)
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["bookFormat"] == "Beaux livres"
+
+
+def test_serialize_offer_forever_headline():
+    headline_offer = offers_factories.HeadlineOfferFactory()
+    serialized = algolia.AlgoliaBackend().serialize_offer(headline_offer.offer, 0)
+    assert serialized["offer"]["isHeadline"] is True
+    assert "isHeadlineUntil" not in serialized["offer"]
+
+
+@time_machine.travel("2025-01-01")
+def test_serialize_offer_temporarily_headline():
+    now = date_utils.get_naive_utc_now()
+    headline_offer = offers_factories.HeadlineOfferFactory(timespan=(now, now + relativedelta(days=1)))
+    serialized = algolia.AlgoliaBackend().serialize_offer(headline_offer.offer, 0)
+    assert serialized["offer"]["isHeadline"] is True
+    assert serialized["offer"]["isHeadlineUntil"] == 1735776000
+
+
+def test_serialize_artist():
+    artist = artists_factories.ArtistFactory(app_search_score=4.2)
+
+    serialized = algolia.AlgoliaBackend().serialize_artist(artist)
+    assert serialized == {
+        "objectID": artist.id,
+        "app_search_score": 4.2,
+        "description": artist.description,
+        "image": artist.thumbUrl,
+        "name": artist.name,
+    }
+
+
+def test_serialize_offer_product_artists():
+    artist = artists_factories.ArtistFactory()
+    product = offers_factories.ProductFactory()
+    offer = offers_factories.OfferFactory(product=product)
+    artists_factories.ArtistProductLinkFactory(
+        artist_id=artist.id, product_id=product.id, artist_type=artists_models.ArtistType.AUTHOR
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["artists"] == [{"id": artist.id, "name": artist.name, "image": artist.thumbUrl}]
+
+
+def test_serialize_offer_artists():
+    offer = offers_factories.OfferFactory()
+    artist_1 = artists_factories.ArtistFactory(name="Alex")
+    artists_factories.ArtistOfferLinkFactory(offer_id=offer.id, artist_id=artist_1.id)
+    artist_2 = artists_factories.ArtistFactory(name="Billy", is_blacklisted=True)
+    artists_factories.ArtistOfferLinkFactory(offer_id=offer.id, artist_id=artist_2.id)
+    artists_factories.ArtistOfferLinkFactory(offer_id=offer.id, custom_name="Claude")
+
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert sorted(serialized["artists"], key=lambda a: a["name"]) == [
+        {"id": artist_1.id, "name": "Alex", "image": artist_1.image}
+    ]
+
+
+def test_exclude_blacklisted_artists():
+    artist = artists_factories.ArtistFactory(is_blacklisted=True)
+    product = offers_factories.ProductFactory()
+    offer = offers_factories.OfferFactory(product=product)
+    artists_factories.ArtistProductLinkFactory(
+        artist_id=artist.id, product_id=product.id, artist_type=artists_models.ArtistType.AUTHOR
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert "artists" not in serialized
+
+
+def test_filter_artists():
+    offer = offers_factories.OfferFactory(
+        extraData={
+            "author": "collectifs",
+            "performer": "Collectif",
+            "speaker": "Artiste1, Artiste2",
+            "stageDirector": "Artiste1;Artiste2",
+        }
+    )
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert "artist" not in serialized["offer"]
+
+
+def test_filter_on_empty_artist():
+    offer = offers_factories.OfferFactory(
+        extraData={
+            "author": None,
+            "performer": "",
+            "speaker": "Artiste1",
+            "stageDirector": "Artiste2",
+        }
+    )
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["artist"] == "Artiste1 Artiste2"
+
+
+def test_serialize_offer_chronicles_and_likes_count_when_0():
+    offer = offers_factories.OfferFactory()
+
+    offer = get_base_query_for_offer_indexation().filter(offers_models.Offer.id == offer.id).one()
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert "chroniclesCount" not in serialized["offer"]
+    assert "likes" not in serialized["offer"]
+
+
+def test_serialize_product_likes_count():
+    product = offers_factories.ProductFactory()
+    offer = offers_factories.OfferFactory(product=product)
+    reactions_factories.ReactionFactory(reactionType=ReactionTypeEnum.LIKE, product=product)
+    reactions_factories.ReactionFactory(reactionType=ReactionTypeEnum.DISLIKE, product=product)
+    reactions_factories.ReactionFactory(reactionType=ReactionTypeEnum.NO_REACTION, product=product)
+
+    offer = get_base_query_for_offer_indexation().filter(offers_models.Offer.id == offer.id).one()
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["likes"] == 1
+
+
+def test_serialize_offer_likes_count():
+    offer = offers_factories.OfferFactory()
+    reactions_factories.ReactionFactory(reactionType=ReactionTypeEnum.LIKE, offer=offer)
+    reactions_factories.ReactionFactory(reactionType=ReactionTypeEnum.DISLIKE, offer=offer)
+    reactions_factories.ReactionFactory(reactionType=ReactionTypeEnum.NO_REACTION, offer=offer)
+
+    offer = get_base_query_for_offer_indexation().filter(offers_models.Offer.id == offer.id).one()
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["likes"] == 1
+
+
+def test_serialize_offer_chronicles_count():
+    offer = offers_factories.OfferFactory()
+    chronicles_factories.ChronicleFactory(offers=[offer], isSocialMediaDiffusible=True)
+
+    offer = get_base_query_for_offer_indexation().filter(offers_models.Offer.id == offer.id).one()
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["chroniclesCount"] == 1
+
+
+def test_serialize_offer_with_product_chronicles_count():
+    product = offers_factories.ProductFactory(chroniclesCount=1)
+    offer = offers_factories.OfferFactory(product=product)
+
+    offer = get_base_query_for_offer_indexation().filter(offers_models.Offer.id == offer.id).one()
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["chroniclesCount"] == 1
+
+
+def test_serialize_offer_with_completion_score():
+    offer = offers_factories.OfferFactory()
+    offers_factories.OfferQualityFactory(offer=offer, completionScore=1.2)
+
+    offer = get_base_query_for_offer_indexation().filter(offers_models.Offer.id == offer.id).one()
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer, 0)
+    assert serialized["offer"]["completionScore"] == 1.2
+
+
+def test_serialize_venue():
+    venue = offerers_factories.VenueFactory(
+        activity=offerers_models.Activity.ART_GALLERY,
+        venueTypeCode=offerers_models.VenueTypeCode.VISUAL_ARTS,
+        audioDisabilityCompliant=True,
+        contact__email="venue@example.com",
+        contact__website="http://venue.example.com",
+        contact__phone_number="+33.123456",
+        contact__social_medias={
+            "facebook": None,
+            "instagram": None,
+            "snapchat": None,
+            "twitter": "https://twitter.com/my.venue",
+        },
+        volunteeringUrl="https://volunteering.url",
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_venue(venue)
+    assert serialized == {
+        "objectID": venue.id,
+        "activity": offerers_models.Activity.ART_GALLERY.name,
+        "city": venue.offererAddress.address.city,
+        "name": venue.name,
+        "offerer_name": venue.managingOfferer.name,
+        "venue_type": venue.venueTypeCode.name,
+        "description": venue.description,
+        "is_open_to_public": False,
+        "audio_disability": True,
+        "mental_disability": False,
+        "motor_disability": False,
+        "visual_disability": False,
+        "email": "venue@example.com",
+        "phone_number": "+33.123456",
+        "website": "http://venue.example.com",
+        "facebook": None,
+        "instagram": None,
+        "snapchat": None,
+        "twitter": "https://twitter.com/my.venue",
+        "tags": [],
+        "banner_url": venue.bannerUrl,
+        "_geoloc": {
+            "lng": float(venue.offererAddress.address.longitude),
+            "lat": float(venue.offererAddress.address.latitude),
+        },
+        "has_at_least_one_bookable_offer": False,
+        "has_volunteering_url": True,
+        "date_created": venue.dateCreated.timestamp(),
+        "postalCode": venue.offererAddress.address.postalCode,
+        "adress": venue.offererAddress.address.street,
+    }
+
+
+@pytest.mark.parametrize("volunteering_url,expected", [("https://volunteering.url", True), ("", False), (None, False)])
+def test_has_volunteering_url(volunteering_url, expected):
+    venue = offerers_factories.VenueFactory(volunteeringUrl=volunteering_url)
+
+    serialized = algolia.AlgoliaBackend().serialize_venue(venue)
+    assert serialized["has_volunteering_url"] is expected
+
+
+def test_serialize_venue_with_one_bookable_offer():
+    venue = offerers_factories.VenueFactory(isPermanent=True)
+
+    serialized = algolia.AlgoliaBackend().serialize_venue(venue)
+    assert not serialized["has_at_least_one_bookable_offer"]
+
+    offers_factories.EventStockFactory(offer__venue=venue)
+    serialized = algolia.AlgoliaBackend().serialize_venue(venue)
+    assert serialized["has_at_least_one_bookable_offer"]
+
+
+def test_serialize_future_offer():
+    publication_date = date_utils.get_naive_utc_now() - datetime.timedelta(days=5)
+    booking_allowed_dt = publication_date + datetime.timedelta(days=30)
+    beginning_date = datetime.datetime(2032, 1, 4, 12, 15)
+
+    offer_1 = offers_factories.OfferFactory(
+        subcategoryId=subcategories.FESTIVAL_MUSIQUE.id,
+        publicationDatetime=publication_date,
+        bookingAllowedDatetime=booking_allowed_dt,
+    )
+    offers_factories.EventStockFactory(offer=offer_1, price=10, beginningDatetime=beginning_date)
+
+    serialized = algolia.AlgoliaBackend().serialize_offer(offer_1, 0)
+    assert serialized["offer"]["prices"] == [decimal.Decimal("10.00")]
+    assert serialized["offer"]["dates"] == [beginning_date.timestamp()]
+    assert serialized["offer"]["times"] == [12 * 60 * 60 + 15 * 60]
+    assert serialized["offer"]["bookingAllowedDatetime"] == booking_allowed_dt.timestamp()
+
+
+def test_serialize_collective_offer_template_location_school():
+    collective_offer_template = educational_factories.CollectiveOfferTemplateOnSchoolLocationFactory(
+        interventionArea=["33", "40", "75", "93"],
+        venue__offererAddress__address__latitude=45,
+        venue__offererAddress__address__longitude=3,
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_collective_offer_template(collective_offer_template)
+    assert serialized["offer"]["locationType"] == "SCHOOL"
+    assert serialized["offer"]["departmentCodes"] == ["33", "40", "75", "93"]
+    assert sorted(serialized["offer"]["academies"]) == ["Bordeaux", "Créteil", "Paris"]
+    assert serialized["_geoloc"] == {"lat": 45, "lng": 3}
+
+
+def test_serialize_collective_offer_template_location_address():
+    collective_offer_template = educational_factories.CollectiveOfferTemplateOnOtherAddressLocationFactory(
+        offererAddress__address__latitude=45,
+        offererAddress__address__longitude=3,
+        offererAddress__address__departmentCode="33",
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_collective_offer_template(collective_offer_template)
+    assert serialized["offer"]["locationType"] == "ADDRESS"
+    assert serialized["offer"]["departmentCodes"] == ["33"]
+    assert serialized["offer"]["academies"] == ["Bordeaux"]
+    assert serialized["_geoloc"] == {"lat": 45, "lng": 3}
+
+
+def test_serialize_collective_offer_template_location_to_be_defined():
+    collective_offer_template = educational_factories.CollectiveOfferTemplateOnToBeDefinedLocationFactory(
+        interventionArea=["33", "75", "93"],
+        venue__offererAddress__address__latitude=45,
+        venue__offererAddress__address__longitude=3,
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_collective_offer_template(collective_offer_template)
+    assert serialized["offer"]["locationType"] == "TO_BE_DEFINED"
+    assert serialized["offer"]["departmentCodes"] == ["33", "75", "93"]
+    assert sorted(serialized["offer"]["academies"]) == ["Bordeaux", "Créteil", "Paris"]
+    assert serialized["_geoloc"] == {"lat": 45, "lng": 3}
+
+
+def test_serialize_collective_offer_template_intervention_area_all():
+    collective_offer_template = educational_factories.CollectiveOfferTemplateOnToBeDefinedLocationFactory(
+        interventionArea=educational_constants.ALL_INTERVENTION_AREA
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_collective_offer_template(collective_offer_template)
+    assert serialized["offer"]["locationType"] == "TO_BE_DEFINED"
+    assert serialized["offer"]["departmentCodes"] == [
+        code for code in educational_constants.ALL_INTERVENTION_AREA if code not in {"mainland", "all"}
+    ]
+    assert sorted(serialized["offer"]["academies"]) == sorted(ACADEMIES.keys() - {"Nouvelle-Calédonie"})
+
+
+def test_serialize_collective_offer_template_intervention_area_mainland():
+    collective_offer_template = educational_factories.CollectiveOfferTemplateOnToBeDefinedLocationFactory(
+        interventionArea=educational_constants.MAINLAND_INTERVENTION_AREA
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_collective_offer_template(collective_offer_template)
+    assert serialized["offer"]["locationType"] == "TO_BE_DEFINED"
+    assert serialized["offer"]["departmentCodes"] == [
+        code for code in educational_constants.MAINLAND_INTERVENTION_AREA if code != "mainland"
+    ]
+    assert sorted(serialized["offer"]["academies"]) == sorted(
+        ACADEMIES.keys() - {"Guadeloupe", "Guyane", "La Réunion", "Martinique", "Mayotte", "Nouvelle-Calédonie"}
+    )
+
+
+def test_serialize_collective_offer_template():
+    domain1 = educational_factories.EducationalDomainFactory(name="Danse")
+    domain2 = educational_factories.EducationalDomainFactory(name="Architecture")
+    venue = offerers_factories.VenueFactory()
+
+    collective_offer_template = educational_factories.CollectiveOfferTemplateFactory(
+        dateCreated=datetime.datetime(2022, 1, 1, 10, 0, 0),
+        name="Titre formidable",
+        description="description formidable",
+        students=[educational_models.StudentLevels.CAP1, educational_models.StudentLevels.CAP2],
+        venue__offererAddress__address__street="Place de la mairie",
+        venue__offererAddress__address__postalCode="86140",
+        venue__name="La Moyenne Librairie SA",
+        venue__publicName="La Moyenne Librairie",
+        venue__managingOfferer__name="Les Librairies Associées",
+        venue__offererAddress__address__departmentCode="86",
+        venue__adageId="123456",
+        educational_domains=[domain1, domain2],
+        interventionArea=None,
+        locationType=educational_models.CollectiveLocationType.ADDRESS,
+        offererAddress=offerers_factories.OfferLocationFactory(
+            address=venue.offererAddress.address,
+            label=venue.publicName,
+            venue=venue,
+        ),
+    )
+
+    serialized = algolia.AlgoliaBackend().serialize_collective_offer_template(collective_offer_template)
+    assert serialized == {
+        "objectID": f"T-{collective_offer_template.id}",
+        "offer": {
+            "dateCreated": 1641031200.0,
+            "name": "Titre formidable",
+            "students": ["CAP - 1re année", "CAP - 2e année"],
+            "domains": [domain1.id, domain2.id],
+            "interventionArea": [],
+            "locationType": educational_models.CollectiveLocationType.ADDRESS.value,
+            "description": collective_offer_template.description,
+            "departmentCodes": [collective_offer_template.offererAddress.address.departmentCode],
+            "academies": ["Paris"],
+        },
+        "offerer": {
+            "name": "Les Librairies Associées",
+        },
+        "venue": {
+            "academy": "Poitiers",
+            "departmentCode": "86",
+            "id": collective_offer_template.venue.id,
+            "name": "La Moyenne Librairie SA",
+            "publicName": "La Moyenne Librairie",
+            "adageId": collective_offer_template.venue.adageId,
+        },
+        "_geoloc": {
+            "lat": float(collective_offer_template.venue.offererAddress.address.latitude),
+            "lng": float(collective_offer_template.venue.offererAddress.address.longitude),
+        },
+        "isTemplate": True,
+        "formats": [format.value for format in collective_offer_template.formats],
+    }

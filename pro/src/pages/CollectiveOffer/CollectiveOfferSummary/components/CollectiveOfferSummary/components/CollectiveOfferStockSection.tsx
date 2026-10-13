@@ -1,0 +1,131 @@
+import type {
+  CollectiveAdditionalFeeResponseModel,
+  GetCollectiveOfferCollectiveStockResponseModel,
+} from '@/apiClient/v1'
+import { FORMAT_DD_MM_YYYY, FORMAT_HH_mm } from '@/commons/utils/date'
+import { ADDITIONAL_FEES } from '@/pages/CollectiveOffer/CollectiveOfferStock/components/AdditionalFeesForm/constants'
+import { SummaryDescriptionList } from '@/ui-kit/SummaryLayout/SummaryDescriptionList'
+import { SummarySubSection } from '@/ui-kit/SummaryLayout/SummarySubSection'
+
+import styles from './CollectiveOfferStockSection.module.scss'
+import { DEFAULT_RECAP_VALUE } from './constants'
+import { formatDateTime } from './utils/formatDatetime'
+
+export interface CollectiveOfferStockSectionProps {
+  stock?: GetCollectiveOfferCollectiveStockResponseModel | null
+  venueDepartmentCode?: string | null
+}
+
+const getDateText = (
+  datetime: string | null | undefined,
+  venueDepartmentCode: string | null | undefined,
+  format: string = FORMAT_DD_MM_YYYY
+) =>
+  datetime
+    ? formatDateTime(datetime, format, venueDepartmentCode)
+    : DEFAULT_RECAP_VALUE
+
+export const CollectiveOfferStockSection = ({
+  stock,
+  venueDepartmentCode,
+}: CollectiveOfferStockSectionProps) => {
+  const dateDescriptions = [
+    {
+      title: 'Date de début',
+      text: getDateText(stock?.startDatetime, venueDepartmentCode),
+    },
+    {
+      title: 'Date de fin',
+      text: getDateText(stock?.endDatetime, venueDepartmentCode),
+    },
+    {
+      title: 'Horaire',
+      text: getDateText(
+        stock?.startDatetime,
+        venueDepartmentCode,
+        FORMAT_HH_mm
+      ),
+    },
+  ]
+
+  const bookingLimitDescriptions = [
+    {
+      text: getDateText(stock?.bookingLimitDatetime, venueDepartmentCode),
+    },
+  ]
+
+  const participantsDescriptions = [
+    {
+      title: "Nombre d'élèves",
+      text: stock?.numberOfTickets || DEFAULT_RECAP_VALUE,
+    },
+    {
+      title: "Nombre d'accompagnateurs",
+      text: stock?.numberOfTeachers ?? DEFAULT_RECAP_VALUE,
+    },
+  ]
+
+  const priceDescriptions = [
+    {
+      title: 'Tarif de la prestation',
+      text:
+        stock?.servicePrice === null || stock?.servicePrice === undefined
+          ? DEFAULT_RECAP_VALUE
+          : `${stock.servicePrice}€`,
+    },
+    {
+      title: 'Frais annexes',
+      text: (stock?.collectiveAdditionalFees?.length ?? 0) > 0 ? 'Oui' : 'Non',
+    },
+    ...((stock?.collectiveAdditionalFees?.length ?? 0) > 0
+      ? [
+          {
+            title: 'Type de frais annexe',
+            isBlock: true,
+            stacked: true,
+            text: (
+              <ul className={styles['additional-fees-list']}>
+                {stock?.collectiveAdditionalFees?.map(
+                  (fee: CollectiveAdditionalFeeResponseModel) => (
+                    <li key={`${fee.type}-${fee.label}`}>
+                      {fee.label ?? ADDITIONAL_FEES[fee.type]} - {fee.amount}€
+                    </li>
+                  )
+                )}
+              </ul>
+            ),
+          },
+        ]
+      : []),
+    {
+      title: 'Prix total TTC',
+      text:
+        stock?.price === null || stock?.price === undefined
+          ? DEFAULT_RECAP_VALUE
+          : `${stock.price}€`,
+    },
+  ]
+
+  return (
+    <>
+      <SummarySubSection title="Date et heure" shouldShowDivider={false}>
+        <SummaryDescriptionList descriptions={dateDescriptions} />
+      </SummarySubSection>
+      <SummarySubSection
+        title="Date limite de réservation"
+        shouldShowDivider={false}
+      >
+        <SummaryDescriptionList descriptions={bookingLimitDescriptions} />
+      </SummarySubSection>
+      <SummarySubSection
+        title="Nombre de participants"
+        shouldShowDivider={false}
+      >
+        <SummaryDescriptionList descriptions={participantsDescriptions} />
+      </SummarySubSection>
+      <SummarySubSection title="Prix de votre offre" shouldShowDivider>
+        <SummaryDescriptionList descriptions={priceDescriptions} />
+      </SummarySubSection>
+    </>
+  )
+}

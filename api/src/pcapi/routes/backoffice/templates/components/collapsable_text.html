@@ -1,0 +1,40 @@
+{% macro collapsable_text(id, short, long) %}
+  <div class="pc-display-selector"
+       data-pc-input-name="collapsable-text-{{ id }}">
+    {% if short == long %}
+      <div>{{ short | nl2br }}</div>
+    {% else %}
+      <label class="form-check-label w-100"
+             for="id-{{ id }}-short"
+             id="label-{{ id }}-long">
+        <input class="form-check-input d-none"
+               type="radio"
+               name="collapsable-text-{{ id }}"
+               id="id-{{ id }}-long"
+               value="label-{{ id }}-long">
+        <div class="d-flex">
+          <div>{{ long | nl2br }}</div>
+          <div class="link-primary ml-auto">
+            <i class="bi bi-chevron-up"></i>
+          </div>
+        </div>
+      </label>
+      <label class="form-check-label w-100"
+             for="id-{{ id }}-long"
+             id="label-{{ id }}-short">
+        <input class="form-check-input d-none"
+               type="radio"
+               name="collapsable-text-{{ id }}"
+               id="id-{{ id }}-short"
+               value="label-{{ id }}-short"
+               checked>
+        <div class="d-flex">
+          <div>{{ short | nl2br }}…</div>
+          <div class="link-primary ml-auto">
+            <i class="bi bi-chevron-down"></i>
+          </div>
+        </div>
+      </label>
+    {% endif %}
+  </div>
+{% endmacro %}

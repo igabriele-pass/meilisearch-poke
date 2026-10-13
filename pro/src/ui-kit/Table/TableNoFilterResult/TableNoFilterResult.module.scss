@@ -1,0 +1,33 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_a11y.scss" as a11y;
+
+.search-no-results {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  margin: var(--size-spacing-xxl);
+  text-align: center;
+
+  &-icon {
+    color: var(--color-icon-subtle);
+  }
+
+  &-title {
+    @include fonts.title3;
+
+    margin-top: var(--size-spacing-xl);
+    text-align: center;
+  }
+
+  &-subtitle {
+    @include fonts.body;
+  }
+
+  &-cta {
+    margin-top: var(--size-spacing-xl);
+  }
+}
+
+.visually-hidden {
+  @include a11y.visually-hidden;
+}

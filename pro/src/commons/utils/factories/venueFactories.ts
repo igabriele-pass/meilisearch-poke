@@ -1,0 +1,178 @@
+import {
+  DisplayableActivity,
+  type GetVenueAddressResponseModel,
+  type GetVenueManagingOffererResponseModel,
+  type GetVenueResponseModel,
+  type LocationResponseModelV2,
+  type VenueListItemLiteResponseModel,
+} from '@/apiClient/v1'
+
+import type { PartialExcept } from '../types'
+
+export const makeGetVenueManagingOffererResponseModel = <
+  T extends PartialExcept<GetVenueManagingOffererResponseModel, 'id'>,
+>(
+  override: T
+): Omit<GetVenueManagingOffererResponseModel, keyof T> & T => {
+  const fake: GetVenueManagingOffererResponseModel = {
+    id: override.id,
+    isClosed: false,
+    isValidated: false,
+    name: `Entité ${override.id}`,
+    siren: '123456789',
+  }
+
+  return {
+    ...fake,
+    ...override,
+  }
+}
+
+export const makeGetVenueResponseModel = <
+  T extends PartialExcept<GetVenueResponseModel, 'id'>,
+>(
+  override: T
+): Omit<GetVenueResponseModel, keyof T> & T => {
+  const offererId = override.managingOfferer?.id ?? 1
+  const offererName = override.managingOfferer?.name ?? `Entité ${offererId}`
+  const offerer =
+    override.managingOfferer ??
+    makeGetVenueManagingOffererResponseModel({
+      id: offererId,
+      name: offererName,
+    })
+
+  const location: LocationResponseModelV2 = {
+    id: 2,
+    banId: null,
+    city: 'Paris',
+    departmentCode: null,
+    inseeCode: null,
+    isManualEdition: false,
+    isVenueLocation: false,
+    label: null,
+    latitude: 0,
+    longitude: 0,
+    postalCode: '75001',
+    street: null,
+  }
+
+  const fake: GetVenueResponseModel = {
+    id: override.id,
+    allowedOnAdage: false,
+    audioDisabilityCompliant: false,
+    adageInscriptionDate: null,
+    bankAccountStatus: null,
+    bannerMeta: null,
+    bannerUrl: null,
+    bookingEmail: `booking.${override.id}@test.com`,
+    collectiveDescription: null,
+    lastCollectiveDmsApplication: null,
+    collectiveDomains: [],
+    collectiveEmail: null,
+    collectiveInterventionArea: null,
+    collectiveLegalStatus: null,
+    collectivePhone: null,
+    collectiveStudents: null,
+    collectiveWebsite: null,
+    comment: null,
+    contact: null,
+    dateCreated: new Date().toISOString(),
+    description: 'description',
+    externalAccessibilityData: null,
+    externalAccessibilityId: null,
+    hasActiveIndividualOffer: false,
+    hasAtLeastOneBookableOffer: false,
+    hasHighlightRequest: false,
+    hasAdageId: false,
+    hasOffers: false,
+    hasNonFreeOffers: false,
+    isCaledonian: false,
+    isOnboarded: false,
+    isOpenToPublic: false,
+    isPermanent: false,
+    isPricingPoint: false,
+    isValidated: false,
+    location: location,
+    managingOfferer: offerer,
+    mentalDisabilityCompliant: false,
+    motorDisabilityCompliant: false,
+    name: `Nom de la structure ${override.id}`,
+    publicName: `Nom public de la structure ${override.id}`,
+    activity: DisplayableActivity.OTHER,
+    pricingPoint: null,
+    siret: null,
+    visualDisabilityCompliant: false,
+    canDisplayHighlights: false,
+    hasNonDraftOffers: false,
+    volunteeringUrl: null,
+    withdrawalDetails: null,
+    openingHours: null,
+    state: null,
+  }
+
+  return {
+    ...fake,
+    ...override,
+  }
+}
+
+let venueAddressId = 1
+
+export const venueAddressFactory = (
+  venueId: number,
+  customVenueAddress: Partial<GetVenueAddressResponseModel> = {}
+): GetVenueAddressResponseModel => {
+  const currentOaId = venueAddressId++
+
+  return {
+    venueId: venueId,
+    addressId: currentOaId,
+    id: currentOaId,
+    label: 'ma venue',
+    city: 'Paris',
+    postalCode: '75001',
+    street: '1 Rue de paris',
+    departmentCode: '75',
+    venueName: 'some venue',
+    ...customVenueAddress,
+  }
+}
+
+export const makeVenueListItemLiteResponseModel = <
+  T extends PartialExcept<VenueListItemLiteResponseModel, 'id'>,
+>(
+  override: T
+): Omit<VenueListItemLiteResponseModel, keyof T> & T => {
+  const offererId = override.managingOfferer?.id ?? 1
+  const location: LocationResponseModelV2 = {
+    id: 2,
+    banId: null,
+    city: 'Paris',
+    departmentCode: null,
+    inseeCode: null,
+    isManualEdition: false,
+    isVenueLocation: false,
+    label: null,
+    latitude: 0,
+    longitude: 0,
+    postalCode: '75001',
+    street: null,
+  }
+
+  const fake: VenueListItemLiteResponseModel = {
+    id: override.id,
+    location: location,
+    managingOfferer: {
+      id: offererId,
+      isClosed: false,
+    },
+    publicName: `Nom public de la structure ${override.id}`,
+    state: null,
+  }
+
+  return {
+    ...fake,
+    ...override,
+  }
+}

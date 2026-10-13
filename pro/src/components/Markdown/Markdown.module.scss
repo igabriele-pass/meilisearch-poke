@@ -1,0 +1,12 @@
+.markdown-link {
+  font-family: var(--font-semi-bold-family);
+
+  &:hover {
+    text-decoration: underline;
+  }
+}
+
+.markdown {
+  display: block;
+  white-space: pre-line;
+}

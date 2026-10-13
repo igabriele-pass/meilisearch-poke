@@ -1,0 +1,292 @@
+import {
+  CollectiveLocationType,
+  type GetCollectiveOfferVenueResponseModel,
+  type LocationResponseModelV2,
+  OfferContactFormEnum,
+} from '@/apiClient/v1'
+import { getDefaultEducationalValues } from '@/commons/core/OfferEducational/constants'
+import { formatShortDateForInput } from '@/commons/utils/date'
+import {
+  defaultGetVenue,
+  getCollectiveOfferTemplateFactory,
+} from '@/commons/utils/factories/collectiveApiFactories'
+
+import { computeInitialValuesFromOffer } from '../computeInitialValuesFromOffer'
+
+const venueAddress: LocationResponseModelV2 = {
+  city: 'Paris',
+  id: 1,
+  isVenueLocation: true,
+  latitude: 3,
+  longitude: 2,
+  isManualEdition: false,
+  postalCode: '75018',
+  street: 'rue de la paix',
+  banId: '',
+  departmentCode: '75',
+  inseeCode: '',
+  label: '',
+}
+
+const venue = {
+  ...defaultGetVenue,
+  location: venueAddress,
+  id: 2,
+}
+
+const offerer = {
+  allowedOnAdage: true,
+  id: 1,
+  managedVenues: [venue],
+  siren: '123456789',
+  name: 'toto',
+}
+
+const offerVenue: GetCollectiveOfferVenueResponseModel = {
+  id: 2,
+  managingOfferer: offerer,
+  name: 'Nom de la structure 2',
+  publicName: 'Nom public de la structure 2',
+  departementCode: '33',
+  imgUrl: null,
+  imgAlternativeText: null,
+}
+
+describe('computeInitialValuesFromOffer', () => {
+  it('should return default values when no offer is provided', () => {
+    expect(computeInitialValuesFromOffer(offerer, false, venue)).toEqual({
+      ...getDefaultEducationalValues(),
+      offererId: '1',
+      venueId: '2',
+      city: 'Paris',
+      latitude: '3',
+      longitude: '2',
+      postalCode: '75018',
+      street: 'rue de la paix',
+      location: {
+        locationType: CollectiveLocationType.ADDRESS,
+        location: {
+          id: '1',
+          isManualEdition: false,
+          isVenueLocation: true,
+          label: 'Nom public de la structure',
+        },
+      },
+      contactUrl: undefined,
+    })
+  })
+
+  it('should pre-set todays dates for a template offer creation initial values', () => {
+    expect(
+      computeInitialValuesFromOffer(null, true, venue).beginningDate
+    ).toEqual(formatShortDateForInput(new Date()))
+  })
+
+  it('should fill the time values to the start date time', () => {
+    expect(
+      computeInitialValuesFromOffer(
+        null,
+        true,
+        venue,
+        getCollectiveOfferTemplateFactory({
+          dates: {
+            end: '2024-01-29T23:00:28.040559Z',
+            start: '2024-01-23T23:00:28.040547Z',
+          },
+        })
+      ).hour
+    ).toEqual('23:00')
+  })
+
+  it('should create a default template offer form with custom contact options', () => {
+    expect(
+      computeInitialValuesFromOffer(
+        null,
+        true,
+        venue,
+        undefined,
+        undefined,
+        false
+      )
+    ).toEqual(
+      expect.objectContaining({
+        contactOptions: { email: false, phone: false, form: false },
+        contactFormType: 'form',
+      })
+    )
+  })
+
+  it('should create a template from an offer with offer email', () => {
+    expect(
+      computeInitialValuesFromOffer(
+        null,
+        true,
+        venue,
+        getCollectiveOfferTemplateFactory({
+          contactEmail: 'email@test.co',
+          contactPhone: null,
+        }),
+        undefined,
+        false
+      )
+    ).toEqual(
+      expect.objectContaining({
+        contactOptions: { email: true, phone: false, form: false },
+        contactEmail: 'email@test.co',
+      })
+    )
+  })
+
+  it('should create a template from an offer with offer phone', () => {
+    expect(
+      computeInitialValuesFromOffer(
+        null,
+        true,
+        venue,
+        getCollectiveOfferTemplateFactory({
+          contactEmail: undefined,
+          contactPhone: '00000000',
+        }),
+        undefined,
+        false
+      )
+    ).toEqual(
+      expect.objectContaining({
+        contactOptions: { email: false, phone: true, form: false },
+        phone: '00000000',
+      })
+    )
+  })
+
+  it('should create a template from an offer with offer form url', () => {
+    expect(
+      computeInitialValuesFromOffer(
+        null,
+        true,
+        venue,
+        getCollectiveOfferTemplateFactory({
+          contactEmail: undefined,
+          contactPhone: undefined,
+          contactForm: undefined,
+          contactUrl: 'http://testurl.com',
+        }),
+        undefined,
+        false
+      )
+    ).toEqual(
+      expect.objectContaining({
+        contactOptions: { email: false, phone: false, form: true },
+        contactUrl: 'http://testurl.com',
+      })
+    )
+  })
+
+  it('should create a template from an offer with offer default form', () => {
+    expect(
+      computeInitialValuesFromOffer(
+        null,
+        true,
+        venue,
+        getCollectiveOfferTemplateFactory({
+          contactEmail: undefined,
+          contactPhone: undefined,
+          contactForm: OfferContactFormEnum.FORM,
+          contactUrl: undefined,
+        }),
+        undefined,
+        false
+      )
+    ).toEqual(
+      expect.objectContaining({
+        contactOptions: { email: false, phone: false, form: true },
+      })
+    )
+  })
+
+  it('should set location to specific address when offer is located on another address than its venue', () => {
+    expect(
+      computeInitialValuesFromOffer(
+        offerer,
+        true,
+        venue,
+        getCollectiveOfferTemplateFactory({
+          location: {
+            locationType: CollectiveLocationType.ADDRESS,
+            location: {
+              label: 'théâtre de savoie',
+              id: 1995,
+              isVenueLocation: false,
+              city: 'Chambéry',
+              street: "rue de l'espoir",
+              isManualEdition: false,
+              latitude: 12,
+              longitude: 3,
+              postalCode: '31000',
+              departmentCode: '33',
+              inseeCode: '',
+              banId: '',
+            },
+            locationComment: null,
+          },
+          venue: offerVenue,
+        }),
+        undefined,
+        false
+      )
+    ).toEqual(
+      expect.objectContaining({
+        city: 'Chambéry',
+        latitude: '12',
+        longitude: '3',
+        postalCode: '31000',
+        street: "rue de l'espoir",
+        location: {
+          location: {
+            isVenueLocation: false,
+            isManualEdition: false,
+            id: 'SPECIFIC_ADDRESS',
+            label: 'théâtre de savoie',
+          },
+          locationType: 'ADDRESS',
+          locationComment: null,
+        },
+      })
+    )
+  })
+
+  it('should set location to venue address when offer is located in its venue', () => {
+    expect(
+      computeInitialValuesFromOffer(
+        offerer,
+        true,
+        venue,
+        getCollectiveOfferTemplateFactory({
+          location: {
+            locationType: CollectiveLocationType.ADDRESS,
+            location: venueAddress,
+            locationComment: null,
+          },
+        }),
+        undefined,
+        false
+      )
+    ).toEqual(
+      expect.objectContaining({
+        city: 'Paris',
+        latitude: '3',
+        longitude: '2',
+        postalCode: '75018',
+        street: 'rue de la paix',
+        location: {
+          location: {
+            id: '1',
+            isVenueLocation: true,
+            isManualEdition: false,
+            label: 'Nom public de la structure',
+          },
+          locationType: 'ADDRESS',
+        },
+      })
+    )
+  })
+})

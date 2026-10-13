@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    "typeRoots": [
+      "./node_modules/@types",
+      "src/commons/custom_types",
+      "./node_modules"
+    ],
+    "plugins": [{ "name": "typescript-plugin-css-modules" }],
+    "allowJs": true,
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "lib": ["dom", "dom.iterable", "es2021"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "noFallthroughCasesInSwitch": true,
+    // "noUncheckedIndexedAccess": true,
+    // "exactOptionalPropertyTypes": true,
+    "noImplicitAny": true,
+    "noImplicitReturns": true,
+    "noImplicitThis": true,
+    "outDir": "./built",
+    "paths": {
+      "@/*": ["./src/*"],
+      "*": ["./src/*"]
+    },
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "target": "es6",
+    "types": ["node", "vite/client", "vitest/globals"]
+  },
+  "include": ["./src/**/*.ts", "./src/**/*.tsx", "./typings/**/*.d.ts"],
+  "exclude": [
+    "node_modules",
+    "__mocks__/**",
+    "coverage/**",
+    "**/*.js",
+    "**/*.jsx",
+    "./config/**",
+    "./e2e/**"
+  ]
+}

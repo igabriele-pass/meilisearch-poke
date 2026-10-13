@@ -1,0 +1,269 @@
+import { yupResolver } from '@hookform/resolvers/yup'
+import { useState } from 'react'
+import { FormProvider, useForm } from 'react-hook-form'
+import { useLocation, useNavigate } from 'react-router'
+import useSWR, { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import { getHumanReadableApiError } from '@/apiClient/helpers'
+import {
+  type GetIndividualOfferResponseModel,
+  StocksOrderedBy,
+} from '@/apiClient/v1'
+import {
+  GET_NEXT_STOCK_QUERY_KEY,
+  GET_OFFER_QUERY_KEY,
+} from '@/commons/config/swrQueryKeys'
+import { useIndividualOfferContext } from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import {
+  INDIVIDUAL_OFFER_WIZARD_STEP_IDS,
+  OFFER_WIZARD_MODE,
+} from '@/commons/core/Offers/constants'
+import { getIndividualOfferUrl } from '@/commons/core/Offers/utils/getIndividualOfferUrl'
+import { assertOrFrontendError } from '@/commons/errors/assertOrFrontendError'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { useSyncVenueCache } from '@/commons/hooks/useSyncVenueCache'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { getDepartmentCode } from '@/commons/utils/getDepartmentCode'
+import { serializeDateTimeToUTCFromLocalDepartment } from '@/commons/utils/timezone'
+import { DisplayOfferInAppLink } from '@/components/DisplayOfferInAppLink/DisplayOfferInAppLink'
+import { OfferAppPreview } from '@/components/OfferAppPreview/OfferAppPreview'
+import { RedirectToBankAccountDialog } from '@/components/RedirectToBankAccountDialog/RedirectToBankAccountDialog'
+import { Banner } from '@/design-system/Banner/Banner'
+import { ButtonVariant } from '@/design-system/Button/types'
+import phoneStrokeIcon from '@/icons/stroke-phone.svg'
+import { getOfferConditionalFields } from '@/pages/IndividualOffer/commons/getOfferConditionalFields'
+import { ActionBar } from '@/pages/IndividualOffer/components/ActionBar/ActionBar'
+import { MediaSection } from '@/pages/IndividualOfferSummary/components/MediaSection/MediaSection'
+import { PriceCategoriesSection } from '@/pages/IndividualOfferSummary/components/PriceCategoriesSection/PriceCategoriesSection'
+import { Spinner } from '@/ui-kit/Spinner/Spinner'
+import { SummaryAside } from '@/ui-kit/SummaryLayout/SummaryAside'
+import { SummaryContent } from '@/ui-kit/SummaryLayout/SummaryContent'
+import { SummaryLayout } from '@/ui-kit/SummaryLayout/SummaryLayout'
+import { SvgIcon } from '@/ui-kit/SvgIcon/SvgIcon'
+
+import styles from './IndividualOfferSummaryScreen.module.scss'
+import { OfferPublicationForm } from './OfferPublicationForm/OfferPublicationForm'
+import type { PublicationFormValues } from './OfferPublicationForm/types'
+import { validationSchema } from './OfferPublicationForm/validationSchema'
+import { OfferSection } from './OfferSection/OfferSection'
+import { StockSection } from './StockSection/StockSection'
+
+interface IndividualOfferSummaryScreenProps {
+  offer: GetIndividualOfferResponseModel
+}
+export const IndividualOfferSummaryScreen = ({
+  offer,
+}: Readonly<IndividualOfferSummaryScreenProps>) => {
+  const [displayRedirectDialog, setDisplayRedirectDialog] = useState(false)
+  const snackBar = useSnackBar()
+  const { mutate } = useSWRConfig()
+  const { syncVenue } = useSyncVenueCache()
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
+  const isOnboarding = pathname.includes('onboarding')
+  const { subCategories, hasPublishedOfferWithSameEan } =
+    useIndividualOfferContext()
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+
+  const getStocksQuery = useSWR(
+    offer.id ? [GET_NEXT_STOCK_QUERY_KEY, offer.id] : null,
+    ([, offerId]) =>
+      api.getStocks({
+        path: { offer_id: offerId },
+        query: {
+          stocks_limit_per_page: 1,
+          page: 1,
+          order_by_desc: false,
+          order_by: StocksOrderedBy.BOOKING_LIMIT_DATETIME,
+          only_future_stocks: true,
+        },
+      })
+  )
+
+  const nextBookingLimitDatetime =
+    getStocksQuery.data?.stocks[0]?.bookingLimitDatetime ?? ''
+
+  const onPublish = async (values: PublicationFormValues) => {
+    const departmentCode = getDepartmentCode(offer, selectedPartnerVenue)
+
+    try {
+      const publishIndividualOfferResponse = await api.patchPublishOffer({
+        body: {
+          id: offer.id,
+          publicationDatetime:
+            values.publicationMode === 'later' &&
+            values.publicationDate &&
+            values.publicationTime
+              ? serializeDateTimeToUTCFromLocalDepartment(
+                  values.publicationDate,
+                  values.publicationTime,
+                  departmentCode
+                )
+              : undefined,
+          bookingAllowedDatetime:
+            values.bookingAllowedMode === 'later' &&
+            values.bookingAllowedDate &&
+            values.bookingAllowedTime
+              ? serializeDateTimeToUTCFromLocalDepartment(
+                  values.bookingAllowedDate,
+                  values.bookingAllowedTime,
+                  departmentCode
+                )
+              : undefined,
+        },
+      })
+      await mutate([GET_OFFER_QUERY_KEY, offer.id])
+
+      // Sync venue data between SWR cache and Redux store to update the homepage
+      await syncVenue(offer.venue.id)
+
+      const shouldDisplayRedirectDialog =
+        isOnboarding ||
+        (publishIndividualOfferResponse.isNonFreeOffer &&
+          !selectedPartnerVenue.hasNonFreeOffers &&
+          !selectedPartnerVenue.bankAccountStatus)
+
+      if (shouldDisplayRedirectDialog) {
+        setDisplayRedirectDialog(true)
+      } else {
+        await navigate(offerConfirmationStepUrl)
+      }
+    } catch (error) {
+      snackBar.error(getHumanReadableApiError(error))
+    }
+  }
+  const methods = useForm<PublicationFormValues>({
+    defaultValues: {
+      publicationMode: 'now',
+      publicationDate: '',
+      publicationTime: '',
+      bookingAllowedMode: 'now',
+      bookingAllowedDate: '',
+      bookingAllowedTime: '',
+    },
+    mode: 'onBlur',
+    resolver: yupResolver(validationSchema),
+    context: {
+      nextBookingLimitDatetime,
+    },
+  })
+
+  const canBeDuo = subCategories.find(
+    (subCategory) => subCategory.id === offer.subcategoryId
+  )?.canBeDuo
+
+  const offerConfirmationStepUrl = isOnboarding
+    ? '/accueil'
+    : getIndividualOfferUrl({
+        offerId: offer.id,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.CONFIRMATION,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        isOnboarding,
+      })
+
+  /* istanbul ignore next: DEBT, TO FIX */
+  const handlePreviousStep = () => {
+    void navigate(
+      getIndividualOfferUrl({
+        offerId: offer.id,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.PRACTICAL_INFOS,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        isOnboarding,
+      })
+    )
+  }
+  const offerSubCategory = subCategories.find(
+    (s) => s.id === offer.subcategoryId
+  )
+  assertOrFrontendError(
+    offerSubCategory,
+    `'offerSubCategory' with id "${offer.subcategoryId}" not found in subCategories.`
+  )
+
+  const offerConditionalFields = getOfferConditionalFields({
+    offerSubcategory: offerSubCategory,
+    shouldReceiveEmailNotifications: true,
+  })
+  const conditionalFields = [
+    ...offerSubCategory.conditionalFields,
+    ...offerConditionalFields,
+  ]
+  if (!getStocksQuery.data) {
+    return <Spinner />
+  }
+
+  return (
+    <FormProvider {...methods}>
+      <form onSubmit={methods.handleSubmit(onPublish)} noValidate>
+        <div className={styles['offer-preview-banners']}>
+          <Banner
+            title="Vous y êtes presque !"
+            description={
+              <p>
+                Vérifiez les informations ci-dessous avant de publier votre
+                offre.
+              </p>
+            }
+          />
+
+          <OfferPublicationForm maxDate={nextBookingLimitDatetime} />
+        </div>
+
+        <SummaryLayout>
+          <SummaryContent>
+            <OfferSection conditionalFields={conditionalFields} offer={offer} />
+            <MediaSection
+              offerId={offer.id}
+              videoData={offer.videoData}
+              isOnCreation
+            />
+            {offer.isEvent && (
+              <PriceCategoriesSection
+                offer={offer}
+                canBeDuo={canBeDuo}
+                shouldShowDivider
+              />
+            )}
+            <StockSection offer={offer} canBeDuo={canBeDuo} />
+          </SummaryContent>
+
+          <SummaryAside>
+            <div className={styles['offer-creation-preview-title']}>
+              <SvgIcon
+                src={phoneStrokeIcon}
+                alt=""
+                className={styles['icon-info-phone']}
+              />
+              <h2 className={styles.title}>Aperçu dans l’app</h2>
+            </div>
+
+            <OfferAppPreview offer={offer} />
+
+            <DisplayOfferInAppLink
+              id={offer.id}
+              variant={ButtonVariant.SECONDARY}
+              label="Visualiser dans l’app"
+            />
+          </SummaryAside>
+        </SummaryLayout>
+
+        <ActionBar
+          isEmbedded
+          onClickPrevious={handlePreviousStep}
+          step={INDIVIDUAL_OFFER_WIZARD_STEP_IDS.SUMMARY}
+          publicationMode={methods.watch('publicationMode')}
+          isDisabled={
+            methods.formState.isSubmitting || hasPublishedOfferWithSameEan
+          }
+        />
+
+        <RedirectToBankAccountDialog
+          cancelRedirectUrl={offerConfirmationStepUrl}
+          isDialogOpen={displayRedirectDialog}
+        />
+      </form>
+    </FormProvider>
+  )
+}

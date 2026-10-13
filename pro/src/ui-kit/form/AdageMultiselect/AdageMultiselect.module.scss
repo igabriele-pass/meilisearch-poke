@@ -1,0 +1,24 @@
+@use "styles/mixins/_rem.scss" as rem;
+
+.container {
+  display: flex;
+  flex-direction: column;
+  height: rem.torem(250px);
+}
+
+.search-list {
+  display: flex;
+  flex-direction: column;
+  max-height: rem.torem(400px);
+  overflow-y: scroll;
+  padding: var(--size-spacing-s) 0 0 0;
+  color: var(--color-text-default);
+
+  &-item:last-child {
+    margin-bottom: rem.torem(20px);
+  }
+}
+
+.checkbox-label {
+  padding: var(--size-spacing-s) 0;
+}

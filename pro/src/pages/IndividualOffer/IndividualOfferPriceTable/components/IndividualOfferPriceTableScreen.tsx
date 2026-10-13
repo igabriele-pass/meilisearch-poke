@@ -1,0 +1,188 @@
+import { yupResolver } from '@hookform/resolvers/yup'
+import { Controller, FormProvider, useForm } from 'react-hook-form'
+import { useLocation, useNavigate } from 'react-router'
+
+import type {
+  GetIndividualOfferResponseModel,
+  GetOfferStockResponseModel,
+} from '@/apiClient/v1'
+import { useIndividualOfferContext } from '@/commons/context/IndividualOfferContext/IndividualOfferContext'
+import { REIMBURSEMENT_RULES } from '@/commons/core/Finances/constants'
+import {
+  INDIVIDUAL_OFFER_WIZARD_STEP_IDS,
+  OFFER_WIZARD_MODE,
+} from '@/commons/core/Offers/constants'
+import { getIndividualOfferUrl } from '@/commons/core/Offers/utils/getIndividualOfferUrl'
+import { isOfferDisabled } from '@/commons/core/Offers/utils/isOfferDisabled'
+import { isOfferSynchronized } from '@/commons/core/Offers/utils/typology'
+import { assertOrFrontendError } from '@/commons/errors/assertOrFrontendError'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useFormNavigationGuard } from '@/commons/hooks/useFormNavigationGuard/useFormNavigationGuard'
+import { useIsCaledonian } from '@/commons/hooks/useIsCaledonian'
+import { useOfferWizardMode } from '@/commons/hooks/useOfferWizardMode'
+import { ensureSelectedPartnerVenue } from '@/commons/store/user/selectors'
+import { withVenueHelpers } from '@/commons/utils/withVenueHelpers'
+import { DuoCheckbox } from '@/components/DuoCheckbox/DuoCheckbox'
+import { FormLayout } from '@/components/FormLayout/FormLayout'
+import { ScrollToFirstHookFormErrorAfterSubmit } from '@/components/ScrollToFirstErrorAfterSubmit/ScrollToFirstErrorAfterSubmit'
+import { getAfterSubmitPath } from '@/pages/IndividualOffer/commons/utils/getAfterSubmitPath'
+import { ActionBar } from '@/pages/IndividualOffer/components/ActionBar/ActionBar'
+
+import { SynchronizedBanner } from '../../components/SynchronizedBanner/SynchronizedBanner'
+import { useSaveOfferPriceTable } from '../commons/hooks/useSaveOfferPriceTable'
+import { PriceTableValidationSchema } from '../commons/schemas'
+import type { PriceTableFormContext } from '../commons/types'
+import { toFormValues } from '../commons/utils/toFormValues'
+import { ActivationCodeCallout } from './ActivationCodeCallout'
+import { NonRefundableCallout } from './NonRefundableCallout'
+import { PriceTableForm } from './PriceTableForm/PriceTableForm'
+
+interface IndividualOfferPriceTableScreenProps {
+  offer: GetIndividualOfferResponseModel
+  offerStocks: GetOfferStockResponseModel[] | undefined
+}
+export const IndividualOfferPriceTableScreen = ({
+  offer,
+  offerStocks,
+}: IndividualOfferPriceTableScreenProps) => {
+  const mode = useOfferWizardMode()
+  const navigate = useNavigate()
+  const { pathname } = useLocation()
+  const selectedPartnerVenue = useAppSelector(ensureSelectedPartnerVenue)
+  const isClosed = withVenueHelpers(selectedPartnerVenue).isClosed
+  const { subCategories, hasPublishedOfferWithSameEan } =
+    useIndividualOfferContext()
+
+  const isCaledonian = useIsCaledonian()
+
+  const offerSubcategory = subCategories.find(
+    (subCategory) => subCategory.id === offer.subcategoryId
+  )
+  assertOrFrontendError(
+    offerSubcategory,
+    '`offerSubcategory` not found in subcategories.'
+  )
+
+  const isOnboarding = pathname.includes('onboarding')
+  const schemaValidationContext: PriceTableFormContext = {
+    isCaledonian,
+    mode,
+    offer,
+  }
+
+  const canBeDuo = subCategories.find(
+    (subCategory) => subCategory.id === offer.subcategoryId
+  )?.canBeDuo
+
+  const form = useForm({
+    context: schemaValidationContext,
+    defaultValues: toFormValues(
+      offer,
+      offer.isEvent ? (offer.priceCategories ?? []) : (offerStocks ?? []),
+      schemaValidationContext,
+      selectedPartnerVenue
+    ),
+    mode: 'onBlur',
+    resolver: yupResolver(PriceTableValidationSchema),
+  })
+
+  const { save, pendingSuccessMessageRef } = useSaveOfferPriceTable({
+    form,
+    offer,
+  })
+
+  const afterSubmitPath = getAfterSubmitPath({
+    offerId: offer.id,
+    mode,
+    isOnboarding,
+    followingStep: offer.isEvent
+      ? INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TIMETABLE
+      : INDIVIDUAL_OFFER_WIZARD_STEP_IDS.PRACTICAL_INFOS,
+  })
+  const afterSubmitState = () =>
+    pendingSuccessMessageRef.current
+      ? { successMessage: pendingSuccessMessageRef.current }
+      : undefined
+  const { navigationGuardedSubmitHandler, navigationGuardDialog } =
+    useFormNavigationGuard({
+      afterSubmitPath,
+      afterSubmitState,
+      form,
+      onSubmit: save,
+    })
+
+  const handlePreviousStep = () => {
+    void navigate(
+      getIndividualOfferUrl({
+        offerId: offer.id,
+        step: INDIVIDUAL_OFFER_WIZARD_STEP_IDS.MEDIA,
+        mode: OFFER_WIZARD_MODE.CREATION,
+        isOnboarding,
+      })
+    )
+  }
+
+  return (
+    <>
+      <FormProvider {...form}>
+        <form onSubmit={navigationGuardedSubmitHandler}>
+          <ScrollToFirstHookFormErrorAfterSubmit />
+          <FormLayout>
+            {isOfferSynchronized(offer) && (
+              <SynchronizedBanner providerName={offer?.lastProvider?.name} />
+            )}
+            <FormLayout.MandatoryInfo />
+
+            <FormLayout.Section title="Tarifs">
+              {offerSubcategory.reimbursementRule ===
+                REIMBURSEMENT_RULES.NOT_REIMBURSED && <NonRefundableCallout />}
+              {!offer.isEvent && offer.isDigital && <ActivationCodeCallout />}
+
+              <PriceTableForm
+                isCaledonian={isCaledonian}
+                mode={mode}
+                offer={offer}
+                schemaValidationContext={schemaValidationContext}
+              />
+            </FormLayout.Section>
+          </FormLayout>
+          {canBeDuo && (
+            <FormLayout fullWidthActions>
+              <FormLayout.Section title="Réservations “Duo”">
+                <Controller
+                  control={form.control}
+                  name="isDuo"
+                  disabled={
+                    isOfferDisabled(offer) ||
+                    hasPublishedOfferWithSameEan ||
+                    isOfferSynchronized(offer) ||
+                    isClosed
+                  }
+                  render={({ field }) => (
+                    <DuoCheckbox {...field} checked={Boolean(field.value)} />
+                  )}
+                />
+              </FormLayout.Section>
+            </FormLayout>
+          )}
+          <ActionBar
+            isEmbedded
+            onClickPrevious={handlePreviousStep}
+            step={INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TIMETABLE}
+            isDisabled={
+              isOfferDisabled(offer) ||
+              hasPublishedOfferWithSameEan ||
+              form.formState.isSubmitting ||
+              (!form.formState.isDirty &&
+                mode !== OFFER_WIZARD_MODE.CREATION) ||
+              isClosed
+            }
+            dirtyForm={form.formState.isDirty}
+          />
+        </form>
+      </FormProvider>
+
+      {navigationGuardDialog}
+    </>
+  )
+}

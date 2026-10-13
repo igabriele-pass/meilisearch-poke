@@ -1,0 +1,16 @@
+# Used for automated release notes
+# https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes
+
+changelog:
+  exclude:
+    labels:
+      - ignore-for-release
+    authors:
+      - dependabot[bot]
+  categories:
+    - title: Planned and delivered
+      labels:
+        - ticket
+    - title: Other Changes
+      labels:
+        - "*"

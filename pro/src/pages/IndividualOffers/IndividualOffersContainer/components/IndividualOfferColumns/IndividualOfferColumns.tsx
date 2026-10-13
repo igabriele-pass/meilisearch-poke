@@ -1,0 +1,118 @@
+import {
+  type HeadLineOfferResponseModel,
+  type ListOffersOfferResponseModel,
+  OfferStatus,
+} from '@/apiClient/v1'
+import {
+  INDIVIDUAL_OFFER_WIZARD_STEP_IDS,
+  OFFER_WIZARD_MODE,
+} from '@/commons/core/Offers/constants'
+import { getIndividualOfferUrl } from '@/commons/core/Offers/utils/getIndividualOfferUrl'
+import { computeAddressDisplayName } from '@/commons/format/venuesService'
+import type { Column } from '@/ui-kit/Table/Table'
+
+import { IndividualActionsCells } from './components/IndividualActionsCells/IndividualActionsCells'
+import { OfferBookingCell } from './components/OfferBookingCell/OfferBookingCell'
+import { OfferNameCell } from './components/OfferNameCell/OfferNameCell'
+import { OfferStatusCell } from './components/OfferStatusCell/OfferStatusCell'
+
+interface GetIndividualOfferColumnsProps {
+  headlineOffer: HeadLineOfferResponseModel | null
+  isReadOnly: boolean
+}
+export function getIndividualOfferColumns({
+  headlineOffer,
+  isReadOnly,
+}: GetIndividualOfferColumnsProps): Column<ListOffersOfferResponseModel>[] {
+  const columns: Column<ListOffersOfferResponseModel>[] = [
+    {
+      id: 'name',
+      label: 'Nom de l’offre',
+      render: (offer) => {
+        const offerLink = getIndividualOfferUrl({
+          offerId: offer.id,
+          mode:
+            offer.status === OfferStatus.DRAFT
+              ? OFFER_WIZARD_MODE.CREATION
+              : OFFER_WIZARD_MODE.EDITION,
+          step:
+            offer.status === OfferStatus.DRAFT
+              ? INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION
+              : INDIVIDUAL_OFFER_WIZARD_STEP_IDS.EXPOSURE,
+        })
+
+        return <OfferNameCell offer={offer} offerLink={offerLink} />
+      },
+    },
+    {
+      id: 'address',
+      label: 'Localisation',
+      render: (offer) =>
+        offer.location ? computeAddressDisplayName(offer.location) : '-',
+    },
+    {
+      id: 'stocks',
+      label: 'Stocks',
+      render: (offer) => {
+        let totalRemainingStock = 0
+
+        for (const stock of offer.stocks) {
+          if (stock.remainingQuantity === 'unlimited') {
+            return 'Illimité'
+          }
+          totalRemainingStock += Number(stock.remainingQuantity)
+        }
+        return new Intl.NumberFormat('fr-FR').format(totalRemainingStock)
+      },
+    },
+    {
+      id: 'status',
+      label: 'Publication',
+      render: (offer) => <OfferStatusCell offer={offer} />,
+    },
+    {
+      id: 'bookingsCount',
+      label: 'Réservations',
+      render: (offer) => <OfferBookingCell offer={offer} />,
+    },
+  ]
+
+  if (!isReadOnly) {
+    columns.push({
+      id: 'actions',
+      label: 'Actions',
+      centerHeader: true,
+      render: (offer) => {
+        const offerLink = getIndividualOfferUrl({
+          offerId: offer.id,
+          mode:
+            offer.status === OfferStatus.DRAFT
+              ? OFFER_WIZARD_MODE.CREATION
+              : OFFER_WIZARD_MODE.EDITION,
+          step:
+            offer.status === OfferStatus.DRAFT
+              ? INDIVIDUAL_OFFER_WIZARD_STEP_IDS.DESCRIPTION
+              : INDIVIDUAL_OFFER_WIZARD_STEP_IDS.EXPOSURE,
+        })
+        const editionStockLink = getIndividualOfferUrl({
+          offerId: offer.id,
+          mode: OFFER_WIZARD_MODE.EDITION,
+          step: offer.isEvent
+            ? INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TIMETABLE
+            : INDIVIDUAL_OFFER_WIZARD_STEP_IDS.TARIFS,
+        })
+
+        return (
+          <IndividualActionsCells
+            offer={offer}
+            isHeadline={offer.id === headlineOffer?.id}
+            editionOfferLink={offerLink}
+            editionStockLink={editionStockLink}
+          />
+        )
+      },
+    })
+  }
+
+  return columns
+}

@@ -1,0 +1,24 @@
+import pytest
+
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.users.models import User
+from pcapi.models.api_errors import ApiErrors
+from pcapi.routes.pro.auth_utils import check_user_can_validate_bookings_v2
+
+
+class CheckUserCanValidateBookingV2Test:
+    @pytest.mark.usefixtures("db_session")
+    def test_ok_if_user_offerer(self):
+        user_offerer = offerers_factories.UserOffererFactory()
+        user = user_offerer.user
+        offerer = user_offerer.offerer
+        # The following call should not raise.
+        check_user_can_validate_bookings_v2(user, offerer.id)
+
+    def test_error_if_non_offerer(self):
+        user = User()
+        with pytest.raises(ApiErrors) as errors:
+            check_user_can_validate_bookings_v2(user, None)
+        assert errors.value.errors["global"] == [
+            "La contremarque n'existe pas, ou vous n'avez pas les droits nécessaires pour y accéder."
+        ]

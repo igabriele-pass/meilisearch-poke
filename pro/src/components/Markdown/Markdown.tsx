@@ -1,0 +1,56 @@
+import DOMPurify from 'dompurify'
+
+import { EMAIL_REGEXP } from '@/commons/utils/isValidEmail'
+import { truncateAtWord } from '@/commons/utils/string'
+
+import styles from './Markdown.module.scss'
+
+const BOLD_REGEXP = /\*\*(.*?)\*\*/gim
+const ITALIC_REGEXP = /_(.*?)_/gim
+const URL_REGEXP = /((https?:\/\/)|(www\.))[^\s/$.?#"].[^\s]*/gim
+
+function markdownToHtml(markdown: string) {
+  markdown = markdown.replace(BOLD_REGEXP, '<strong>$1</strong>')
+  markdown = markdown.replace(ITALIC_REGEXP, '<em>$1</em>')
+  markdown = markdown.replace(URL_REGEXP, (url) => {
+    const href = /^https?:\/\//.exec(url) ? url : `https://${url}`
+    return `<a class="${styles['markdown-link']}" href="${href}" rel="noreferrer" target="_blank">${url}</a>`
+  })
+  return markdown.replace(EMAIL_REGEXP, (email) => {
+    return `<a href="mailto:${email}">${email}</a>`
+  })
+}
+
+export const Markdown = ({
+  markdownText,
+  maxLength,
+  croppedTextEnding,
+}: {
+  markdownText: string
+  maxLength?: number
+  croppedTextEnding?: string
+}) => {
+  const sanitizedInput = DOMPurify.sanitize(markdownText, {
+    ALLOWED_TAGS: [],
+    ALLOWED_ATTR: [],
+  })
+  // Second call to DOMPurify.sanitize(): essential for protecting against XSS attacks
+  const html = DOMPurify.sanitize(markdownToHtml(sanitizedInput), {
+    ALLOWED_TAGS: ['a', 'strong', 'em'],
+    ALLOWED_ATTR: ['href', 'rel', 'target', 'class'],
+  })
+
+  return (
+    <span
+      className={styles['markdown']}
+      data-testid="markdown-content"
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: This is sanitized HTML.
+      dangerouslySetInnerHTML={{
+        __html:
+          maxLength === undefined
+            ? html
+            : truncateAtWord(html, maxLength, croppedTextEnding),
+      }}
+    />
+  )
+}

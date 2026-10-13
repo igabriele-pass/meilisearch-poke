@@ -1,0 +1,30 @@
+import { useDebounce } from 'use-debounce'
+
+import styles from './FiledCharactersCount.module.scss'
+
+type FiledCharactersCountProps = {
+  current: number
+  max: number
+  describeById: string
+}
+
+export function FiledCharactersCount({
+  current,
+  max,
+  describeById,
+}: Readonly<FiledCharactersCountProps>) {
+  //  The real counter would be announced by assistive technologies after each character typed.
+  //  Therefore, we need a debounced counter that only changes when the user stops typing.
+  const [debouncedCount] = useDebounce(current, 1000)
+
+  return (
+    <span className={styles['characters-count']}>
+      <output className={styles['visually-hidden']} id={describeById}>
+        {debouncedCount} caractères sur {max}
+      </output>
+      <span aria-hidden="true">
+        {current}/{max}
+      </span>
+    </span>
+  )
+}

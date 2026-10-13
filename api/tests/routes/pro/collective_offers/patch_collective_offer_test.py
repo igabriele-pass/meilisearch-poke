@@ -1,0 +1,846 @@
+from datetime import datetime
+from unittest.mock import patch
+
+import pytest
+import time_machine
+
+from pcapi.core.categories.models import EacFormat
+from pcapi.core.educational import factories
+from pcapi.core.educational import models
+from pcapi.core.educational import testing
+from pcapi.core.educational.schemas import EducationalBookingEdition
+from pcapi.core.educational.serialization.collective_booking import serialize_collective_booking
+from pcapi.core.offerers import factories as offerers_factories
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.users import factories as users_factories
+from pcapi.models import db
+from pcapi.models.api_errors import OBJECT_NOT_FOUND_ERROR_MESSAGE
+from pcapi.routes.serialization.collective_offers_serialize import PatchCollectiveOfferBodyModel
+
+
+pytestmark = pytest.mark.usefixtures("db_session")
+
+
+@pytest.fixture(name="venue")
+def venue_fixture():
+    return offerers_factories.CollectiveVenueFactory(pricing_point="self")
+
+
+@pytest.fixture(name="other_related_venue")
+def other_related_venue_fixture(venue):
+    return offerers_factories.CollectiveVenueFactory(managingOfferer=venue.managingOfferer, pricing_point=venue)
+
+
+@pytest.fixture(name="user_offerer")
+def user_offerer_fixture(venue):
+    return offerers_factories.UserOffererFactory(
+        user__email="user@example.com",
+        offerer=venue.managingOfferer,
+    )
+
+
+@pytest.fixture(name="auth_client")
+def auth_client_fixture(client, user_offerer):
+    return client.with_session_auth(user_offerer.user.email)
+
+
+PATCH_NULLABLE_FIELDS = [
+    field.alias
+    for field_name, field in PatchCollectiveOfferBodyModel.model_fields.items()
+    if field_name not in PatchCollectiveOfferBodyModel.NON_NULLABLE_FIELDS
+]
+
+
+class Returns200Test:
+    @time_machine.travel("2019-01-01 12:00:00")
+    @pytest.mark.settings(ADAGE_API_URL="https://adage_base_url")
+    def test_patch_collective_offer(self, client):
+        offer = factories.CollectiveOfferFactory(
+            mentalDisabilityCompliant=False,
+            contactEmail="johndoe@yopmail.com",
+            bookingEmails=["booking@youpi.com", "kingboo@piyou.com"],
+            contactPhone="0600000000",
+            educational_domains=[factories.EducationalDomainFactory()],
+            students=[models.StudentLevels.CAP1],
+            interventionArea=["01", "07", "08"],
+        )
+        booking = factories.CollectiveBookingFactory(
+            collectiveStock__collectiveOffer=offer,
+            collectiveStock__startDatetime=datetime(2020, 1, 1),
+            status=models.CollectiveBookingStatus.PENDING,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        national_program = factories.NationalProgramFactory()
+        domain = factories.EducationalDomainFactory(name="Architecture", nationalPrograms=[national_program])
+
+        data = {
+            "name": "New name",
+            "mentalDisabilityCompliant": True,
+            "description": "Ma super description",
+            "contactEmail": "toto@example.com",
+            "bookingEmails": ["pifpouf@testmail.com", "bimbam@testmail.com"],
+            "domains": [domain.id],
+            "students": ["Collège - 4e"],
+            "interventionArea": ["01", "2A"],
+            "nationalProgramId": national_program.id,
+            "formats": [EacFormat.CONCERT.value],
+        }
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        assert response.json["name"] == "New name"
+        assert response.json["mentalDisabilityCompliant"]
+        assert response.json["contactPhone"] == "0600000000"
+        assert response.json["contactEmail"] == "toto@example.com"
+        assert response.json["bookingEmails"] == ["pifpouf@testmail.com", "bimbam@testmail.com"]
+        assert response.json["formats"] == ["Concert"]
+        assert response.json["students"] == ["Collège - 4e"]
+        assert response.json["interventionArea"] == ["01", "2A"]
+        assert response.json["description"] == "Ma super description"
+        assert response.json["nationalProgram"] == {"id": national_program.id, "name": national_program.name}
+        assert not response.json["isTemplate"]
+
+        updated_offer = db.session.get(models.CollectiveOffer, offer.id)
+        assert updated_offer.name == "New name"
+        assert updated_offer.mentalDisabilityCompliant
+        assert updated_offer.contactEmail == "toto@example.com"
+        assert updated_offer.bookingEmails == ["pifpouf@testmail.com", "bimbam@testmail.com"]
+        assert updated_offer.contactPhone == "0600000000"
+        assert updated_offer.students == [models.StudentLevels.COLLEGE4]
+        assert updated_offer.domains == [domain]
+        assert updated_offer.interventionArea == ["01", "2A"]
+        assert updated_offer.description == "Ma super description"
+        assert updated_offer.formats == [EacFormat.CONCERT]
+
+        expected_payload = EducationalBookingEdition(
+            **serialize_collective_booking(booking).dict(),
+            updatedFields=sorted(
+                [
+                    "name",
+                    "nationalProgramId",
+                    "students",
+                    "contactEmail",
+                    "bookingEmails",
+                    "interventionArea",
+                    "mentalDisabilityCompliant",
+                    "domains",
+                    "description",
+                    "formats",
+                ]
+            ),
+        )
+
+        adage_request = testing.adage_requests[0]
+        adage_request["sent_data"].updatedFields = sorted(adage_request["sent_data"].updatedFields)
+
+        assert adage_request["sent_data"] == expected_payload
+        assert adage_request["url"] == "https://adage_base_url/v1/prereservation-edit"
+
+    @pytest.mark.settings(ADAGE_API_URL="https://adage_base_url")
+    def test_patch_collective_offer_do_not_notify_educational_redactor_when_no_booking(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"name": "New name"}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        assert len(testing.adage_requests) == 0
+
+    def test_patch_collective_offer_update_student_level_college_6(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"students": ["Collège - 6e"]}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        assert len(offer.students) == 1
+        assert offer.students[0].value == "Collège - 6e"
+
+    @pytest.mark.parametrize("status", testing.STATUSES_ALLOWING_EDIT_DETAILS)
+    def test_patch_collective_offer_allowed_action(self, client, status):
+        offer = factories.create_collective_offer_by_status(status)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {
+            "name": "New name",
+            "mentalDisabilityCompliant": True,
+            "description": "Ma super description",
+            "contactEmail": "toto@example.com",
+            "bookingEmails": ["pifpouf@testmail.com", "bimbam@testmail.com"],
+            "students": ["Collège - 4e"],
+            "interventionArea": ["01", "2A"],
+            "formats": [EacFormat.CONCERT.value],
+        }
+        auth_client = client.with_session_auth("user@example.com")
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+
+        db.session.refresh(offer)
+        assert offer.name == "New name"
+        assert offer.mentalDisabilityCompliant
+        assert offer.description == "Ma super description"
+        assert offer.contactEmail == "toto@example.com"
+        assert offer.bookingEmails == ["pifpouf@testmail.com", "bimbam@testmail.com"]
+        assert offer.students == [models.StudentLevels.COLLEGE4]
+        assert offer.interventionArea == ["01", "2A"]
+        assert offer.formats == [EacFormat.CONCERT]
+
+    def test_location_address_venue(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+        oa = offer.venue.offererAddress
+
+        data = {
+            "location": {
+                "locationType": models.CollectiveLocationType.ADDRESS.value,
+                "locationComment": None,
+                "location": {"isVenueLocation": True},
+            },
+        }
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+
+        assert offer.offererAddress.type != offerers_models.LocationType.VENUE_LOCATION
+        assert offer.offererAddress.addressId == oa.addressId
+        assert offer.offererAddress.label is None
+        assert offer.locationType == models.CollectiveLocationType.ADDRESS
+        assert offer.locationComment is None
+
+    def test_location_school(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {
+            "location": {
+                "locationType": models.CollectiveLocationType.SCHOOL.value,
+                "locationComment": None,
+                "location": None,
+            },
+        }
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+
+        assert offer.offererAddressId is None
+        assert offer.locationType == models.CollectiveLocationType.SCHOOL
+        assert offer.locationComment is None
+
+    def test_location_address(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {
+            "location": {
+                "locationType": models.CollectiveLocationType.ADDRESS.value,
+                "locationComment": None,
+                "location": testing.ADDRESS_DICT,
+            },
+        }
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+
+        assert offer.offererAddress.label == "My address"
+        assert offer.offererAddress.address.city == "Paris"
+        assert offer.offererAddress.address.postalCode == "75001"
+        assert offer.offererAddress.address.street == "3 Rue de Valois"
+        assert offer.offererAddress.address.isManualEdition == False
+        assert offer.locationType == models.CollectiveLocationType.ADDRESS
+        assert offer.locationComment is None
+
+    def test_location_to_be_defined(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {
+            "location": {
+                "locationType": models.CollectiveLocationType.TO_BE_DEFINED.value,
+                "locationComment": "Right here",
+                "location": None,
+            },
+        }
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+
+        assert offer.offererAddressId is None
+        assert offer.locationType == models.CollectiveLocationType.TO_BE_DEFINED
+        assert offer.locationComment == "Right here"
+
+    def test_national_program_unchanged(self, client):
+        program = factories.NationalProgramFactory()
+        offer = factories.CollectiveOfferFactory(nationalProgram=program)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"name": "hello"}
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+        assert offer.nationalProgramId == program.id
+
+    def test_national_program_set_none(self, client):
+        program = factories.NationalProgramFactory()
+        offer = factories.CollectiveOfferFactory(nationalProgram=program)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"nationalProgramId": None}
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+        assert offer.nationalProgramId is None
+
+    def test_national_program_valid_update_program(self, client):
+        new_program = factories.NationalProgramFactory()
+        current_domain = factories.EducationalDomainFactory(nationalPrograms=[new_program])
+        offer = factories.CollectiveOfferFactory(domains=[current_domain])
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"nationalProgramId": new_program.id}
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+        assert offer.nationalProgramId == new_program.id
+        assert [domain.id for domain in offer.domains] == [current_domain.id]
+
+    def test_national_program_valid_update_domains(self, client):
+        current_program = factories.NationalProgramFactory()
+        current_domain = factories.EducationalDomainFactory(nationalPrograms=[current_program])
+        new_domain = factories.EducationalDomainFactory(nationalPrograms=[current_program])
+        offer = factories.CollectiveOfferFactory(domains=[current_domain], nationalProgram=current_program)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"domains": [new_domain.id]}
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+        assert offer.nationalProgramId == current_program.id
+        assert [domain.id for domain in offer.domains] == [new_domain.id]
+
+    def test_national_program_valid_update_domains_and_program(self, client):
+        current_program = factories.NationalProgramFactory()
+        current_domain = factories.EducationalDomainFactory(nationalPrograms=[current_program])
+        new_program = factories.NationalProgramFactory()
+        new_domain = factories.EducationalDomainFactory(nationalPrograms=[new_program])
+        offer = factories.CollectiveOfferFactory(domains=[current_domain], nationalProgram=current_program)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"domains": [new_domain.id], "nationalProgramId": new_program.id}
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        offer = db.session.query(models.CollectiveOffer).filter(models.CollectiveOffer.id == offer.id).one()
+        assert offer.nationalProgramId == new_program.id
+        assert [domain.id for domain in offer.domains] == [new_domain.id]
+
+    @pytest.mark.parametrize("field", PATCH_NULLABLE_FIELDS)
+    def test_fields_nullable(self, auth_client, venue, field):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        data = {field: None}
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        assert getattr(offer, field) is None
+
+    def test_additional_details(self, auth_client, venue):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue, additionalDetails="some details")
+
+        data = {"additionalDetails": "some new details"}
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 200
+        assert offer.additionalDetails == "some new details"
+
+
+class Returns400Test:
+    def test_patch_offer_with_empty_name(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"name": " "}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+
+    def test_patch_offer_with_null_name(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(
+            user__email="user@example.com",
+            offerer=offer.venue.managingOfferer,
+        )
+
+        data = {"name": None}
+        response = client.with_session_auth("user@example.com").patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+
+    def test_patch_offer_with_empty_formats(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com")
+
+        data = {"formats": []}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"formats": ["Cette liste doit avoir une taille minimum de 1"]}
+
+    def test_patch_offer_with_empty_educational_domain(self, client):
+        offer = factories.CollectiveOfferFactory(
+            educational_domains=None,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"domains": []}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+
+    def test_patch_offer_with_none_domain(self, client):
+        offer = factories.CollectiveOfferFactory(educational_domains=None)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"domains": None}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+
+    def test_patch_offer_with_none_description(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"description": None}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+
+    @time_machine.travel("2019-01-01T12:00:00Z")
+    @pytest.mark.settings(ADAGE_API_URL="https://adage_base_url")
+    def test_update_collective_offer_with_unknown_national_program(self, client):
+        offer = factories.CollectiveOfferFactory(
+            mentalDisabilityCompliant=False,
+            contactEmail="johndoe@yopmail.com",
+            bookingEmails=["booking@youpi.com", "kingboo@piyou.com"],
+            contactPhone="0600000000",
+            educational_domains=None,
+            students=[models.StudentLevels.CAP1],
+            interventionArea=["01", "07", "08"],
+        )
+        offerers_factories.UserOffererFactory(
+            user__email="user@example.com",
+            offerer=offer.venue.managingOfferer,
+        )
+        domain = factories.EducationalDomainFactory(name="Architecture")
+
+        data = {
+            "name": "New name",
+            "mentalDisabilityCompliant": True,
+            "description": "Ma super description",
+            "contactEmail": "toto@example.com",
+            "bookingEmails": ["pifpouf@testmail.com", "bimbam@testmail.com"],
+            "formats": ["Concert"],
+            "domains": [domain.id],
+            "students": ["Collège - 4e"],
+            "interventionArea": ["01", "2A"],
+            "nationalProgramId": -1,
+        }
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"global": ["National program not found"]}
+
+    def test_update_collective_offer_with_inactive_national_program(self, client):
+        program = factories.NationalProgramFactory(isActive=False)
+        domain = factories.EducationalDomainFactory(nationalPrograms=[program])
+        offer = factories.CollectiveOfferFactory(domains=[domain])
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"nationalProgramId": program.id}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"code": "COLLECTIVE_OFFER_NATIONAL_PROGRAM_INACTIVE"}
+
+    def test_update_collective_offer_with_invalid_national_program_update_program(self, client):
+        program = factories.NationalProgramFactory()
+        domain = factories.EducationalDomainFactory()
+        offer = factories.CollectiveOfferFactory(domains=[domain])
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"nationalProgramId": program.id}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"code": "COLLECTIVE_OFFER_NATIONAL_PROGRAM_INVALID"}
+
+    def test_update_collective_offer_with_invalid_national_program_update_domains(self, client):
+        program = factories.NationalProgramFactory()
+        domain = factories.EducationalDomainFactory(nationalPrograms=[program])
+        offer = factories.CollectiveOfferFactory(domains=[domain], nationalProgram=program)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"domains": [factories.EducationalDomainFactory().id]}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"code": "COLLECTIVE_OFFER_NATIONAL_PROGRAM_INVALID"}
+
+    def test_update_collective_offer_with_invalid_national_program_update_domains_and_program(self, client):
+        program = factories.NationalProgramFactory()
+        domain = factories.EducationalDomainFactory(nationalPrograms=[program])
+        offer = factories.CollectiveOfferFactory(domains=[domain], nationalProgram=program)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {
+            "domains": [factories.EducationalDomainFactory().id],
+            "nationalProgramId": factories.NationalProgramFactory().id,
+        }
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"code": "COLLECTIVE_OFFER_NATIONAL_PROGRAM_INVALID"}
+
+    def test_update_collective_offer_booking_emails_invalid(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"bookingEmails": ["test@testmail.com", "test@test", "test"]}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {
+            "bookingEmails.1": ["Saisissez un email valide"],
+            "bookingEmails.2": ["Saisissez un email valide"],
+        }
+
+    def test_update_collective_offer_booking_emails_empty(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"bookingEmails": []}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"bookingEmails": ["Cette liste doit avoir une taille minimum de 1"]}
+
+    def test_patch_collective_offer_description_invalid(self, auth_client, venue):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json={"description": "too_long" * 200})
+
+        assert response.status_code == 400
+        assert response.json == {
+            "description": ["Cette chaîne de caractères doit avoir une taille maximum de 1500 caractères"]
+        }
+
+    def test_patch_collective_offer_with_location_type_school_must_not_receive_location_comment(
+        self, auth_client, venue
+    ):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        payload = {
+            "location": {
+                "locationType": models.CollectiveLocationType.SCHOOL.value,
+                "locationComment": "FORBIDDEN COMMENT",
+                "location": None,
+            },
+        }
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=payload)
+
+        assert response.status_code == 400
+        assert response.json == {
+            "location.locationComment": ["locationComment n'est pas autorisé pour cette valeur de locationType"]
+        }
+
+    def test_patch_collective_offer_with_location_type_address_must_not_receive_location_comment(
+        self, auth_client, venue
+    ):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        payload = {
+            "location": {
+                "locationType": models.CollectiveLocationType.ADDRESS.value,
+                "locationComment": "FORBIDDEN COMMENT",
+                "location": testing.ADDRESS_DICT,
+            },
+        }
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=payload)
+
+        assert response.status_code == 400
+        assert response.json == {
+            "location.locationComment": ["locationComment n'est pas autorisé pour cette valeur de locationType"]
+        }
+
+    def test_patch_collective_offer_with_location_type_school_must_provide_intervention_area(self, auth_client, venue):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        payload = {
+            "interventionArea": [],
+            "location": {
+                "locationType": models.CollectiveLocationType.SCHOOL.value,
+                "locationComment": None,
+                "location": None,
+            },
+        }
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=payload)
+
+        assert response.status_code == 400
+        assert response.json == {
+            "interventionArea": ["interventionArea ne peut pas être vide pour cette valeur de locationType"]
+        }
+
+    def test_patch_collective_offer_with_location_type_address_must_not_provide_intervention_area(
+        self, auth_client, venue
+    ):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        payload = {
+            "interventionArea": ["75", "91"],
+            "location": {
+                "locationType": models.CollectiveLocationType.ADDRESS.value,
+                "locationComment": None,
+                "location": testing.ADDRESS_DICT,
+            },
+        }
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=payload)
+
+        assert response.status_code == 400
+        assert response.json == {
+            "interventionArea": ["interventionArea doit être vide pour cette valeur de locationType"]
+        }
+
+    def test_patch_collective_offer_with_location_type_school_must_provide_correct_intervention_area(
+        self, auth_client, venue
+    ):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        payload = {
+            "interventionArea": ["75", "1234"],
+            "location": {
+                "locationType": models.CollectiveLocationType.SCHOOL.value,
+                "locationComment": None,
+                "location": None,
+            },
+        }
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=payload)
+
+        assert response.status_code == 400
+        assert response.json == {"interventionArea": ["interventionArea doit contenir des départements valides"]}
+
+    def test_patch_collective_offer_with_location_type_address_must_provide_address(self, auth_client, venue):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        data = {
+            "location": {
+                "locationType": models.CollectiveLocationType.ADDRESS.value,
+                "locationComment": None,
+                "location": None,
+            },
+        }
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"location.location": ["location est requis pour cette valeur de locationType"]}
+
+    def test_patch_collective_offer_with_change_location_type(self, auth_client, venue):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        data = {
+            "location": {
+                "locationType": models.CollectiveLocationType.ADDRESS.value,
+                "locationComment": None,
+                "location": None,
+            },
+        }
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"location.location": ["location est requis pour cette valeur de locationType"]}
+
+    @pytest.mark.parametrize(
+        "location_type",
+        (
+            models.CollectiveLocationType.TO_BE_DEFINED.value,
+            models.CollectiveLocationType.SCHOOL.value,
+        ),
+    )
+    def test_update_collective_offer_template_with_location_type_when_address_must_not_be_provided(
+        self, auth_client, venue, location_type
+    ):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+        venue = offerers_factories.VenueFactory()
+        offerers_factories.UserOffererFactory(offerer=venue.managingOfferer, user__email="user@example.com")
+
+        data = {
+            "location": {
+                "locationType": location_type,
+                "locationComment": None,
+                "location": testing.ADDRESS_DICT,
+            }
+        }
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"location.location": ["location n'est pas autorisé pour cette valeur de locationType"]}
+
+    @pytest.mark.parametrize("field", PatchCollectiveOfferBodyModel.NON_NULLABLE_FIELDS)
+    def test_fields_not_null(self, auth_client, venue, field):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        data = {field: None}
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {field: ["Ce champ ne peut pas être null"]}
+
+    def test_phone_number(self, auth_client, venue):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        data = {"contactPhone": "123"}
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {"contactPhone": ["Numéro de téléphone invalide"]}
+
+    def test_additional_details_error(self, auth_client, venue):
+        offer = factories.PublishedCollectiveOfferFactory(venue=venue)
+
+        data = {"additionalDetails": "too_long" * 150}
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 400
+        assert response.json == {
+            "additionalDetails": ["Cette chaîne de caractères doit avoir une taille maximum de 1000 caractères"]
+        }
+
+
+class Returns403Test:
+    @pytest.mark.parametrize("status", testing.STATUSES_NOT_ALLOWING_EDIT_DETAILS)
+    def test_patch_collective_offer_unallowed_action(self, client, status):
+        offer = factories.create_collective_offer_by_status(status)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        previous_name = offer.name
+        previous_description = offer.description
+        data = {"name": "New name", "description": "Ma super description"}
+
+        auth_client = client.with_session_auth("user@example.com")
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 403
+        assert response.json == {"offer": "This collective offer status does not allow editing details"}
+
+        db.session.refresh(offer)
+        assert offer.name == previous_name
+        assert offer.description == previous_description
+
+    def test_patch_collective_offer_ended(self, client):
+        offer = factories.EndedCollectiveOfferConfirmedBookingFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        previous_name = offer.name
+        previous_description = offer.description
+
+        data = {"name": "New name", "description": "Ma super description"}
+        auth_client = client.with_session_auth("user@example.com")
+        response = auth_client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 403
+        assert response.json == {"offer": "This collective offer status does not allow editing details"}
+
+        db.session.refresh(offer)
+        assert offer.name == previous_name
+        assert offer.description == previous_description
+
+    def test_edit_collective_offer_with_offerer_unregister_in_adage(self, client):
+        offer = factories.CollectiveOfferFactory()
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"contactEmail": "toto@example.com"}
+        client = client.with_session_auth("user@example.com")
+        with patch(testing.PATCH_CAN_CREATE_OFFER_PATH, return_value=False):
+            response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 403
+        assert response.json == {"Partner": "User not in Adage can't edit the offer"}
+
+    def test_error_if_venue_is_closed(self, client):
+        offer = factories.CollectiveOfferFactory(venue__state=offerers_models.VenueState.CLOSED)
+        factories.CollectiveBookingFactory(
+            collectiveStock__collectiveOffer=offer,
+        )
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {
+            "name": "New name",
+            "mentalDisabilityCompliant": True,
+            "description": "Ma super description",
+            "contactEmail": "toto@example.com",
+            "bookingEmails": ["pifpouf@testmail.com", "bimbam@testmail.com"],
+            "students": ["Collège - 4e"],
+            "interventionArea": ["01", "2A"],
+            "formats": [EacFormat.CONCERT.value],
+        }
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 403
+
+
+class Returns404Test:
+    def when_user_is_not_attached_to_offerer(self, client):
+        offer = factories.CollectiveOfferFactory(name="Old name")
+        offerers_factories.UserOffererFactory(user__email="user@example.com")
+
+        data = {"name": "New name"}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 404
+        assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}
+        assert db.session.get(models.CollectiveOffer, offer.id).name == "Old name"
+
+    def test_returns_404_if_offer_does_not_exist(self, client):
+        users_factories.UserFactory(email="user@example.com")
+
+        response = client.with_session_auth("user@example.com").patch("/collective/offers/123456789", json={})
+
+        assert response.status_code == 404
+        assert response.json == {"global": [OBJECT_NOT_FOUND_ERROR_MESSAGE]}
+
+    def test_patch_offer_with_unknown_educational_domain(self, client):
+        offer = factories.CollectiveOfferFactory(educational_domains=None)
+        offerers_factories.UserOffererFactory(user__email="user@example.com", offerer=offer.venue.managingOfferer)
+
+        data = {"domains": [0]}
+        client = client.with_session_auth("user@example.com")
+        response = client.patch(f"/collective/offers/{offer.id}", json=data)
+
+        assert response.status_code == 404
+        assert response.json["code"] == "EDUCATIONAL_DOMAIN_NOT_FOUND"

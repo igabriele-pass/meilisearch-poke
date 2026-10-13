@@ -1,0 +1,150 @@
+"""Connector for our recommendation API
+
+This is a mere proxy. Input validation is done by the recommendation
+API, and this module returns the raw response.
+"""
+
+import json
+import logging
+import warnings
+
+from urllib3 import exceptions as urllib_execptions
+
+import pcapi.core.users.models as users_models
+from pcapi import settings
+from pcapi.utils import module_loading
+from pcapi.utils import requests
+
+
+logger = logging.getLogger(__name__)
+
+
+class RecommendationApiException(Exception):
+    pass
+
+
+class RecommendationApiTimeoutException(Exception):
+    pass
+
+
+def _get_backend() -> "BaseBackend":
+    backend_class = module_loading.import_string(settings.RECOMMENDATION_BACKEND)
+    return backend_class()
+
+
+def get_similar_offers(offer_id: int, user: users_models.User | None = None, params: dict | None = None) -> bytes:
+    backend = _get_backend()
+    params = params or {}
+    return backend.get_similar_offers(offer_id, user, params)
+
+
+def get_similar_artists(artist_id: str, params: dict | None = None) -> bytes:
+    backend = _get_backend()
+    params = params or {}
+    return backend.get_similar_artists(artist_id, params)
+
+
+def get_playlist(user: users_models.User, params: dict | None = None, body: dict | None = None) -> bytes:
+    backend = _get_backend()
+    params = params or {}
+    body = body or {}
+    return backend.get_playlist(user, params, body)
+
+
+class BaseBackend:
+    def get_similar_offers(self, offer_id: int, user: users_models.User | None, params: dict) -> bytes:
+        raise NotImplementedError()
+
+    def get_similar_artists(self, artist_id: str, params: dict) -> bytes:
+        raise NotImplementedError()
+
+    def get_playlist(self, user: users_models.User, params: dict, body: dict) -> bytes:
+        raise NotImplementedError()
+
+
+class TestingBackend:
+    def get_similar_offers(self, offer_id: int, user: users_models.User | None, params: dict) -> bytes:
+        offers = [i + 10 * offer_id + 100 * (user.id if user else 0) for i in range(3)]
+        response = {
+            "results": [str(id_) for id_ in offers],
+            "params": {
+                "reco_origin": "unknown",
+                "model_origin": "default",
+                "call_id": "956bd070-cbb1-42d3-bea4-89855bf3b11c",
+            },
+        }
+        return bytes(json.dumps(response), encoding="utf-8")
+
+    def get_similar_artists(self, artist_id: str, params: dict) -> bytes:
+        response = {
+            "similar_artists": [],
+            "params": {
+                "artist_id": artist_id,
+                "call_id": "00000000-0000-0000-0000-000000000000",
+            },
+        }
+        return bytes(json.dumps(response), encoding="utf-8")
+
+    def get_playlist(self, user: users_models.User, params: dict, body: dict) -> bytes:
+        offers = [i + 100 * user.id for i in range(3)]
+        response = {
+            "playlist_recommended_offers": [str(id_) for id_ in offers],
+            "params": {
+                "reco_origin": "unknown",
+                "model_origin": "default",
+                "call_id": "1dc4c5f2-303c-4d8a-94c3-77c0085c0c70",
+            },
+        }
+        return bytes(json.dumps(response), encoding="utf-8")
+
+
+class HttpBackend:
+    def _request(self, method: str, path: str, params: dict, body: dict | None = None) -> bytes:
+        headers = {"X-API-Key": settings.RECOMMENDATION_API_AUTHENTICATION_TOKEN}
+        url = "/".join((settings.RECOMMENDATION_API_URL.rstrip("/"), path.lstrip("/")))
+        # Calls to recommendation api are made with `verify=False` because:
+        # The certificates are google-managed and seen as self-signed.
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", urllib_execptions.InsecureRequestWarning)
+                if method == "get":
+                    response = requests.get(  # nosemgrep: python.requests.security.disabled-cert-validation.disabled-cert-validation
+                        url,
+                        params=params,
+                        headers=headers,
+                        disable_synchronous_retry=True,
+                        verify=False,
+                        log_info=False,
+                    )
+                elif method == "post":
+                    response = requests.post(  # nosemgrep: python.requests.security.disabled-cert-validation.disabled-cert-validation
+                        url,
+                        params=params,
+                        json=body,
+                        headers=headers,
+                        disable_synchronous_retry=True,
+                        verify=False,
+                        log_info=False,
+                    )
+                else:
+                    raise ValueError(f"Unexpected method: {method}")
+            response.raise_for_status()
+        except requests.exceptions.Timeout:
+            raise RecommendationApiTimeoutException()
+        except requests.exceptions.RequestException as exc:
+            logger.info("Got error from Recommendation API", extra={"exc": str(exc)}, exc_info=True)
+            raise RecommendationApiException(str(exc)) from exc
+        return response.content
+
+    def get_similar_offers(self, offer_id: int, user: users_models.User | None, params: dict) -> bytes:
+        path = f"/similar_offers/{offer_id}"
+        params["user_id"] = str(user.id) if user else None
+        return self._request("get", path, params=params)
+
+    def get_similar_artists(self, artist_id: str, params: dict) -> bytes:
+        path = f"/similar_artists/{artist_id}"
+        return self._request("get", path, params=params)
+
+    def get_playlist(self, user: users_models.User, params: dict, body: dict) -> bytes:
+        path = f"/playlist_recommendation/{user.id}"
+        return self._request("post", path, params=params, body=body)

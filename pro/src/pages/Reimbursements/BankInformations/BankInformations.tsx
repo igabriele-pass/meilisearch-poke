@@ -1,0 +1,263 @@
+import classNames from 'classnames'
+import { useId, useState } from 'react'
+import useSWR, { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import type { BankAccountResponseModel } from '@/apiClient/v1'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import {
+  GET_OFFERER_BANK_ACCOUNTS_AND_ATTACHED_VENUES_QUERY_KEY,
+  GET_REJECTED_BANK_ACCOUNTS_QUERY_KEY,
+} from '@/commons/config/swrQueryKeys'
+import { BankAccountEvents } from '@/commons/core/FirebaseEvents/constants'
+import { SENT_DATA_ERROR_MESSAGE } from '@/commons/core/shared/constants'
+import { assertOrFrontendError } from '@/commons/errors/assertOrFrontendError'
+import { useAppSelector } from '@/commons/hooks/useAppSelector'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { useSyncVenueCache } from '@/commons/hooks/useSyncVenueCache'
+import { ensureSelectedAdminOfferer } from '@/commons/store/user/selectors'
+import { ReimbursementBankAccount } from '@/components/ReimbursementBankAccount/ReimbursementBankAccount'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonVariant } from '@/design-system/Button/types'
+import fullMoreIcon from '@/icons/full-more.svg'
+import { Spinner } from '@/ui-kit/Spinner/Spinner'
+
+import { AddBankInformationsDialog } from './AddBankInformationsDialog/AddBankInformationsDialog'
+import styles from './BankInformations.module.scss'
+import { LinkVenuesDialog } from './LinkVenuesDialog/LinkVenuesDialog'
+import { RejectedBankAccountBanner } from './RejectedBankAccountBanner/RejectedBankAccountBanner'
+
+const BankInformations = (): JSX.Element => {
+  const { logEvent } = useAnalytics()
+  const { mutate } = useSWRConfig()
+  const { syncVenue } = useSyncVenueCache()
+  const snackBar = useSnackBar()
+  const editLinkId = useId()
+  const addLinkId = useId()
+  const addBankAccountId = useId()
+
+  const selectedAdminOfferer = useAppSelector(ensureSelectedAdminOfferer)
+  const selectedPartnerVenue = useAppSelector(
+    (store) => store.user.selectedPartnerVenue
+  )
+
+  assertOrFrontendError(
+    selectedAdminOfferer,
+    '`selectedAdminOfferer` is undefined'
+  )
+
+  const offererId = selectedAdminOfferer.id
+
+  const [showAddBankInformationsDialog, setShowAddBankInformationsDialog] =
+    useState(false)
+
+  const hasBankAccount =
+    selectedAdminOfferer.hasValidBankAccount ||
+    selectedAdminOfferer.hasPendingBankAccount ||
+    selectedAdminOfferer.hasBankAccountWithPendingCorrections
+
+  const [selectedBankAccount, setSelectedBankAccount] =
+    useState<BankAccountResponseModel | null>(null)
+
+  const bankAccountVenuesQuery = useSWR(
+    [GET_OFFERER_BANK_ACCOUNTS_AND_ATTACHED_VENUES_QUERY_KEY, offererId],
+    ([, offererId]) =>
+      api.getOffererBankAccountsAndAttachedVenues({
+        path: { offerer_id: Number(offererId) },
+      }),
+    {
+      onError: () =>
+        snackBar.error(
+          'Impossible de récupérer les informations relatives à vos comptes bancaires.'
+        ),
+    }
+  )
+
+  const rejectedBankAccountsQuery = useSWR(
+    [GET_REJECTED_BANK_ACCOUNTS_QUERY_KEY, offererId],
+    ([, offererId]) => api.getRejectedBankAccounts({ query: { offererId } }),
+    { fallbackData: [] }
+  )
+
+  if (
+    bankAccountVenuesQuery.isLoading ||
+    bankAccountVenuesQuery.isValidating ||
+    rejectedBankAccountsQuery.isLoading ||
+    rejectedBankAccountsQuery.isValidating
+  ) {
+    return <Spinner />
+  }
+
+  const updateOffererBankAccounts = async (offererId: number) => {
+    await mutate([
+      GET_OFFERER_BANK_ACCOUNTS_AND_ATTACHED_VENUES_QUERY_KEY,
+      offererId,
+    ])
+
+    await mutate([GET_REJECTED_BANK_ACCOUNTS_QUERY_KEY, offererId])
+  }
+
+  const closeDialog = async (update?: boolean) => {
+    if (offererId) {
+      if (update) {
+        await updateOffererBankAccounts(offererId)
+
+        if (selectedPartnerVenue) {
+          await syncVenue(selectedPartnerVenue.id)
+        }
+      }
+      setSelectedBankAccount(null)
+    }
+  }
+
+  const bankAccountsData = bankAccountVenuesQuery.data
+  const rejectedBankAccounts = rejectedBankAccountsQuery.data
+
+  const updateBankAccountVenuePricingPoint = async (venueId: number) => {
+    if (!bankAccountVenuesQuery.data) {
+      return
+    }
+    await bankAccountVenuesQuery.mutate(
+      {
+        ...bankAccountVenuesQuery.data,
+        managedVenues: bankAccountVenuesQuery.data.managedVenues.map((venue) =>
+          venue.id === venueId ? { ...venue, hasPricingPoint: true } : venue
+        ),
+      },
+      { revalidate: false }
+    )
+  }
+
+  const addBankAccount = () => {
+    setShowAddBankInformationsDialog(true)
+    logEvent(BankAccountEvents.CLICKED_ADD_BANK_ACCOUNT)
+  }
+
+  const replaceBankAccount = async (
+    bankAccountId: number,
+    venuesIds: number[]
+  ) => {
+    try {
+      // get venues currently linked to the bank account
+      const alreadyLinkedVenueIds =
+        bankAccountsData?.bankAccounts
+          ?.find((bankAccount) => bankAccount.id === bankAccountId)
+          ?.linkedVenues.map((venue) => venue.id) ?? []
+
+      const venueIdsToLink = new Set([...venuesIds, ...alreadyLinkedVenueIds])
+
+      await api.linkVenueToBankAccount({
+        body: { venuesIds: [...venueIdsToLink] },
+        path: {
+          offerer_id: offererId,
+          bank_account_id: bankAccountId,
+        },
+      })
+      snackBar.success(
+        'Vos modifications ont bien été prises en compte.',
+        addBankAccountId
+      )
+    } catch {
+      snackBar.error(SENT_DATA_ERROR_MESSAGE, addBankAccountId)
+    }
+
+    await updateOffererBankAccounts(offererId)
+  }
+
+  return (
+    <div className={styles['bank-information']}>
+      {rejectedBankAccounts.map((bankAccount) => (
+        <RejectedBankAccountBanner
+          key={bankAccount.id}
+          rejectedBankAccount={bankAccount}
+          bankAccounts={bankAccountsData?.bankAccounts ?? []}
+          onAddBankAccount={addBankAccount}
+          onReplaceBankAccount={replaceBankAccount}
+        />
+      ))}
+
+      <div>
+        {hasBankAccount ? (
+          <p>
+            Vous pouvez ajouter plusieurs comptes bancaires afin de percevoir
+            les remboursements de vos offres. Chaque compte bancaire fera
+            l’objet d’un remboursement et d’un justificatif de remboursement
+            distincts.
+          </p>
+        ) : (
+          <p>
+            Ajoutez au moins un compte bancaire pour percevoir vos
+            remboursements.
+          </p>
+        )}
+      </div>
+
+      <Button
+        icon={fullMoreIcon}
+        id={addBankAccountId}
+        variant={
+          selectedAdminOfferer.hasPendingBankAccount ||
+          selectedAdminOfferer.hasValidBankAccount
+            ? ButtonVariant.SECONDARY
+            : ButtonVariant.PRIMARY
+        }
+        onClick={addBankAccount}
+        label="Ajouter un compte bancaire"
+      />
+
+      {bankAccountsData && bankAccountsData.bankAccounts.length > 0 && (
+        <div
+          className={classNames(
+            styles['bank-information'],
+            styles['bank-information-panels']
+          )}
+        >
+          {bankAccountsData.bankAccounts.map((bankAccount) => (
+            <ReimbursementBankAccount
+              bankAccount={bankAccount}
+              key={bankAccount.id}
+              onUpdateButtonClick={(bankAccountId) => {
+                setSelectedBankAccount(
+                  bankAccountsData.bankAccounts.find(
+                    (bankAccount) => bankAccount.id === bankAccountId
+                  ) ?? null
+                )
+              }}
+              managedVenues={bankAccountsData.managedVenues}
+              hasWarning={
+                selectedAdminOfferer.venuesWithNonFreeOffersWithoutBankAccounts
+                  .length > 0
+              }
+              editLinkId={editLinkId}
+              addLinkId={addLinkId}
+            />
+          ))}
+        </div>
+      )}
+
+      <AddBankInformationsDialog
+        closeDialog={() => {
+          setShowAddBankInformationsDialog(false)
+        }}
+        isDialogOpen={showAddBankInformationsDialog}
+      />
+      {selectedBankAccount !== null && (
+        <LinkVenuesDialog
+          offererId={selectedAdminOfferer.id}
+          selectedBankAccount={selectedBankAccount}
+          managedVenues={bankAccountsData?.managedVenues ?? []}
+          updateBankAccountVenuePricingPoint={
+            updateBankAccountVenuePricingPoint
+          }
+          closeDialog={closeDialog}
+          editLinkId={editLinkId}
+          addLinkId={addLinkId}
+        />
+      )}
+    </div>
+  )
+}
+
+// Lazy-loaded by react-router
+// ts-unused-exports:disable-next-line
+export const Component = BankInformations

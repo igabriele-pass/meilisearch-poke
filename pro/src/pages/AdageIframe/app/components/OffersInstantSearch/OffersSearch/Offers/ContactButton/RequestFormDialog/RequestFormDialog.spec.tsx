@@ -1,0 +1,309 @@
+import { screen } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { format } from 'date-fns'
+import { axe } from 'vitest-axe'
+
+import { AdageFrontRoles } from '@/apiClient/adage'
+import { apiAdage } from '@/apiClient/api'
+import * as useSnackBar from '@/commons/hooks/useSnackBar'
+import { FORMAT_ISO_DATE_ONLY } from '@/commons/utils/date'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import {
+  RequestFormDialog,
+  type RequestFormDialogProps,
+} from './RequestFormDialog'
+
+const renderRequestFormDialog = (props?: Partial<RequestFormDialogProps>) => {
+  return renderWithProviders(
+    <RequestFormDialog
+      onConfirmDialog={vi.fn()}
+      onCloseDialog={vi.fn()}
+      offerId={1}
+      userEmail={'contact@example.com'}
+      userRole={AdageFrontRoles.REDACTOR}
+      contactEmail=""
+      contactForm="form"
+      contactPhone=""
+      contactUrl=""
+      isDialogOpen
+      isPreview={false}
+      {...props}
+    />
+  )
+}
+
+vi.mock('@/apiClient/api', () => ({
+  apiAdage: {
+    createCollectiveRequest: vi.fn(),
+    logRequestFormPopinDismiss: vi.fn(),
+    logContactUrlClick: vi.fn(),
+  },
+}))
+
+describe('RequestFormDialog', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderRequestFormDialog({
+      contactEmail: '',
+      contactPhone: '',
+      contactForm: 'form',
+      contactUrl: '',
+    })
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display passCulture default form', () => {
+    renderRequestFormDialog({
+      contactEmail: '',
+      contactPhone: '',
+      contactForm: 'form',
+      contactUrl: '',
+    })
+
+    expect(screen.getByLabelText(/Email/)).toHaveValue('contact@example.com')
+  })
+
+  it('should only display mail ', () => {
+    renderRequestFormDialog({
+      contactEmail: 'test@example.com',
+      contactPhone: '',
+      contactForm: '',
+      contactUrl: '',
+    })
+
+    expect(
+      screen.getByText('Il vous propose de le faire par mail :')
+    ).toBeInTheDocument()
+    expect(screen.getByText('test@example.com')).toBeInTheDocument()
+  })
+
+  it('should only display phone number', () => {
+    renderRequestFormDialog({
+      contactEmail: '',
+      contactPhone: '0600000000',
+      contactForm: '',
+      contactUrl: '',
+    })
+
+    expect(
+      screen.getByText('Il vous propose de le faire par téléphone :')
+    ).toBeInTheDocument()
+    expect(screen.getByText('0600000000')).toBeInTheDocument()
+  })
+
+  it('should only display buttonlink of custom form', () => {
+    renderRequestFormDialog({
+      contactEmail: '',
+      contactPhone: '',
+      contactForm: '',
+      contactUrl: 'https://example.com',
+    })
+
+    const buttonLink = screen.getByRole('link', { name: /Aller sur le site/ })
+
+    expect(buttonLink).toHaveAttribute('href', 'https://example.com')
+  })
+
+  it('should display mail and phone', () => {
+    renderRequestFormDialog({
+      contactEmail: 'test@example.com',
+      contactPhone: '0600000000',
+      contactForm: '',
+      contactUrl: '',
+    })
+
+    expect(
+      screen.getByText('Il vous propose de le faire :')
+    ).toBeInTheDocument()
+
+    expect(screen.getByText('test@example.com')).toBeInTheDocument()
+    expect(screen.getByText('0600000000')).toBeInTheDocument()
+  })
+
+  it('should display mail and phone and passCulture default form', () => {
+    renderRequestFormDialog({
+      contactEmail: 'test@example.com',
+      contactPhone: '0600000000',
+      contactForm: 'form',
+      contactUrl: '',
+    })
+
+    expect(
+      screen.getByText('Il vous propose de le faire :')
+    ).toBeInTheDocument()
+
+    expect(screen.getByText('test@example.com')).toBeInTheDocument()
+    expect(screen.getByText('0600000000')).toBeInTheDocument()
+    expect(screen.getByLabelText(/Email/)).toHaveValue('contact@example.com')
+  })
+
+  it('should display mail and phone and custom form', () => {
+    renderRequestFormDialog({
+      contactEmail: 'test@example.com',
+      contactPhone: '0600000000',
+      contactForm: '',
+      contactUrl: 'https://example.com',
+    })
+
+    expect(
+      screen.getByText('Il vous propose de le faire :')
+    ).toBeInTheDocument()
+
+    expect(screen.getByText('test@example.com')).toBeInTheDocument()
+    expect(screen.getByText('0600000000')).toBeInTheDocument()
+
+    const buttonLink = screen.getByRole('link', { name: /Aller sur le site/ })
+
+    expect(buttonLink).toHaveAttribute('href', 'https://example.com')
+  })
+
+  it('should submit valid form and close modal on submit', async () => {
+    const snackBarSuccess = vi.fn()
+    const mockCloseModal = vi.fn()
+    vi.spyOn(useSnackBar, 'useSnackBar').mockImplementation(() => ({
+      success: snackBarSuccess,
+      error: vi.fn(),
+    }))
+
+    renderRequestFormDialog({ onConfirmDialog: mockCloseModal })
+
+    const today = format(new Date(), FORMAT_ISO_DATE_ONLY)
+    await userEvent.type(
+      screen.getByLabelText(/Que souhaitez vous organiser ?/),
+      'Test description'
+    )
+    await userEvent.type(
+      screen.getByLabelText('Date souhaitée', { exact: false }),
+      today
+    )
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Envoyer ma demande' })
+    )
+
+    expect(apiAdage.createCollectiveRequest).toHaveBeenNthCalledWith(1, {
+      body: {
+        comment: 'Test description',
+        phoneNumber: null,
+        requestedDate: today,
+        totalTeachers: null,
+        totalStudents: null,
+      },
+      path: { offer_id: 1 },
+    })
+    expect(snackBarSuccess).toHaveBeenCalledWith(
+      'Votre demande a bien été envoyée'
+    )
+    expect(mockCloseModal).toHaveBeenCalled()
+  })
+  it('should display error message when api reject call', async () => {
+    vi.spyOn(apiAdage, 'createCollectiveRequest').mockRejectedValueOnce({})
+    const snackBarError = vi.fn()
+    const mockCloseModal = vi.fn()
+    vi.spyOn(useSnackBar, 'useSnackBar').mockImplementation(() => ({
+      success: vi.fn(),
+      error: snackBarError,
+    }))
+
+    renderRequestFormDialog({ onConfirmDialog: mockCloseModal })
+
+    const descriptionField = screen.getByLabelText(
+      /Que souhaitez vous organiser ?/
+    )
+    await userEvent.type(descriptionField, 'Test description')
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Envoyer ma demande',
+    })
+    await userEvent.click(submitButton)
+
+    expect(snackBarError).toHaveBeenCalledWith(
+      'Impossible de créer la demande.\nVeuillez contacter le support pass culture'
+    )
+  })
+
+  it('should display error message when description is empty', async () => {
+    renderRequestFormDialog()
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Envoyer ma demande',
+    })
+    await userEvent.click(submitButton)
+
+    expect(
+      screen.getByText('Veuillez préciser votre demande')
+    ).toBeInTheDocument()
+  })
+
+  it('should display error message when phone number is not valid', async () => {
+    renderRequestFormDialog()
+
+    const phoneField = screen.getByLabelText('Téléphone', { exact: false })
+    await userEvent.type(phoneField, '123')
+
+    const submitButton = screen.getByRole('button', {
+      name: 'Envoyer ma demande',
+    })
+    await userEvent.click(submitButton)
+
+    expect(
+      screen.getByText(
+        'Veuillez renseigner un numéro de téléphone valide, exemple : 6 12 34 56 78'
+      )
+    ).toBeInTheDocument()
+  })
+
+  it('should not display form if user is readonly', () => {
+    renderRequestFormDialog({ userRole: AdageFrontRoles.READONLY })
+
+    expect(
+      screen.queryByText(
+        'Si vous le souhaitez, vous pouvez contacter ce partenaire culturel en renseignant les informations ci-dessous.'
+      )
+    ).not.toBeInTheDocument()
+  })
+
+  it('should log event when user close modal', async () => {
+    const mockCloseModal = vi.fn()
+    renderRequestFormDialog({ onConfirmDialog: mockCloseModal })
+
+    const descriptionField = screen.getByLabelText(
+      /Que souhaitez vous organiser ?/
+    )
+    await userEvent.type(descriptionField, 'Test description')
+
+    await userEvent.click(
+      screen.getByRole('button', {
+        name: 'Annuler',
+      })
+    )
+
+    expect(apiAdage.logRequestFormPopinDismiss).toHaveBeenCalledWith({
+      body: {
+        iframeFrom: '/',
+        collectiveOfferTemplateId: 1,
+        comment: 'Test description',
+      },
+    })
+  })
+
+  it('should log event when user click on custom link form', async () => {
+    renderRequestFormDialog({
+      contactEmail: '',
+      contactPhone: '',
+      contactForm: '',
+      contactUrl: 'https://example.com',
+    })
+
+    const buttonLink = screen.getByText(/Aller sur le site/)
+
+    await userEvent.click(buttonLink)
+
+    expect(apiAdage.logContactUrlClick).toHaveBeenCalledWith({
+      body: {
+        iframeFrom: '/',
+        offerId: 1,
+      },
+    })
+  })
+})

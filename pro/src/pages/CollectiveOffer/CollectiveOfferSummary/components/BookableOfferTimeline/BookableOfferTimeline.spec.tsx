@@ -1,0 +1,649 @@
+import { screen } from '@testing-library/react'
+import { axe } from 'vitest-axe'
+
+import {
+  CollectiveOfferAllowedAction,
+  CollectiveOfferDisplayedStatus,
+  SimplifiedBankAccountStatus,
+} from '@/apiClient/v1'
+import {
+  getCollectiveOfferBookingFactory,
+  getCollectiveOfferFactory,
+} from '@/commons/utils/factories/collectiveApiFactories'
+import { sharedCurrentUserFactory } from '@/commons/utils/factories/storeFactories'
+import { makeGetVenueResponseModel } from '@/commons/utils/factories/venueFactories'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+
+import { BookableOfferTimeline } from './BookableOfferTimeline'
+
+const renderBookableOfferTimeline = (
+  ui: React.ReactElement,
+  options?: RenderWithProvidersOptions
+) =>
+  renderWithProviders(ui, {
+    ...options,
+    storeOverrides: {
+      user: {
+        currentUser: sharedCurrentUserFactory(),
+        selectedPartnerVenue: makeGetVenueResponseModel({ id: 1 }),
+      },
+      ...options?.storeOverrides,
+    },
+  })
+
+describe('BookableOfferTimeline', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderBookableOfferTimeline(
+      <BookableOfferTimeline offer={getCollectiveOfferFactory()} />
+    )
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it("should render the 'Suivi de l’offre' title", () => {
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline offer={getCollectiveOfferFactory()} />
+    )
+    expect(screen.getByText('Suivi de l’offre')).toBeInTheDocument()
+  })
+
+  it.each([
+    {
+      status: CollectiveOfferDisplayedStatus.PUBLISHED,
+      expectedText: 'Publiée',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.REJECTED,
+      expectedText: 'Non conforme',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.CANCELLED,
+      expectedText: 'Annulée',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.UNDER_REVIEW,
+      expectedText: 'En instruction',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.PREBOOKED,
+      expectedText: 'Préréservée',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.BOOKED,
+      expectedText: 'Réservée',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.EXPIRED,
+      expectedText: 'Expirée',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.ENDED,
+      expectedText: 'Terminée',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.ARCHIVED,
+      expectedText: 'Archivée',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.DRAFT,
+      expectedText: 'Brouillon',
+    },
+    {
+      status: CollectiveOfferDisplayedStatus.REIMBURSED,
+      expectedText: 'Remboursée',
+    },
+  ])(
+    'should render the correct label for past step with status $status',
+    ({ status, expectedText }) => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            booking: getCollectiveOfferBookingFactory(),
+            history: {
+              past:
+                status === CollectiveOfferDisplayedStatus.EXPIRED
+                  ? [
+                      {
+                        status: CollectiveOfferDisplayedStatus.PREBOOKED,
+                        datetime: '2025-07-04T13:38:12.020421Z',
+                      },
+                      {
+                        status: CollectiveOfferDisplayedStatus.EXPIRED,
+                        datetime: '2025-07-05T13:38:12.020421Z',
+                      },
+                    ]
+                  : [
+                      {
+                        status,
+                        datetime: '2025-07-05T13:38:12.020421Z',
+                      },
+                    ],
+              future: [],
+            },
+          })}
+        />
+      )
+      expect(screen.getByText(expectedText)).toBeInTheDocument()
+    }
+  )
+
+  it.each([
+    {
+      lastStatus: CollectiveOfferDisplayedStatus.PUBLISHED,
+      expectedWaiting: 'En attente de préréservation',
+    },
+    {
+      lastStatus: CollectiveOfferDisplayedStatus.PREBOOKED,
+      expectedWaiting: 'En attente de réservation',
+    },
+    {
+      lastStatus: CollectiveOfferDisplayedStatus.ENDED,
+      expectedWaiting: 'En attente de remboursement',
+    },
+  ])(
+    'should render a waiting step after $lastStatus if applicable',
+    ({ lastStatus, expectedWaiting }) => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            history: {
+              past: [
+                {
+                  status: lastStatus,
+                  datetime: '2025-07-05T13:38:12.020421Z',
+                },
+              ],
+              future: [],
+            },
+          })}
+        />
+      )
+      expect(screen.getByText(expectedWaiting)).toBeInTheDocument()
+    }
+  )
+
+  it('should not render a waiting step for statuses that do not require it', () => {
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          history: {
+            past: [
+              {
+                status: CollectiveOfferDisplayedStatus.CANCELLED,
+                datetime: '2025-07-05T13:38:12.020421Z',
+              },
+            ],
+            future: [],
+          },
+        })}
+      />
+    )
+    expect(screen.queryByText(/En attente de/)).not.toBeInTheDocument()
+  })
+
+  it('should render the waiting step "En attente de remboursement" only if 48h have passed after ENDED status', () => {
+    const now = new Date()
+    const date49hAgo = new Date(
+      now.getTime() - 49 * 60 * 60 * 1000
+    ).toISOString()
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          history: {
+            past: [
+              {
+                status: CollectiveOfferDisplayedStatus.ENDED,
+                datetime: date49hAgo,
+              },
+            ],
+            future: [],
+          },
+        })}
+      />
+    )
+    expect(screen.getByText('En attente de remboursement')).toBeInTheDocument()
+  })
+
+  it('should render the waiting step "En attente de préréservation" after PUBLISHED', () => {
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          history: {
+            past: [
+              {
+                status: CollectiveOfferDisplayedStatus.PUBLISHED,
+                datetime: '2025-07-05T13:38:12.020421Z',
+              },
+            ],
+            future: [],
+          },
+        })}
+      />
+    )
+    expect(screen.getByText('En attente de préréservation')).toBeInTheDocument()
+  })
+
+  it('should render the waiting step "En attente de réservation" after PREBOOKED', () => {
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          history: {
+            past: [
+              {
+                status: CollectiveOfferDisplayedStatus.PREBOOKED,
+                datetime: '2025-07-05T13:38:12.020421Z',
+              },
+            ],
+            future: [],
+          },
+        })}
+      />
+    )
+    expect(screen.getByText('En attente de réservation')).toBeInTheDocument()
+  })
+
+  it('should render the waiting step "Nous espérons que votre évènement s’est bien déroulé." after ENDED for less than 48h', () => {
+    const now = new Date()
+    const date47hAgo = new Date(
+      now.getTime() - 47 * 60 * 60 * 1000
+    ).toISOString()
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          history: {
+            past: [
+              {
+                status: CollectiveOfferDisplayedStatus.ENDED,
+                datetime: date47hAgo,
+              },
+            ],
+            future: [],
+          },
+        })}
+      />
+    )
+    expect(
+      screen.getByText(
+        'Nous espérons que votre évènement s’est bien déroulé. Si besoin, vous pouvez ' +
+          'annuler la réservation ou modifier à la baisse le prix ou le nombre de participants ' +
+          'jusqu’à 48 heures après la date de l’évènement.'
+      )
+    ).toBeInTheDocument()
+  })
+})
+
+describe('BookableOfferTimeline - step type rendering', () => {
+  const getIcon = () => document.querySelector('svg[class*="icon-"]')
+
+  it.each([
+    { status: CollectiveOfferDisplayedStatus.CANCELLED, label: 'Annulée' },
+    { status: CollectiveOfferDisplayedStatus.EXPIRED, label: 'Expirée' },
+    { status: CollectiveOfferDisplayedStatus.REJECTED, label: 'Non conforme' },
+  ])('should render an error icon for status $status', ({ status, label }) => {
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          history: {
+            past:
+              status === CollectiveOfferDisplayedStatus.EXPIRED
+                ? [
+                    {
+                      status: CollectiveOfferDisplayedStatus.EXPIRED,
+                      datetime: '2025-07-04T13:38:12.020421Z',
+                    },
+                    {
+                      status: CollectiveOfferDisplayedStatus.PREBOOKED,
+                      datetime: '2025-07-05T13:38:12.020421Z',
+                    },
+                  ]
+                : [
+                    {
+                      status,
+                      datetime: '2025-07-05T13:38:12.020421Z',
+                    },
+                  ],
+            future: [],
+          },
+        })}
+      />
+    )
+    const icon = getIcon()
+    expect(icon).toHaveClass('icon-error')
+    expect(screen.getByText(label)).toBeInTheDocument()
+  })
+
+  it.each([
+    { status: CollectiveOfferDisplayedStatus.BOOKED, label: 'Réservée' },
+    { status: CollectiveOfferDisplayedStatus.PUBLISHED, label: 'Publiée' },
+    { status: CollectiveOfferDisplayedStatus.PREBOOKED, label: 'Préréservée' },
+    { status: CollectiveOfferDisplayedStatus.ENDED, label: 'Terminée' },
+    { status: CollectiveOfferDisplayedStatus.REIMBURSED, label: 'Remboursée' },
+    { status: CollectiveOfferDisplayedStatus.ARCHIVED, label: 'Archivée' },
+  ])('should render a success icon for status $status', ({ status, label }) => {
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          booking: getCollectiveOfferBookingFactory(),
+          history: {
+            past: [
+              {
+                status,
+                datetime: '2025-07-05T13:38:12.020421Z',
+              },
+            ],
+            future: [],
+          },
+        })}
+      />
+    )
+    const icon = getIcon()
+    expect(icon).toHaveClass('icon-success')
+    expect(screen.getByText(label)).toBeInTheDocument()
+  })
+
+  it.each([
+    { status: CollectiveOfferDisplayedStatus.DRAFT, label: 'Brouillon' },
+    {
+      status: CollectiveOfferDisplayedStatus.UNDER_REVIEW,
+      label: 'En instruction',
+    },
+  ])('should render a waiting icon for status $status', ({ status, label }) => {
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          history: {
+            past: [
+              {
+                status,
+                datetime: '2025-07-05T13:38:12.020421Z',
+              },
+            ],
+            future: [],
+          },
+        })}
+      />
+    )
+    const icon = getIcon()
+    expect(icon).toHaveClass('icon-waiting')
+    expect(screen.getByText(label)).toBeInTheDocument()
+  })
+
+  it('should render a disabled icon for future steps', () => {
+    renderBookableOfferTimeline(
+      <BookableOfferTimeline
+        offer={getCollectiveOfferFactory({
+          history: {
+            past: [
+              {
+                status: CollectiveOfferDisplayedStatus.PUBLISHED,
+                datetime: '2025-07-05T13:38:12.020421Z',
+              },
+            ],
+            future: [CollectiveOfferDisplayedStatus.PREBOOKED],
+          },
+        })}
+      />
+    )
+
+    const futureStep = screen.getByText('Préréservée')
+    const icon = futureStep.closest('li')?.querySelector('svg')
+    expect(icon).toHaveClass('icon-disabled')
+  })
+
+  describe('timeline banners', () => {
+    it('should render a banner when current step is draft', () => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.DRAFT,
+                  datetime: '2025-07-06T13:00:00.000000',
+                },
+              ],
+              future: [CollectiveOfferDisplayedStatus.PUBLISHED],
+            },
+          })}
+        />
+      )
+
+      expect(
+        screen.getByText(
+          'Finalisez et envoyez votre brouillon à un établissement quand vous le souhaitez.'
+        )
+      ).toBeInTheDocument()
+      expect(screen.getByText('Reprendre mon brouillon')).toBeInTheDocument()
+    })
+
+    it('should render a banner when current step is published', () => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            allowedActions: [CollectiveOfferAllowedAction.CAN_EDIT_DATES],
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.PUBLISHED,
+                  datetime: '2025-07-06T13:00:00.000000',
+                },
+              ],
+              future: [CollectiveOfferDisplayedStatus.PREBOOKED],
+            },
+          })}
+        />
+      )
+
+      expect(
+        screen.getByText(
+          /L'enseignant doit impérativement préréserver l'offre avant le/
+        )
+      ).toBeInTheDocument()
+      expect(
+        screen.getByText('Modifier la date limite de réservation')
+      ).toBeInTheDocument()
+    })
+
+    it('should render a banner when current step is prebooked', () => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            allowedActions: [CollectiveOfferAllowedAction.CAN_EDIT_DATES],
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.PREBOOKED,
+                  datetime: '2025-07-06T13:00:00.000000',
+                },
+              ],
+              future: [CollectiveOfferDisplayedStatus.BOOKED],
+            },
+          })}
+        />
+      )
+
+      expect(screen.getByText(/Expire dans 1 jour/i)).toBeInTheDocument()
+      expect(
+        screen.getByText(
+          /Le chef d'établissement doit impérativement confirmer la préréservation de l'offre avant le/
+        )
+      ).toBeInTheDocument()
+      expect(
+        screen.getByText('Modifier la date limite de réservation')
+      ).toBeInTheDocument()
+    })
+
+    it('should render a banner when current step is rejected', () => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.REJECTED,
+                  datetime: '2025-07-06T13:00:00.000000',
+                },
+              ],
+              future: [CollectiveOfferDisplayedStatus.BOOKED],
+            },
+          })}
+        />
+      )
+
+      expect(
+        screen.getByText(
+          /Votre offre a été rejetée par notre équipe en charge du contrôle de conformité./
+        )
+      ).toBeInTheDocument()
+    })
+
+    it('should render a banner when current step is under review', () => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.UNDER_REVIEW,
+                  datetime: '2025-07-06T13:00:00.000000',
+                },
+              ],
+              future: [CollectiveOfferDisplayedStatus.BOOKED],
+            },
+          })}
+        />
+      )
+
+      expect(
+        screen.getByText(
+          /Votre offre est en cours d'instruction par notre équipe chargée du contrôle de conformité. Ce contrôle peut prendre jusqu'à 72 heures. Vous serez notifié par mail lors de sa validation ou de son refus./
+        )
+      ).toBeInTheDocument()
+    })
+
+    it('should render a banner when current step is reimbursed', () => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.REIMBURSED,
+                  datetime: '2025-07-06T13:00:00.000000',
+                },
+              ],
+              future: [],
+            },
+          })}
+        />
+      )
+
+      expect(
+        screen.getByText(/Votre offre a été remboursée./)
+      ).toBeInTheDocument()
+      expect(
+        screen.getByRole('link', {
+          name: /Consulter les remboursements/,
+        })
+      ).toHaveAttribute('href', '/administration/remboursements')
+    })
+
+    it('should render a banner when current step is archived', () => {
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.PUBLISHED,
+                  datetime: '2025-07-06T13:00:00.000000',
+                },
+                {
+                  status: CollectiveOfferDisplayedStatus.ARCHIVED,
+                  datetime: '2025-07-07T13:00:00.000000',
+                },
+              ],
+              future: [],
+            },
+          })}
+        />
+      )
+
+      expect(
+        screen.getByText(
+          /Vous avez archivé cette offre. Elle n'est plus visible sur ADAGE./
+        )
+      ).toBeInTheDocument()
+      expect(screen.getByText(/Le 07 juillet 2025/)).toBeInTheDocument()
+    })
+
+    it('should render a banner when offer ended less than 48 hours ago', () => {
+      const now = new Date()
+      const date47hAgo = new Date(
+        now.getTime() - 47 * 60 * 60 * 1000
+      ).toISOString()
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.ENDED,
+                  datetime: date47hAgo,
+                },
+              ],
+              future: [],
+            },
+          })}
+        />
+      )
+
+      expect(
+        screen.getByText(
+          /Nous espérons que votre évènement s’est bien déroulé. Si besoin, vous pouvez annuler la réservation ou modifier à la baisse le prix ou le nombre de participants jusqu’à 48 heures après la date de l’évènement./
+        )
+      ).toBeInTheDocument()
+    })
+
+    it('should render the reimbursement waiting banner when offer ended more than 48 hours ago', () => {
+      const now = new Date()
+      const date49hAgo = new Date(
+        now.getTime() - 49 * 60 * 60 * 1000
+      ).toISOString()
+      renderBookableOfferTimeline(
+        <BookableOfferTimeline
+          offer={getCollectiveOfferFactory({
+            history: {
+              past: [
+                {
+                  status: CollectiveOfferDisplayedStatus.ENDED,
+                  datetime: date49hAgo,
+                },
+              ],
+              future: [],
+            },
+          })}
+        />,
+        {
+          storeOverrides: {
+            user: {
+              currentUser: sharedCurrentUserFactory(),
+              selectedPartnerVenue: makeGetVenueResponseModel({
+                id: 1,
+                bankAccountStatus: SimplifiedBankAccountStatus.VALID,
+              }),
+            },
+          },
+        }
+      )
+      expect(
+        screen.getByText(
+          'Les remboursements sont effectués toutes les 2 à 3 semaines. Vous serez notifié par mail une fois que le remboursement aura été versé.'
+        )
+      ).toBeInTheDocument()
+    })
+  })
+})

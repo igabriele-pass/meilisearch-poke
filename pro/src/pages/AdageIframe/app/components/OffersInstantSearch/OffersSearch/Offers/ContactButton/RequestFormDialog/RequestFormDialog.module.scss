@@ -1,0 +1,79 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+
+.contact-callout,
+.contact-readonly {
+  margin-bottom: var(--size-spacing-l);
+}
+
+.form-description {
+  @include fonts.body;
+
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+
+  &-value {
+    color: var(--color-text-brand-primary);
+  }
+
+  &-mail {
+    @include fonts.body-accent;
+
+    &:hover {
+      text-decoration: underline;
+    }
+  }
+
+  &-contact {
+    @include fonts.body-accent;
+
+    display: block;
+    margin-top: var(--size-spacing-l);
+    color: var(--color-text-brand-primary);
+  }
+
+  &-link {
+    display: flex;
+    align-items: center;
+    white-space: break-spaces;
+
+    &-text {
+      gap: var(--size-spacing-s);
+      align-items: center;
+    }
+
+    &-site {
+      display: block;
+      margin-top: var(--size-spacing-xxl);
+      margin-bottom: var(--size-spacing-l);
+    }
+  }
+
+  &-list {
+    display: flex;
+    flex-direction: column;
+    list-style: disc;
+    margin-left: var(--size-spacing-l);
+    margin-top: var(--size-spacing-l);
+
+    &-item {
+      padding: 0 0 var(--size-spacing-s) var(--size-spacing-s);
+    }
+
+    &-item::marker {
+      font-size: rem.torem(8px);
+    }
+  }
+}
+
+.form-mandatory {
+  margin-top: var(--size-spacing-xxl);
+  margin-bottom: var(--size-spacing-l);
+}
+
+.separator {
+  margin: var(--size-spacing-l) 0 0 0;
+  background-image: none;
+  background-color: var(--separator-color-subtle);
+}

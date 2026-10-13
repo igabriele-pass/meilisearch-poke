@@ -1,0 +1,203 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  // https://biomejs.dev/guides/big-projects/#monorepo
+  "root": false,
+  "extends": "//",
+  // Ignore .gitignore files
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": {
+          "level": "on",
+          "options": {
+            "groups": [
+              [
+                ":BUN:",
+                ":NODE:",
+                ":PACKAGE:",
+                ":PACKAGE_WITH_PROTOCOL:",
+                ":URL:"
+              ],
+              ":BLANK_LINE:",
+              ":ALIAS:",
+              ":BLANK_LINE:",
+              [":PATH:", "**"]
+            ]
+          }
+        }
+      }
+    }
+  },
+  "formatter": {
+    "enabled": true,
+    "attributePosition": "auto",
+    "bracketSameLine": false,
+    "bracketSpacing": true,
+    "expand": "auto",
+    "formatWithErrors": false,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineEnding": "lf",
+    "lineWidth": 80,
+    "useEditorconfig": true
+  },
+  "files": {
+    "includes": [
+      "**",
+      "!**/*.svg",
+      "!build",
+      "!built",
+      "!coverage",
+      "!scripts/customRequest.ts",
+      "!src/apiClient/adage",
+      "!src/index.html",
+      "!src/apiClient/v1",
+      "!**/*.stories.tsx",
+      "!docs-build",
+      "!bundleStats.html"
+    ],
+    "ignoreUnknown": true
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "complexity": {
+        "noUselessFragments": "warn", // default: "info"
+        "useLiteralKeys": "off" // default: "info" (because we use that everywhere for `className={styles['...']}`)
+      },
+      "correctness": {
+        "useExhaustiveDependencies": "info", // default: "error"
+        "useUniqueElementIds": {
+          "level": "error",
+          "options": {
+            "excludedComponents": ["h1", "main"]
+          }
+        }
+      },
+      "style": {
+        "noCommonJs": "error", // not part of the recommended rules
+        "noDefaultExport": "error", // not part of the recommended rules
+        "noNamespace": "error", // not part of the recommended rules
+        "noRestrictedTypes": "error" // not part of the recommended rules
+      },
+
+      "suspicious": {
+        "noConsole": {
+          "level": "error",
+          "options": {
+            "allow": ["error", "info", "warn"]
+          }
+        },
+        "noEmptyBlockStatements": "warn", // not part of the recommended rules
+        "noThenProperty": "off", // `.then()` is used by Yup
+        "useAwait": "error" // not part of the recommended rules
+      }
+    }
+  },
+
+  // -------------------------------------------------------------------------
+  // Language-specific configurations
+
+  "html": {
+    "formatter": {
+      "selfCloseVoidElements": "always"
+    }
+  },
+  "javascript": {
+    "formatter": {
+      "jsxQuoteStyle": "double",
+      "quoteProperties": "asNeeded",
+      "trailingCommas": "es5",
+      "semicolons": "asNeeded",
+      "arrowParentheses": "always",
+      "bracketSameLine": false,
+      "quoteStyle": "single",
+      "attributePosition": "auto",
+      "bracketSpacing": true
+    },
+    "globals": ["assert"]
+  },
+
+  "overrides": [
+    // -------------------------------------------------------------------------
+    // package.json
+
+    {
+      "includes": ["package.json"],
+      "json": {
+        "formatter": {
+          "expand": "always"
+        }
+      }
+    },
+
+    // -------------------------------------------------------------------------
+    // CSS
+
+    {
+      "includes": ["**/*.css", "**/*.scss"],
+      "javascript": {
+        "formatter": {
+          "quoteStyle": "double"
+        }
+      }
+    },
+
+    // -------------------------------------------------------------------------
+    // Non-production codebase
+
+    {
+      "includes": [
+        "!src/index.html",
+        ".templatron/**/*.mjs",
+        "config/**/*.ts",
+        "e2e/**/*.ts",
+        "src/**/__mocks__/*.ts",
+        "src/**/__specs__/*.ts",
+        "src/**/tests/*.ts",
+        "src/**/*.spec.ts",
+        "src/**/*.spec.tsx",
+        // TODO (igabriele, 2025-08-08): We need to move all test-related common files to a dedicated folder.
+        "src/commons/utils/renderWithProviders.tsx",
+        "src/commons/utils/factories/*.ts",
+        "src/vitest.setup.ts",
+        "scripts/**/*.ts",
+        "vite.config.ts",
+        "**/*.d.ts",
+        "**/*.stories.tsx"
+      ],
+      "linter": {
+        "rules": {
+          "a11y": "off",
+          "complexity": {
+            "noUselessFragments": "off"
+          },
+          "correctness": {
+            "noNodejsModules": "off",
+            "noUndeclaredVariables": "off",
+            "useUniqueElementIds": "off",
+            "noRestrictedElements": "off"
+          },
+          "style": {
+            "noDefaultExport": "off",
+            "noNamespace": "off",
+            "noNonNullAssertion": "off"
+          },
+          "suspicious": {
+            "noEmptyBlockStatements": "off",
+            "noExportsInTest": "off",
+            "noExplicitAny": "off",
+            "noImplicitAnyLet": "off"
+          }
+        }
+      }
+    }
+  ]
+}

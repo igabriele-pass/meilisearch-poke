@@ -1,0 +1,31 @@
+@use "styles/mixins/_size.scss" as size;
+
+.share-link {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 0.5rem;
+
+  &-input {
+    flex: 1;
+    user-select: none;
+    pointer-events: none;
+  }
+
+  &-button {
+    display: flex;
+    align-self: flex-end;
+  }
+}
+
+@media (max-width: size.$tablet) {
+  .share-link {
+    display: grid;
+
+    &-button {
+      > * {
+        width: 100%;
+      }
+    }
+  }
+}

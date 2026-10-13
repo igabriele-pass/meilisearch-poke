@@ -1,0 +1,29 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_a11y.scss" as a11y;
+
+.message {
+  @include fonts.body-accent-xs;
+
+  display: flex;
+  text-align: left;
+}
+
+.message-icon {
+  width: rem.torem(18px);
+  height: rem.torem(18px);
+  margin-right: var(--size-spacing-xs);
+}
+
+.message-error {
+  color: var(--color-text-error);
+}
+
+.message-success {
+  color: var(--color-text-success);
+}
+
+.message-pristine {
+  color: var(--color-text-subtle);
+}
+

@@ -1,0 +1,92 @@
+import { useState } from 'react'
+import { useSWRConfig } from 'swr'
+
+import { api } from '@/apiClient/api'
+import type {
+  GetVenueResponseModel,
+  PutVenueProviderBody,
+  VenueProviderResponse,
+} from '@/apiClient/v1'
+import { GET_VENUE_PROVIDERS_QUERY_KEY } from '@/commons/config/swrQueryKeys'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import { withVenueHelpers } from '@/commons/utils/withVenueHelpers'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonColor, ButtonVariant } from '@/design-system/Button/types'
+import fullPauseIcon from '@/icons/full-pause.svg'
+import fullPlayIcon from '@/icons/full-play.svg'
+
+import { ToggleVenueProviderStatusDialog } from './ToggleVenueProviderStatusDialog'
+
+interface ToggleVenueProviderStatusButtonProps {
+  venueProvider: VenueProviderResponse
+  venue: GetVenueResponseModel
+}
+
+export const ToggleVenueProviderStatusButton = ({
+  venueProvider,
+  venue,
+}: ToggleVenueProviderStatusButtonProps) => {
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+  const snackBar = useSnackBar()
+  const { mutate } = useSWRConfig()
+  const isClosed = withVenueHelpers(venue).isClosed
+
+  const updateVenueProviderStatus = async () => {
+    setIsLoading(true)
+    // For Allociné Provider, we need to send the entire payload, and not just `isActive`
+    const payload: PutVenueProviderBody = {
+      quantity: venueProvider.quantity,
+      price: venueProvider.price,
+      venueIdAtOfferProvider: venueProvider.venueIdAtOfferProvider,
+      isDuo: venueProvider.isDuo,
+      isActive: !venueProvider.isActive,
+    }
+
+    try {
+      await api.updateVenueProvider({
+        path: { venue_provider_id: Number(venueProvider.id) },
+        body: payload,
+      })
+      await mutate([GET_VENUE_PROVIDERS_QUERY_KEY, venue.id])
+    } catch {
+      snackBar.error('Une erreur est survenue. Merci de réessayer plus tard')
+    } finally {
+      setIsModalOpen(false)
+      setIsLoading(false)
+    }
+  }
+
+  return (
+    <ToggleVenueProviderStatusDialog
+      onCancel={() => setIsModalOpen(false)}
+      onConfirm={updateVenueProviderStatus}
+      isLoading={isLoading}
+      isActive={venueProvider.isActive}
+      isDialogOpen={isModalOpen}
+      trigger={
+        venueProvider.isActive ? (
+          <Button
+            onClick={() => setIsModalOpen(true)}
+            variant={ButtonVariant.TERTIARY}
+            color={ButtonColor.NEUTRAL}
+            icon={fullPauseIcon}
+            iconAlt="Mettre en pause la synchronisation"
+            label="Mettre en pause"
+            disabled={isClosed}
+          />
+        ) : (
+          <Button
+            onClick={() => setIsModalOpen(true)}
+            variant={ButtonVariant.TERTIARY}
+            color={ButtonColor.NEUTRAL}
+            icon={fullPlayIcon}
+            iconAlt="Réactiver la synchronisation"
+            label="Réactiver"
+            disabled={isClosed}
+          />
+        )
+      }
+    />
+  )
+}

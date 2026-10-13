@@ -1,0 +1,47 @@
+name: 4 [Docker] Build image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: "The docker image name"
+        required: true
+        type: string
+
+      tag:
+        description: "The docker image tag"
+        required: true
+        type: string
+
+      base_ref:
+        # The base ref to tag from.
+        # Can be a branch name, a tag or a commit.
+        required: false
+        type: string
+
+jobs:
+  build-docker-image:
+    name: Build Docker image
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.base_ref }}
+          persist-credentials: false
+
+      - name: Add version to api
+        working-directory: api
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          echo "$TAG" > version.txt
+          git add version.txt
+
+      - name: Build docker image and save as github artifact
+        uses: ./.github/actions/build-docker-image
+        with:
+          image: ${{ inputs.image }}
+          context: api
+          tag: ${{ inputs.tag }}
+          # updating the layer cache can take up to a minute, and will almost never be used aside from master
+          write-cache: ${{ github.ref == 'refs/heads/master' }}

@@ -1,0 +1,143 @@
+import type { GetVenueResponseModel } from '@/apiClient/v1'
+import { defaultGetVenue } from '@/commons/utils/factories/collectiveApiFactories'
+
+import { toFormValues } from '../toFormValues'
+
+let venue: GetVenueResponseModel
+
+describe('toFormValues', () => {
+  beforeEach(() => {
+    venue = {
+      ...defaultGetVenue,
+      publicName: 'Adresse de la venue',
+    }
+  })
+
+  it('should return a valid initial form object', () => {
+    const formValues = toFormValues({
+      venue: {
+        ...venue,
+        location: {
+          id: 978,
+          isVenueLocation: false,
+          city: 'Montpellier',
+          street: '79 Quai du Palladium',
+          postalCode: '34000',
+          isManualEdition: true,
+          latitude: 43.609296,
+          longitude: 3.882445,
+          banId: '49759_1304_00002',
+          departmentCode: '34',
+          inseeCode: '34172',
+          label: 'Centre commercial',
+        },
+      },
+    })
+
+    const expectedFormValues = {
+      activity: 'CULTURAL_CENTRE',
+      street: '79 Quai du Palladium',
+      postalCode: '34000',
+      inseeCode: '34172',
+      isOpenToPublic: 'true',
+      city: 'Montpellier',
+      addressAutocomplete: '79 Quai du Palladium 34000 Montpellier',
+      'search-addressAutocomplete': '79 Quai du Palladium 34000 Montpellier',
+      coords: '43.609296, 3.882445',
+      culturalDomains: [],
+      description: 'desc',
+      latitude: '43.609296',
+      longitude: '3.882445',
+      banId: '49759_1304_00002',
+      manuallySetAddress: true,
+      comment: '',
+      name: 'Nom de la structure',
+      venueSiret: '',
+      publicName: 'Adresse de la venue',
+      siret: '',
+      withdrawalDetails: '',
+      accessibility: {
+        visual: true,
+        mental: true,
+        audio: false,
+        motor: false,
+        none: false,
+      },
+      isAccessibilityAppliedOnAllOffers: false,
+    }
+
+    expect(formValues).toEqual(expectedFormValues)
+  })
+
+  it('should return empty inseeCode if inseeCode is missing in address', () => {
+    const formValues = toFormValues({
+      venue: {
+        ...venue,
+        location: {
+          ...venue.location!, // Ensure address is not null
+          inseeCode: null,
+        },
+      },
+    })
+    expect(formValues.inseeCode).toBeNull()
+  })
+
+  it('should return null banId if banId is missing in address', () => {
+    const formValues = toFormValues({
+      venue: {
+        ...venue,
+        location: {
+          ...venue.location!, // Ensure address is not null
+          banId: null,
+        },
+      },
+    })
+    expect(formValues.banId).toBeNull()
+  })
+
+  it('should return siret evenif banId is missing in address', () => {
+    const formValues = toFormValues({
+      venue: {
+        ...venue,
+        isCaledonian: true,
+        siret: 'NC0123456789XX',
+        location: {
+          ...venue.location!, // Ensure address is not null
+          banId: null,
+        },
+      },
+    })
+    expect(formValues.siret).toEqual('0123456789')
+  })
+
+  it('should return empty siret for caledonian venue with null siret', () => {
+    const formValues = toFormValues({
+      venue: {
+        ...venue,
+        isCaledonian: true,
+        siret: null,
+      },
+    })
+    expect(formValues.siret).toEqual('')
+  })
+
+  it('should map collectiveDomains names to culturalDomains', () => {
+    const formValues = toFormValues({
+      venue: {
+        ...venue,
+        collectiveDomains: [
+          { id: 1, name: 'Cinéma' },
+          { id: 2, name: 'Musique' },
+        ],
+      },
+    })
+    expect(formValues.culturalDomains).toEqual(['Cinéma', 'Musique'])
+  })
+
+  it('should return empty string for description when null', () => {
+    const formValues = toFormValues({
+      venue: { ...venue, description: null },
+    })
+    expect(formValues.description).toEqual('')
+  })
+})

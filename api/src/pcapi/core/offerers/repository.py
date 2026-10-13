@@ -1,0 +1,1429 @@
+import datetime
+import logging
+import typing
+
+import sqlalchemy as sa
+import sqlalchemy.orm as sa_orm
+from sqlalchemy.engine import Row
+
+from pcapi.core.educational import models as educational_models
+from pcapi.core.educational import repository as educational_repository
+from pcapi.core.finance import models as finance_models
+from pcapi.core.geography import models as geography_models
+from pcapi.core.highlights import models as highlights_models
+from pcapi.core.offerers import models as offerers_models
+from pcapi.core.offers import models as offers_models
+from pcapi.core.users import models as users_models
+from pcapi.models import db
+from pcapi.models import offer_mixin
+from pcapi.utils import date as date_utils
+
+from . import exceptions
+from . import models
+from . import schemas
+
+
+logger = logging.getLogger(__name__)
+
+MAX_OFFERS_PER_OFFERER_FOR_COUNT = 500
+MAX_OFFERS_PER_VENUE_FOR_COUNT = 500
+
+
+def get_all_offerers_for_user(
+    user: users_models.User,
+    validated_offerers_only: bool = False,
+    include_non_validated_user_offerers: bool = False,
+) -> sa_orm.Query:
+    """Return a query of matching, accessible offerers.
+
+    **WARNING:** this function may return more than one row per
+    offerer (for offerers that have multiple user offerers and/or
+    multiple venues). Deduplication should be done by the caller (with
+    `distinct()`). This function cannot call `distinct()` itself
+    because it does not know how the caller wants to sort results (and
+    `distinct` and `order by` clauses must match).
+
+    **WARNING:** ``include_non_validated_user_offerers`` should only
+    be used to return very restrictive information (that the
+    requesting user already knows), such as the name of the offerer.
+    """
+    query = db.session.query(models.Offerer).filter(models.Offerer.isActive.is_(True))
+
+    if not user.has_admin_role:
+        user_offerer_filters = [
+            models.UserOfferer.userId == user.id,
+            sa.not_(models.UserOfferer.isRejected) & sa.not_(models.UserOfferer.isDeleted),
+        ]
+        if not include_non_validated_user_offerers:
+            user_offerer_filters.append(
+                typing.cast(sa.ColumnElement[bool], models.UserOfferer.isValidated),
+            )
+        query = query.join(models.Offerer.UserOfferers).filter(*user_offerer_filters)
+
+    if validated_offerers_only:
+        query = query.filter(models.Offerer.isValidated)
+    else:
+        query = query.filter(sa.not_(models.Offerer.isRejected))
+
+    return query
+
+
+def get_ids_of_venues_with_offers(offererIds: list[int]) -> typing.Iterable[int]:
+    """Return a list with ids of venues with non-draft offers.
+
+    Venues that do not have any offers are not included.
+    """
+    venues = (
+        db.session.query(models.Venue).filter(
+            models.Venue.managingOffererId.in_(offererIds),
+            sa.or_(
+                # Does the venue has Offers
+                sa.select(1)
+                .select_from(offers_models.Offer)
+                .where(
+                    sa.and_(
+                        offers_models.Offer.venueId == models.Venue.id,
+                        offers_models.Offer.validation != offer_mixin.OfferValidationStatus.DRAFT,
+                    )
+                )
+                .exists(),
+                # Does the venue has CollectiveOffers
+                sa.select(1)
+                .select_from(educational_models.CollectiveOffer)
+                .where(
+                    sa.and_(
+                        educational_models.CollectiveOffer.venueId == models.Venue.id,
+                        educational_models.CollectiveOffer.validation != offer_mixin.OfferValidationStatus.DRAFT,
+                    )
+                )
+                .exists(),
+                # Does the venue has CollectiveOfferTemplates
+                sa.select(1)
+                .select_from(educational_models.CollectiveOfferTemplate)
+                .where(
+                    sa.and_(
+                        educational_models.CollectiveOfferTemplate.venueId == models.Venue.id,
+                        educational_models.CollectiveOfferTemplate.validation
+                        != offer_mixin.OfferValidationStatus.DRAFT,
+                    )
+                )
+                .exists(),
+            ),
+        )
+    ).with_entities(models.Venue.id)
+    return [venue_id for (venue_id,) in venues]
+
+
+def find_offerer_by_siren(siren: str) -> models.Offerer | None:
+    return db.session.query(models.Offerer).filter_by(siren=siren).one_or_none()
+
+
+def find_offerer_by_id(offerer_id: int) -> models.Offerer | None:
+    return db.session.query(models.Offerer).filter_by(id=offerer_id).one_or_none()
+
+
+def find_offerer_by_id_with_venues_addresses(offerer_id: int) -> models.Offerer | None:
+    return (
+        db.session.query(models.Offerer)
+        .filter_by(id=offerer_id)
+        .options(
+            sa_orm.joinedload(models.Offerer.managedVenues)
+            .joinedload(models.Venue.offererAddress)
+            .joinedload(models.OffererAddress.address)
+        )
+        .one_or_none()
+    )
+
+
+def find_venue_by_id(venue_id: int) -> models.Venue | None:
+    return (
+        db.session.query(models.Venue)
+        .filter_by(id=venue_id)
+        .options(sa_orm.joinedload(models.Venue.venueLabel))
+        .options(sa_orm.joinedload(models.Venue.managingOfferer))
+        .one_or_none()
+    )
+
+
+def get_active_venue_page_data(venue_id: int) -> models.Venue | None:
+    return (
+        db.session.execute(
+            sa.select(models.Venue)
+            .join(models.Venue.managingOfferer)
+            .options(
+                sa_orm.joinedload(models.Venue.accessibilityProvider).load_only(
+                    models.AccessibilityProvider.externalAccessibilityData,
+                    models.AccessibilityProvider.externalAccessibilityId,
+                    models.AccessibilityProvider.externalAccessibilityUrl,
+                )
+            )
+            .options(
+                sa_orm.joinedload(models.Venue.googlePlacesInfo).load_only(
+                    models.GooglePlacesInfo.bannerMeta,
+                    models.GooglePlacesInfo.bannerUrl,
+                )
+            )
+            .options(
+                sa_orm.contains_eager(models.Venue.managingOfferer).load_only(
+                    models.Offerer.isActive,
+                    models.Offerer.validationStatus,
+                )
+            )
+            .options(
+                sa_orm.selectinload(models.Venue.openingHours).load_only(
+                    models.OpeningHours.timespan, models.OpeningHours.weekday
+                )
+            )
+            .options(
+                sa_orm.selectinload(models.Venue.collectiveDomains).load_only(
+                    educational_models.EducationalDomain.name,
+                )
+            )
+            .options(
+                sa_orm.joinedload(models.Venue.offererAddress)
+                .load_only()
+                .joinedload(models.OffererAddress.address)
+                .load_only(
+                    geography_models.Address.city,
+                    geography_models.Address.latitude,
+                    geography_models.Address.longitude,
+                    geography_models.Address.postalCode,
+                    geography_models.Address.street,
+                    geography_models.Address.timezone,
+                )
+            )
+            .options(
+                sa_orm.joinedload(models.Venue.contact).load_only(
+                    models.VenueContact.email,
+                    models.VenueContact.phone_number,
+                    models.VenueContact.social_medias,
+                    models.VenueContact.website,
+                )
+            )
+            .filter(
+                models.Venue.id == venue_id,
+                models.Venue.isPermanent.is_(True),
+                models.Offerer.isClosed.is_(False),
+                models.Offerer.isActive.is_(True),
+            )
+        )
+        .scalars()
+        .one_or_none()
+    )
+
+
+def find_venue_by_id_with_address(venue_id: int) -> models.Venue | None:
+    return (
+        db.session.query(models.Venue)
+        .filter_by(id=venue_id)
+        .options(
+            sa_orm.joinedload(models.Venue.venueLabel),
+            sa_orm.joinedload(models.Venue.managingOfferer),
+            sa_orm.joinedload(models.Venue.offererAddress).joinedload(models.OffererAddress.address),
+        )
+        .one_or_none()
+    )
+
+
+def find_venue_and_provider_by_id(venue_id: int) -> models.Venue | None:
+    return (
+        db.session.query(models.Venue)
+        .filter_by(id=venue_id)
+        .options(sa_orm.joinedload(models.Venue.venueLabel))
+        .options(sa_orm.joinedload(models.Venue.managingOfferer))
+        .options(sa_orm.joinedload(models.Venue.venueProviders))
+        .one_or_none()
+    )
+
+
+def find_relative_venue_by_id(venue_id: int) -> list[models.Venue]:
+    aliased_venue = sa_orm.aliased(models.Venue)
+
+    query = db.session.query(models.Venue)
+    query = query.join(models.Offerer, models.Venue.managingOfferer)
+    query = query.join(aliased_venue, models.Offerer.managedVenues)
+    query = query.filter(
+        aliased_venue.id == venue_id,
+    )
+    query = query.options(sa_orm.joinedload(models.Venue.contact))
+    query = query.options(sa_orm.joinedload(models.Venue.venueLabel))
+    query = query.options(sa_orm.joinedload(models.Venue.managingOfferer))
+    query = query.options(sa_orm.joinedload(models.Venue.offererAddress).joinedload(models.OffererAddress.address))
+    # group venues by offerer
+    query = query.order_by(models.Venue.managingOffererId, models.Venue.name)
+    return query.all()
+
+
+def find_venue_by_siret(siret: str, load_address: bool = False) -> models.Venue | None:
+    return db.session.query(models.Venue).filter_by(siret=siret).one_or_none()
+
+
+def find_venue_by_siret_with_address(siret: str) -> models.Venue | None:
+    return (
+        db.session.query(models.Venue)
+        .filter_by(siret=siret)
+        .options(sa_orm.joinedload(models.Venue.offererAddress).joinedload(models.OffererAddress.address))
+        .one_or_none()
+    )
+
+
+def find_venues_of_offerers_with_no_offer_and_at_least_one_venue_and_validated_x_days_ago(
+    days: int,
+) -> sa_orm.Query:
+    validated_x_days_ago_with_venue_offerers_ids_subquery = (
+        sa.select(models.Offerer.id)
+        .filter(models.Offerer.isValidated)
+        .filter(
+            sa.cast(models.Offerer.dateValidated, sa.Date) == (datetime.date.today() - datetime.timedelta(days=days))
+        )
+        .distinct()
+    )
+
+    offerers_ids_with_no_offers_subquery = (
+        sa.select(models.Venue.managingOffererId)
+        .filter(models.Venue.managingOffererId.in_(validated_x_days_ago_with_venue_offerers_ids_subquery))
+        .outerjoin(offers_models.Offer, models.Venue.id == offers_models.Offer.venueId)
+        .outerjoin(educational_models.CollectiveOffer, models.Venue.id == educational_models.CollectiveOffer.venueId)
+        .outerjoin(
+            educational_models.CollectiveOfferTemplate,
+            models.Venue.id == educational_models.CollectiveOfferTemplate.venueId,
+        )
+        .group_by(models.Venue.managingOffererId)
+        .having(sa.func.count(offers_models.Offer.id) == 0)
+        .having(sa.func.count(educational_models.CollectiveOffer.id) == 0)
+        .having(sa.func.count(educational_models.CollectiveOfferTemplate.id) == 0)
+    )
+
+    return (
+        db.session.query(models.Venue)
+        .with_entities(models.Venue.id, models.Venue.bookingEmail)
+        .filter(models.Venue.managingOffererId.in_(offerers_ids_with_no_offers_subquery))
+    )
+
+
+def get_venue_by_offer_id(offer_id: int) -> models.Venue:
+    venue = (
+        db.session.query(models.Venue)
+        .join(models.Venue.offers)
+        .filter(offers_models.Offer.id == offer_id)
+        .options(sa_orm.joinedload(models.Venue.managingOfferer))
+        .one_or_none()
+    )
+    if not venue:
+        raise exceptions.CannotFindOffererForOfferId()
+    return venue
+
+
+def get_venues_by_offer_ids(offer_ids: list[int]) -> list[models.Venue]:
+    venues = (
+        db.session.query(models.Venue)
+        .join(models.Venue.offers)
+        .filter(offers_models.Offer.id.in_(offer_ids))
+        .options(sa_orm.joinedload(models.Venue.managingOfferer))
+        .all()
+    )
+    return venues
+
+
+def get_venue_by_collective_offer_id(collective_offer_id: int) -> models.Venue:
+    venue = (
+        db.session.query(models.Venue)
+        .join(models.Venue.collectiveOffers)
+        .filter(educational_models.CollectiveOffer.id == collective_offer_id)
+        .options(sa_orm.joinedload(models.Venue.managingOfferer), sa_orm.joinedload(models.Venue.googlePlacesInfo))
+        .one_or_none()
+    )
+    if not venue:
+        raise exceptions.CannotFindOffererForOfferId()
+    return venue
+
+
+def get_venue_by_collective_offer_template_id(collective_offer_id: int) -> models.Venue:
+    venue = (
+        db.session.query(models.Venue)
+        .join(models.Venue.collectiveOfferTemplates)
+        .filter(educational_models.CollectiveOfferTemplate.id == collective_offer_id)
+        .options(sa_orm.joinedload(models.Venue.managingOfferer))
+        .one_or_none()
+    )
+    if not venue:
+        raise exceptions.CannotFindOffererForOfferId()
+    return venue
+
+
+def get_venue_by_collective_stock_id(collective_stock_id: int) -> models.Venue:
+    venue = (
+        db.session.query(models.Venue)
+        .join(models.Venue.collectiveOffers)
+        .join(educational_models.CollectiveOffer.collectiveStock)
+        .filter(educational_models.CollectiveStock.id == collective_stock_id)
+        .options(sa_orm.joinedload(models.Venue.managingOfferer))
+        .one_or_none()
+    )
+    if not venue:
+        raise exceptions.CannotFindOffererForOfferId()
+    return venue
+
+
+def find_new_offerer_user_email(offerer_id: int) -> str:
+    result_tuple = (
+        db.session.query(models.UserOfferer)
+        .filter_by(offererId=offerer_id)
+        .join(users_models.User)
+        .with_entities(users_models.User.email)
+        .first()
+    )
+    if result_tuple:
+        return result_tuple[0]
+    raise exceptions.CannotFindOffererUserEmail()
+
+
+def venues_have_bookable_individual_offers(*venues: models.Venue) -> bool:
+    """
+    At least one venue which has email as bookingEmail has at least one active bookable offer.
+    Function is called with venues managed by an active and validated offerer, so offer.isReleased is already True.
+    """
+    return db.session.query(
+        db.session.query(offers_models.Offer)
+        .filter(
+            offers_models.Offer.venueId.in_([venue.id for venue in venues]),
+            offers_models.Offer.status == offer_mixin.OfferStatus.ACTIVE.name,
+            sa.exists()
+            .where(offers_models.Stock.offerId == offers_models.Offer.id)
+            .where(offers_models.Stock._bookable),
+        )
+        .exists()
+    ).scalar()
+
+
+def venues_have_bookable_collective_offers(*venues: models.Venue) -> bool:
+    """
+    Bookable include pre-booked offers (information used by marketing team for campaigns)
+    """
+    venue_ids = [venue.id for venue in venues]
+
+    collective_offer_query: sa_orm.Query = db.session.query(educational_models.CollectiveOffer.id).filter(
+        educational_models.CollectiveOffer.venueId.in_(venue_ids)
+    )
+
+    collective_offer_query = educational_repository.filter_collective_offers_by_statuses(
+        query=collective_offer_query,
+        statuses=[
+            educational_models.CollectiveOfferDisplayedStatus.PUBLISHED,
+            educational_models.CollectiveOfferDisplayedStatus.PREBOOKED,
+        ],
+    )
+
+    collective_offer_template_query = (
+        db.session.query(educational_models.CollectiveOfferTemplate.id)
+        .filter(
+            educational_models.CollectiveOfferTemplate.venueId.in_(venue_ids),
+            educational_models.CollectiveOfferTemplate.displayedStatus
+            == educational_models.CollectiveOfferDisplayedStatus.PUBLISHED.value,
+        )
+        .exists()
+    )
+
+    return db.session.query(
+        sa.or_(
+            collective_offer_query.exists(),
+            collective_offer_template_query,
+        ),
+    ).scalar()
+
+
+def offerer_has_venue_with_adage_id(offerer_id: int) -> bool:
+    query = db.session.query(models.Venue.id)
+    query = query.join(models.Offerer, models.Venue.managingOfferer)
+    query = query.filter(
+        models.Venue.adageId.is_not(None),
+        models.Venue.adageId != "",
+        models.Offerer.id == offerer_id,
+    )
+    return bool(query.count())
+
+
+def dms_token_exists(dms_token: str) -> bool:
+    return db.session.query(db.session.query(models.Venue).filter_by(dmsToken=dms_token).exists()).scalar()
+
+
+def get_venues_educational_statuses() -> list[models.VenueEducationalStatus]:
+    return db.session.query(models.VenueEducationalStatus).order_by(models.VenueEducationalStatus.name).all()
+
+
+def get_venues_by_ids(ids: typing.Collection[int]) -> sa_orm.Query[models.Venue]:
+    return (
+        db.session.query(models.Venue)
+        .filter(models.Venue.id.in_(ids))
+        .options(
+            sa_orm.joinedload(models.Venue.googlePlacesInfo),
+            sa_orm.joinedload(models.Venue.offererAddress).joinedload(models.OffererAddress.address),
+        )
+    )
+
+
+def get_venue_ids_by_offerer_ids(ids: typing.Collection[int]) -> list[int]:
+    query = (
+        db.session.query(models.Venue).filter(models.Venue.managingOffererId.in_(ids)).with_entities(models.Venue.id)
+    )
+    return [v.id for v in query]
+
+
+def get_emails_by_venue(venue: models.Venue) -> set[str]:
+    """
+    Get all emails for which pro attributes may be modified when the venue is updated or deleted.
+    Be careful: venue attributes are no longer available after venue object is deleted, call this function before.
+    """
+    emails = {
+        email
+        for (email,) in db.session.query(users_models.User)
+        .join(users_models.User.UserOfferers)
+        .filter_by(offererId=venue.managingOffererId)
+        .with_entities(users_models.User.email)
+    }
+    if venue.bookingEmail:
+        emails.add(venue.bookingEmail)
+    return emails
+
+
+def get_emails_by_offerer(offerer: models.Offerer) -> set[str]:
+    """
+    Get all emails for which pro attributes may be modified when the offerer is updated or deleted.
+    Any bookingEmail in a venue should be updated in Brevo when offerer is disabled, deleted or its name changed
+    """
+    emails = {
+        email
+        for (email,) in db.session.query(users_models.User)
+        .join(users_models.User.UserOfferers)
+        .filter_by(offererId=offerer.id)
+        .with_entities(users_models.User.email)
+    }
+    emails |= {
+        email
+        for (email,) in db.session.query(models.Venue)
+        .filter_by(managingOffererId=offerer.id)
+        .with_entities(models.Venue.bookingEmail)
+    }
+    emails.discard(None)
+    return emails
+
+
+def find_venues_of_offerer_from_siret(siret: str) -> tuple[models.Offerer | None, list[models.Venue]]:
+    siren = siret[:9]
+    offerer = (
+        db.session.query(models.Offerer)
+        .filter(
+            models.Offerer.siren == siren,
+            sa.not_(models.Offerer.isRejected),
+        )
+        .one_or_none()
+    )
+    if not offerer:
+        return None, []
+    venues = (
+        db.session.query(models.Venue)
+        .join(models.Offerer)
+        .filter(models.Offerer.siren == siren)
+        .order_by(models.Venue.publicName)
+        .all()
+    )
+    return offerer, venues
+
+
+def get_offerer_and_extradata(offerer_id: int) -> Row | None:
+    """
+    Return and offerer and some extra data regarding it.
+        - hasValidBankAccount
+        - hasPendingBankAccount
+        - hasNonFreeOffers
+        - hasBankAccountWithPendingCorrections
+        - isOnboarded
+        - canDisplayHighlights
+    """
+    has_non_free_offers_subquery = (
+        sa.select(1)
+        .select_from(offers_models.Stock)
+        .join(models.Venue, models.Venue.managingOffererId == models.Offerer.id)
+        .join(
+            offers_models.Offer,
+            sa.and_(
+                offers_models.Stock.offerId == offers_models.Offer.id,
+                offers_models.Stock.price > 0,
+                offers_models.Stock.isSoftDeleted.is_(False),
+                offers_models.Offer.isActive,
+                offers_models.Offer.venueId == models.Venue.id,
+            ),
+        )
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    has_non_free_collective_offers_subquery = (
+        sa.select(1)
+        .select_from(educational_models.CollectiveStock)
+        .join(models.Venue, models.Venue.managingOffererId == models.Offerer.id)
+        .join(
+            educational_models.CollectiveOffer,
+            sa.and_(
+                educational_models.CollectiveStock.collectiveOfferId == educational_models.CollectiveOffer.id,
+                educational_models.CollectiveStock.price > 0,
+                educational_models.CollectiveOffer.isActive.is_(True),
+                educational_models.CollectiveOffer.venueId == models.Venue.id,
+            ),
+        )
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    has_valid_bank_account_subquery = (
+        sa.select(1)
+        .select_from(finance_models.BankAccount)
+        .where(
+            sa.and_(
+                finance_models.BankAccount.offererId == models.Offerer.id,
+                finance_models.BankAccount.isActive.is_(True),
+                finance_models.BankAccount.status == finance_models.BankAccountApplicationStatus.ACCEPTED,
+            ),
+        )
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    has_pending_bank_account_subquery = (
+        sa.select(1)
+        .select_from(finance_models.BankAccount)
+        .where(
+            sa.and_(
+                finance_models.BankAccount.offererId == models.Offerer.id,
+                finance_models.BankAccount.isActive.is_(True),
+                finance_models.BankAccount.status.in_(
+                    [
+                        finance_models.BankAccountApplicationStatus.DRAFT,
+                        finance_models.BankAccountApplicationStatus.ON_GOING,
+                    ]
+                ),
+            ),
+        )
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    has_bank_account_with_pending_corrections_subquery = (
+        sa.select(1)
+        .select_from(finance_models.BankAccount)
+        .where(
+            sa.and_(
+                finance_models.BankAccount.offererId == models.Offerer.id,
+                finance_models.BankAccount.isActive.is_(True),
+                finance_models.BankAccount.status
+                == finance_models.BankAccountApplicationStatus.WITH_PENDING_CORRECTIONS,
+            ),
+        )
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    can_display_highlights = (
+        sa.select(1)
+        .select_from(offers_models.Offer)
+        .join(models.Venue, models.Venue.managingOffererId == models.Offerer.id)
+        .where(
+            sa.and_(
+                offers_models.Offer.venueId == models.Venue.id,
+                offers_models.Offer.isEvent,
+            )
+        )
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    return (
+        db.session.query(
+            models.Offerer,
+            sa.or_(has_non_free_offers_subquery, has_non_free_collective_offers_subquery).label("hasNonFreeOffer"),
+            has_valid_bank_account_subquery.label("hasValidBankAccount"),
+            has_pending_bank_account_subquery.label("hasPendingBankAccount"),
+            has_bank_account_with_pending_corrections_subquery.label("hasBankAccountWithPendingCorrections"),
+            _build_offerer_is_onboarded_expression().label("isOnboarded"),
+            can_display_highlights.label("canDisplayHighlights"),
+        )
+        .filter(models.Offerer.id == offerer_id)
+        .options(
+            sa_orm.load_only(
+                models.Offerer.id,
+                models.Offerer.name,
+                models.Offerer.siren,
+                models.Offerer.validationStatus,
+                models.Offerer.isActive,
+                models.Offerer.allowedOnAdage,
+            ),
+            sa_orm.selectinload(models.Offerer.managedVenues).options(
+                sa_orm.selectinload(offerers_models.Venue.collectiveDmsApplications),
+                sa_orm.selectinload(offerers_models.Venue.venueProviders),
+                sa_orm.joinedload(offerers_models.Venue.googlePlacesInfo),
+            ),
+        )
+        .one_or_none()
+    )
+
+
+def get_offerer_is_onboarded(offerer_id: int) -> bool | None:
+    """
+    Return an offerer onboarding status, or None if not found.
+    """
+    return db.session.query(_build_offerer_is_onboarded_expression()).filter(models.Offerer.id == offerer_id).scalar()
+
+
+def get_offerer_with_bank_accounts(offerer_id: int) -> models.Offerer | None:
+    """
+    Return an Offerer with its accounting data and related venues:
+
+    - Existing bank accounts (possibly none and only active & not (refused or without confirmation) ones)
+    - Linked venues to its bank accounts (possibly none and only current ones)
+    - Managed venues by the offerer (possibly none)
+    """
+
+    return (
+        db.session.query(models.Offerer)
+        .filter_by(id=offerer_id)
+        .outerjoin(
+            finance_models.BankAccount,
+            sa.and_(
+                finance_models.BankAccount.offererId == models.Offerer.id,
+                finance_models.BankAccount.isActive.is_(True),
+                finance_models.BankAccount.status.not_in(
+                    (
+                        finance_models.BankAccountApplicationStatus.WITHOUT_CONTINUATION,
+                        finance_models.BankAccountApplicationStatus.REFUSED,
+                    )
+                ),
+            ),
+        )
+        .outerjoin(
+            models.Venue,
+            sa.and_(
+                models.Offerer.id == models.Venue.managingOffererId,
+            ),
+        )
+        .outerjoin(
+            models.VenuePricingPointLink,
+            sa.and_(
+                models.VenuePricingPointLink.venueId == models.Venue.id,
+                models.VenuePricingPointLink.timespan.contains(date_utils.get_naive_utc_now()),
+            ),
+        )
+        .outerjoin(
+            models.VenueBankAccountLink,
+            sa.and_(
+                finance_models.BankAccount.id == models.VenueBankAccountLink.bankAccountId,
+                models.Venue.id == models.VenueBankAccountLink.venueId,
+                models.VenueBankAccountLink.timespan.contains(date_utils.get_naive_utc_now()),
+            ),
+        )
+        .options(
+            sa_orm.contains_eager(models.Offerer.bankAccounts).contains_eager(finance_models.BankAccount.venueLinks)
+        )
+        .options(
+            sa_orm.contains_eager(models.Offerer.managedVenues)
+            .load_only(
+                models.Venue.id, models.Venue.siret, models.Venue.publicName, models.Venue.name, models.Venue.state
+            )
+            .contains_eager(models.Venue.bankAccountLinks)
+        )
+        .options(
+            sa_orm.contains_eager(models.Offerer.managedVenues)
+            .contains_eager(models.Venue.pricing_point_links)
+            .load_only(models.VenuePricingPointLink.id)
+        )
+        .options(sa_orm.load_only(models.Offerer.id, models.Offerer.name))
+        .order_by(finance_models.BankAccount.dateCreated.desc())
+        .populate_existing()
+        .one_or_none()
+    )
+
+
+def get_venues_with_non_free_offers_without_bank_accounts(offerer_id: int) -> list[int]:
+    """
+    Venue without a bank account is either a venue without any VenueBankAccountLink at all
+    or without up to date VenueBankAccountLink (timespan.upper is None)
+    """
+    venue_with_non_free_offers = (
+        db.session.query(models.Venue)
+        .filter(
+            models.Venue.managingOffererId == offerer_id,
+            models.VenueBankAccountLink.timespan.is_(
+                None
+            ),  # Because as we LEFT OUTER JOIN on VenueBankAccountLink, timespan column can be NULL
+            # i.e. only Venue without any VenueBankAccountLink or only deprecated ones.
+            sa.or_(
+                db.session.query(offers_models.Stock)
+                .join(
+                    offers_models.Offer,
+                    sa.and_(
+                        offers_models.Stock.offerId == offers_models.Offer.id,
+                        offers_models.Offer.venueId == models.Venue.id,
+                        offers_models.Stock.price > 0,
+                        offers_models.Stock.isSoftDeleted.is_(False),
+                        offers_models.Offer.isActive,
+                    ),
+                )
+                .exists(),
+                db.session.query(educational_models.CollectiveStock)
+                .join(
+                    educational_models.CollectiveOffer,
+                    sa.and_(
+                        educational_models.CollectiveStock.collectiveOfferId == educational_models.CollectiveOffer.id,
+                        educational_models.CollectiveOffer.venueId == models.Venue.id,
+                        educational_models.CollectiveStock.price > 0,
+                        educational_models.CollectiveOffer.isActive.is_(True),
+                    ),
+                )
+                .exists(),
+            ),
+        )
+        .join(models.Offerer)
+        .outerjoin(
+            models.VenueBankAccountLink,
+            sa.and_(
+                models.VenueBankAccountLink.venueId == models.Venue.id,
+                models.VenueBankAccountLink.timespan.contains(date_utils.get_naive_utc_now()),
+            ),
+        )
+        .with_entities(models.Venue.id)
+    )
+    return [venue.id for venue in venue_with_non_free_offers]
+
+
+def get_offerers_venues_with_pricing_point(
+    venue: models.Venue,
+    include_without_pricing_points: bool = False,
+    only_similar_pricing_points: bool = False,
+    filter_same_bank_account: bool = False,
+) -> list[models.Venue]:
+    """
+    Returns the venues of an offerer - excluding provided venue - and their associated active pricing points.
+    By default, returns only the venues with pricing points.
+    `include_without_pricing_points` includes venues without active pricing points.
+    `only_similar_pricing_points` includes only venues with the same pricing points as the provided venue.
+    `filter_same_bank_account` exclude venues with a different bank account.
+    """
+    venues_choices_query = (
+        db.session.query(models.Venue)
+        .join(
+            models.VenuePricingPointLink,
+            sa.and_(
+                models.VenuePricingPointLink.venueId == models.Venue.id,
+                models.VenuePricingPointLink.timespan.contains(date_utils.get_naive_utc_now()),
+            ),
+            isouter=include_without_pricing_points,
+        )
+        .filter(
+            models.Venue.managingOffererId == venue.managingOffererId,
+            models.Venue.id != venue.id,
+        )
+        .options(
+            sa_orm.load_only(
+                models.Venue.id,
+                models.Venue.name,
+                models.Venue.publicName,
+                models.Venue.siret,
+            ),
+            sa_orm.contains_eager(models.Venue.pricing_point_links).load_only(
+                models.VenuePricingPointLink.pricingPointId, models.VenuePricingPointLink.timespan
+            ),
+        )
+        .order_by(models.Venue.publicName)
+    )
+    if only_similar_pricing_points:
+        if venue.current_pricing_point_link:
+            venues_choices_query = venues_choices_query.filter(
+                models.VenuePricingPointLink.pricingPointId == venue.current_pricing_point_link.pricingPointId
+            )
+        else:
+            # The goal here is to filter only venues without pricing point.
+            # We need to remove venues with pricing point from venues_choices_query
+            # It is not possible to filter over Venue.pricing_point_links
+            # so we filter over models.VenuePricingPointLink.venueId == None
+            # but we could filter over models.VenuePricingPointLink.pricingPointId == None
+            venues_choices_query = venues_choices_query.filter(models.VenuePricingPointLink.venueId.is_(None))
+
+    if filter_same_bank_account:
+        venues_choices_query = venues_choices_query.outerjoin(
+            models.VenueBankAccountLink,
+            sa.and_(
+                models.VenueBankAccountLink.venueId == models.Venue.id,
+                models.VenueBankAccountLink.timespan.contains(date_utils.get_naive_utc_now()),
+            ),
+        ).options(
+            sa_orm.contains_eager(models.Venue.bankAccountLinks).load_only(
+                models.VenueBankAccountLink.bankAccountId, models.VenueBankAccountLink.timespan
+            )
+        )
+        if venue.current_bank_account_link:
+            venues_choices_query = venues_choices_query.filter(
+                models.VenueBankAccountLink.bankAccountId == venue.current_bank_account_link.bankAccountId
+            )
+    venues_choices = venues_choices_query.all()
+    return venues_choices
+
+
+def get_number_of_bookable_offers_for_offerer(offerer_id: int) -> int:
+    return (
+        db.session.query(offers_models.Offer)
+        .with_entities(offers_models.Offer.id)
+        .join(models.Venue)
+        .filter(
+            models.Venue.managingOffererId == offerer_id,
+            offers_models.Offer.is_offer_released_with_bookable_stock,
+        )
+        .limit(MAX_OFFERS_PER_OFFERER_FOR_COUNT)
+        .count()
+    )
+
+
+def get_number_of_pending_offers_for_offerer(offerer_id: int) -> int:
+    return (
+        db.session.query(offers_models.Offer)
+        .with_entities(offers_models.Offer.id)
+        .join(models.Venue)
+        .filter(
+            models.Venue.managingOffererId == offerer_id,
+            offers_models.Offer.validation == offer_mixin.OfferValidationStatus.PENDING,
+        )
+        .limit(MAX_OFFERS_PER_OFFERER_FOR_COUNT)
+        .count()
+    )
+
+
+def get_number_of_bookable_collective_offers_for_offerer(offerer_id: int) -> int:
+    collective_offers_query = (
+        db.session.query(educational_models.CollectiveOffer)
+        .join(models.Venue)
+        .filter(models.Venue.managingOffererId == offerer_id)
+        .with_entities(educational_models.CollectiveOffer.id)
+    )
+    collective_offers_query = educational_repository.filter_collective_offers_by_statuses(
+        query=collective_offers_query, statuses=[educational_models.CollectiveOfferDisplayedStatus.PUBLISHED]
+    )
+
+    collective_offer_templates_query = (
+        db.session.query(educational_models.CollectiveOfferTemplate)
+        .join(models.Venue)
+        .filter(
+            models.Venue.managingOffererId == offerer_id,
+            educational_models.CollectiveOfferTemplate.displayedStatus
+            == educational_models.CollectiveOfferDisplayedStatus.PUBLISHED.value,
+        )
+        .with_entities(educational_models.CollectiveOfferTemplate.id)
+    )
+
+    return (
+        collective_offers_query.union_all(collective_offer_templates_query)
+        .limit(MAX_OFFERS_PER_OFFERER_FOR_COUNT)
+        .count()
+    )
+
+
+def get_number_of_pending_collective_offers_for_offerer(offerer_id: int) -> int:
+    return (
+        db.session.query(educational_models.CollectiveOffer)
+        .join(models.Venue)
+        .filter(
+            models.Venue.managingOffererId == offerer_id,
+            educational_models.CollectiveOffer.validation == offer_mixin.OfferValidationStatus.PENDING,
+        )
+        .with_entities(educational_models.CollectiveOffer.id)
+        .union_all(
+            db.session.query(educational_models.CollectiveOfferTemplate)
+            .join(models.Venue)
+            .filter(
+                models.Venue.managingOffererId == offerer_id,
+                educational_models.CollectiveOfferTemplate.validation == offer_mixin.OfferValidationStatus.PENDING,
+            )
+            .with_entities(educational_models.CollectiveOfferTemplate.id)
+        )
+        .limit(MAX_OFFERS_PER_OFFERER_FOR_COUNT)
+        .count()
+    )
+
+
+def get_number_of_bookable_offers_for_venue(venue_id: int) -> int:
+    return (
+        db.session.query(offers_models.Offer)
+        .with_entities(offers_models.Offer.id)
+        .filter(
+            offers_models.Offer.venueId == venue_id,
+            offers_models.Offer.is_offer_released_with_bookable_stock,
+        )
+        .limit(MAX_OFFERS_PER_VENUE_FOR_COUNT)
+        .count()
+    )
+
+
+def get_number_of_pending_offers_for_venue(venue_id: int) -> int:
+    return (
+        db.session.query(offers_models.Offer)
+        .with_entities(offers_models.Offer.id)
+        .filter(
+            offers_models.Offer.venueId == venue_id,
+            offers_models.Offer.validation == offer_mixin.OfferValidationStatus.PENDING,
+        )
+        .limit(MAX_OFFERS_PER_VENUE_FOR_COUNT)
+        .count()
+    )
+
+
+def get_number_of_bookable_collective_offers_for_venue(venue_id: int) -> int:
+    collective_offers_query = (
+        db.session.query(educational_models.CollectiveOffer)
+        .filter(
+            educational_models.CollectiveOffer.venueId == venue_id,
+            educational_models.CollectiveOffer.validation == offer_mixin.OfferValidationStatus.APPROVED,
+        )
+        .with_entities(educational_models.CollectiveOffer.id)
+    )
+
+    collective_offer_templates_query = (
+        db.session.query(educational_models.CollectiveOfferTemplate)
+        .filter(
+            educational_models.CollectiveOfferTemplate.venueId == venue_id,
+            educational_models.CollectiveOfferTemplate.validation == offer_mixin.OfferValidationStatus.APPROVED,
+        )
+        .with_entities(educational_models.CollectiveOfferTemplate.id)
+    )
+
+    return (
+        collective_offers_query.union_all(collective_offer_templates_query)
+        .limit(MAX_OFFERS_PER_VENUE_FOR_COUNT)
+        .count()
+    )
+
+
+def get_number_of_pending_collective_offers_for_venue(venue_id: int) -> int:
+    collective_offers_query = (
+        db.session.query(educational_models.CollectiveOffer)
+        .filter(
+            educational_models.CollectiveOffer.venueId == venue_id,
+            educational_models.CollectiveOffer.validation == offer_mixin.OfferValidationStatus.PENDING,
+        )
+        .with_entities(educational_models.CollectiveOffer.id)
+    )
+
+    collective_offer_templates_query = (
+        db.session.query(educational_models.CollectiveOfferTemplate)
+        .join(models.Venue)
+        .filter(
+            educational_models.CollectiveOfferTemplate.venueId == venue_id,
+            educational_models.CollectiveOfferTemplate.validation == offer_mixin.OfferValidationStatus.PENDING,
+        )
+        .with_entities(educational_models.CollectiveOfferTemplate.id)
+    )
+
+    return (
+        collective_offers_query.union_all(collective_offer_templates_query)
+        .limit(MAX_OFFERS_PER_VENUE_FOR_COUNT)
+        .count()
+    )
+
+
+OFFER_MODEL_BY_OPTION: typing.Final[
+    dict[
+        schemas.GetOffererAddressesWithOffersOption,
+        type[offers_models.Offer | educational_models.CollectiveOffer | educational_models.CollectiveOfferTemplate],
+    ]
+] = {
+    schemas.GetOffererAddressesWithOffersOption.INDIVIDUAL_OFFERS_ONLY: offers_models.Offer,
+    schemas.GetOffererAddressesWithOffersOption.COLLECTIVE_OFFERS_ONLY: educational_models.CollectiveOffer,
+    schemas.GetOffererAddressesWithOffersOption.COLLECTIVE_OFFER_TEMPLATES_ONLY: educational_models.CollectiveOfferTemplate,
+}
+
+
+def get_offerer_addresses(
+    offerer_id: int, with_offers_option: schemas.GetOffererAddressesWithOffersOption | None
+) -> sa_orm.Query:
+    """When with_offers_option is provided, fetch only OffererAddress objects that are related to offers of the given type"""
+
+    query = (
+        db.session.query(
+            models.OffererAddress.id,
+            geography_models.Address.id.label("addressId"),
+            models.OffererAddress.label,
+            geography_models.Address.street,
+            geography_models.Address.postalCode,
+            geography_models.Address.city,
+            geography_models.Address.departmentCode,
+        )
+        .filter(models.Venue.managingOffererId == offerer_id)
+        .filter(offerers_models.OffererAddress.type == offerers_models.LocationType.OFFER_LOCATION)
+        .join(geography_models.Address, models.OffererAddress.addressId == geography_models.Address.id)
+        .join(models.Venue, models.Venue.id == models.OffererAddress.venueId)
+    )
+
+    if with_offers_option is not None:
+        offer_model = OFFER_MODEL_BY_OPTION[with_offers_option]
+        subquery = db.session.query(
+            sa.select(offer_model.id, offer_model.offererAddressId).select_from(offer_model).subquery()
+        )
+        query = query.where(subquery.filter(offer_model.offererAddressId == models.OffererAddress.id).exists())
+
+    query = query.order_by(models.OffererAddress.label)
+    return query
+
+
+def get_venue_addresses(
+    venue_id: int,
+    model: type[offers_models.Offer | educational_models.CollectiveOffer | educational_models.CollectiveOfferTemplate],
+) -> sa_orm.Query:
+    query = (
+        db.session.query(
+            models.OffererAddress.id,
+            geography_models.Address.id.label("addressId"),
+            models.OffererAddress.label,
+            models.Venue.publicName,
+            models.Venue.id.label("venueId"),
+            geography_models.Address.street,
+            geography_models.Address.postalCode,
+            geography_models.Address.city,
+            geography_models.Address.departmentCode,
+        )
+        .join(models.OffererAddress.address)
+        .join(models.OffererAddress.venue)
+        .filter(
+            models.OffererAddress.venueId == venue_id,
+            models.OffererAddress.type == offerers_models.LocationType.OFFER_LOCATION,
+        )
+    )
+
+    subquery = db.session.query(sa.select(model.id, model.offererAddressId).select_from(model).subquery())
+    query = query.where(subquery.filter(model.offererAddressId == models.OffererAddress.id).exists())
+
+    query = query.order_by(models.OffererAddress.label)
+    return query
+
+
+def get_venue_headline_offer(venue_id: int) -> offers_models.Offer:
+    return (
+        db.session.query(offers_models.Offer)
+        .join(offers_models.HeadlineOffer, offers_models.HeadlineOffer.offerId == offers_models.Offer.id)
+        .options(
+            sa_orm.contains_eager(offers_models.Offer.headlineOffers),
+            sa_orm.joinedload(offers_models.Offer.mediations),
+            sa_orm.joinedload(offers_models.Offer.product).joinedload(offers_models.Product.productMediations),
+        )
+        .filter(
+            offers_models.HeadlineOffer.venueId == venue_id,
+            offers_models.HeadlineOffer.isActive == True,
+        )
+        .one()
+    )
+
+
+def get_venue_pro_advices_count(venue_id: int) -> int:
+    return (
+        db.session.scalar(
+            sa.select(sa.func.count())
+            .select_from(offers_models.ProAdvice)
+            .join(offers_models.ProAdvice.offer)
+            .where(offers_models.ProAdvice.venueId == venue_id)
+            .where(offers_models.Offer.isPublished)
+        )
+        or 0
+    )
+
+
+def get_venue_pro_advices(venue_id: int, offset: int, limit: int | None) -> list[offers_models.ProAdvice]:
+    pro_advices_query = (
+        sa.select(offers_models.ProAdvice)
+        .join(offers_models.ProAdvice.offer)
+        .where(offers_models.ProAdvice.venueId == venue_id)
+        .where(offers_models.Offer.isPublished)
+        .order_by(offers_models.ProAdvice.updatedAt.desc())
+    )
+    pro_advices_query = pro_advices_query.offset(offset)
+    if limit:
+        pro_advices_query = pro_advices_query.limit(limit)
+
+    subquery = pro_advices_query.subquery()
+    query = (
+        sa.select(offers_models.ProAdvice)
+        .join(subquery, subquery.c.id == offers_models.ProAdvice.id)
+        .join(offers_models.Offer, offers_models.ProAdvice.offerId == offers_models.Offer.id)
+        .outerjoin(offers_models.Mediation, offers_models.Offer.id == offers_models.Mediation.offerId)
+        .options(
+            sa_orm.contains_eager(offers_models.ProAdvice.offer)
+            .load_only(offers_models.Offer.id, offers_models.Offer.name, offers_models.Offer.subcategoryId)
+            .options(
+                sa_orm.contains_eager(offers_models.Offer.mediations).load_only(
+                    offers_models.Mediation.id,
+                    offers_models.Mediation.credit,
+                    offers_models.Mediation.dateCreated,
+                    offers_models.Mediation.isActive,
+                    offers_models.Mediation.thumbCount,
+                )
+            )
+            .options(
+                sa_orm.joinedload(offers_models.Offer.product)
+                .load_only(offers_models.Product.id, offers_models.Product.thumbCount)
+                .joinedload(offers_models.Product.productMediations)
+                .load_only(offers_models.ProductMediation.imageType, offers_models.ProductMediation.uuid)
+            )
+        )
+        .order_by(offers_models.ProAdvice.updatedAt.desc())
+    )
+
+    pro_advices = db.session.scalars(query).unique().all()
+    return list(pro_advices)
+
+
+def venue_has_non_free_offers(venue_id: int) -> bool:
+    return venue_has_non_free_individual_offers(venue_id) or venue_has_non_free_collective_offers(venue_id)
+
+
+def venue_has_highlight_request(venue_id: int) -> bool:
+    query = (
+        db.session.query(highlights_models.HighlightRequest)
+        .join(offers_models.Offer, highlights_models.HighlightRequest.offerId == offers_models.Offer.id)
+        .join(highlights_models.HighlightRequest.highlight)
+        .filter(
+            offers_models.Offer.venueId == venue_id,
+            highlights_models.Highlight.availability_datespan.contains(datetime.date.today()),
+        )
+    )
+
+    return db.session.query(query.exists()).scalar()
+
+
+def venue_has_non_free_individual_offers(venue_id: int) -> bool:
+    query = (
+        db.session.query(offers_models.Offer)
+        .join(offers_models.Stock)
+        .filter(
+            sa.and_(
+                offers_models.Stock.price > 0,
+                offers_models.Stock.isSoftDeleted.is_(False),
+                offers_models.Offer.isActive,
+            )
+        )
+        .filter(offers_models.Offer.venueId == venue_id)
+    )
+
+    return db.session.query(query.exists()).scalar()
+
+
+def venue_has_non_free_collective_offers(venue_id: int) -> bool:
+    query = (
+        db.session.query(educational_models.CollectiveOffer)
+        .join(educational_models.CollectiveStock)
+        .filter(
+            sa.and_(
+                educational_models.CollectiveStock.price > 0,
+                educational_models.CollectiveOffer.isActive.is_(True),
+            )
+        )
+        .filter(educational_models.CollectiveOffer.venueId == venue_id)
+    )
+
+    return db.session.query(query.exists()).scalar()
+
+
+def get_pro_user_timezones(user_id: int) -> set[str]:
+    # Timezones based on offerer addresses (includes venues locations)
+    query = (
+        db.session.query(geography_models.Address)
+        .with_entities(geography_models.Address.timezone)
+        .join(offerers_models.OffererAddress, offerers_models.OffererAddress.addressId == geography_models.Address.id)
+        .join(offerers_models.Venue, offerers_models.OffererAddress.venueId == offerers_models.Venue.id)
+        .join(
+            offerers_models.UserOfferer,
+            offerers_models.UserOfferer.offererId == offerers_models.Venue.managingOffererId,
+        )
+        .filter(offerers_models.UserOfferer.userId == user_id)
+        .distinct()
+    )
+
+    return {row[0] for row in query}
+
+
+def get_offerer_address_timezone(offerer_address_id: int) -> str:
+    return (
+        db.session.query(geography_models.Address)
+        .with_entities(geography_models.Address.timezone)
+        .join(offerers_models.OffererAddress, offerers_models.OffererAddress.addressId == geography_models.Address.id)
+        .filter(offerers_models.OffererAddress.id == offerer_address_id)
+        .scalar()
+    )
+
+
+def get_offer_timezone(offer_id: int) -> str:
+    """
+    Retrieve the timezone associated with an offer.
+
+    The function determines the timezone for the specified offer based on the following priority:
+    1. If an address is directly linked to the offer, return its timezone.
+    2. If no address is linked to the offer, return the timezone of the address linked to the offer's venue.
+
+    Args:
+        offer_id (int): The ID of the offer whose timezone is to be retrieved.
+
+    Returns:
+        str: The timezone associated with the offer.
+    """
+    VenueAddress = sa_orm.aliased(geography_models.Address)
+    VenueOffererAddress = sa_orm.aliased(offerers_models.OffererAddress)
+    return (
+        db.session.query(offers_models.Offer)
+        .with_entities(sa.func.coalesce(geography_models.Address.timezone, VenueAddress.timezone))
+        .join(offers_models.Offer.venue)
+        .outerjoin(offers_models.Offer.offererAddress)
+        .outerjoin(offerers_models.OffererAddress.address)
+        .join(VenueOffererAddress, offerers_models.Venue.offererAddress)
+        .join(VenueAddress, VenueOffererAddress.address)
+        .filter(offers_models.Offer.id == offer_id)
+        .scalar()
+    )
+
+
+@typing.overload
+def convert_date_period_to_datetime_period_for_timezones(
+    period: tuple[datetime.date, datetime.date],
+    pro_user_id: int,
+    *,
+    offer_id: int | None = None,
+    offerer_address_id: int | None = None,
+) -> dict[str, tuple[datetime.datetime, datetime.datetime]]: ...
+@typing.overload
+def convert_date_period_to_datetime_period_for_timezones(
+    period: tuple[None, datetime.date],
+    pro_user_id: int,
+    *,
+    offer_id: int | None = None,
+    offerer_address_id: int | None = None,
+) -> dict[str, tuple[None, datetime.datetime]]: ...
+@typing.overload
+def convert_date_period_to_datetime_period_for_timezones(
+    period: tuple[datetime.date, None],
+    pro_user_id: int,
+    *,
+    offer_id: int | None = None,
+    offerer_address_id: int | None = None,
+) -> dict[str, tuple[datetime.datetime, None]]: ...
+
+
+def convert_date_period_to_datetime_period_for_timezones(
+    period: tuple[typing.Any, typing.Any],
+    pro_user_id: int,
+    *,
+    offer_id: int | None = None,
+    offerer_address_id: int | None = None,
+) -> dict[str, tuple[typing.Any, typing.Any]]:
+    """
+    Convert a date period to a UTC datetime period based on relevant timezones.
+
+    The function determines the timezone(s) to use for the conversion based on the input parameters:
+    1. If `offerer_address_id` is provided, fetch the timezone of the corresponding address.
+    2. If `offer_id` is provided, fetch the timezone of the corresponding offer.
+    3. Otherwise, fetch all the timezones linked to the `pro_user`.
+
+    The conversion process transforms the given `period` (a date range) into a datetime range in UTC.
+    The function returns a dictionary where:
+        - Keys are the timezones.
+        - Values are the corresponding UTC datetime ranges for the `period`.
+    """
+    if offerer_address_id:
+        timezone = get_offerer_address_timezone(offerer_address_id)
+        return {timezone: date_utils.convert_date_period_to_utc_datetime_period(period, timezone)}
+
+    if offer_id:
+        timezone = get_offer_timezone(offer_id)
+        return {timezone: date_utils.convert_date_period_to_utc_datetime_period(period, timezone)}
+
+    timezones = get_pro_user_timezones(pro_user_id)
+
+    return {timezone: date_utils.convert_date_period_to_utc_datetime_period(period, timezone) for timezone in timezones}
+
+
+def _build_offerer_is_onboarded_expression() -> sa.ColumnElement[bool]:
+    """
+    Return the SA expression defining whether an Offerer is onboarded or not.
+    """
+    has_non_draft_offers = (
+        sa.select(1)
+        .select_from(offers_models.Offer)
+        .join(models.Venue, models.Venue.managingOffererId == models.Offerer.id)
+        .where(
+            sa.and_(
+                offers_models.Offer.venueId == models.Venue.id,
+                offers_models.Offer.validation != offer_mixin.OfferValidationStatus.DRAFT,
+            )
+        )
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    has_adage_id = (
+        sa.select(1)
+        .select_from(models.Venue)
+        .where(sa.and_(models.Venue.managingOffererId == models.Offerer.id, sa.not_(models.Venue.adageId.is_(None))))
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    has_collective_application = (
+        sa.select(1)
+        .select_from(models.Venue)
+        .join(
+            educational_models.CollectiveDmsApplication,
+            models.Venue.siret == educational_models.CollectiveDmsApplication.siret,
+        )
+        .where(
+            models.Venue.managingOffererId == models.Offerer.id,
+        )
+        .correlate(models.Offerer)
+        .exists()
+    )
+
+    return sa.or_(
+        models.Offerer.allowedOnAdage.is_(True), has_adage_id, has_collective_application, has_non_draft_offers
+    )
+
+
+def get_open_to_public_venue_ids(with_accessibility_provider: bool) -> list[int]:
+    stmt = sa.select(offerers_models.Venue.id).filter(offerers_models.Venue.isOpenToPublic.is_(True))
+
+    if with_accessibility_provider:
+        stmt = stmt.join(offerers_models.AccessibilityProvider)
+    else:
+        stmt = stmt.outerjoin(offerers_models.Venue.accessibilityProvider).filter(
+            offerers_models.AccessibilityProvider.id.is_(None)
+        )
+
+    stmt = stmt.order_by(offerers_models.Venue.id.asc())
+    return list(db.session.scalars(stmt).all())
+
+
+def get_open_to_public_venues_by_ids(
+    venue_ids: list[int], with_accessibility_provider: bool
+) -> list[offerers_models.Venue]:
+    if not venue_ids:
+        return []
+
+    stmt = sa.select(offerers_models.Venue).filter(offerers_models.Venue.id.in_(venue_ids))
+
+    if with_accessibility_provider:
+        stmt = stmt.join(offerers_models.Venue.accessibilityProvider).options(
+            sa_orm.contains_eager(offerers_models.Venue.accessibilityProvider),
+            sa_orm.joinedload(offerers_models.Venue.offererAddress).joinedload(offerers_models.OffererAddress.address),
+        )
+    else:
+        stmt = stmt.options(
+            sa_orm.load_only(
+                offerers_models.Venue.name,
+                offerers_models.Venue.publicName,
+                offerers_models.Venue.siret,
+                offerers_models.Venue.isOpenToPublic,
+            ),
+            sa_orm.joinedload(offerers_models.Venue.offererAddress).joinedload(offerers_models.OffererAddress.address),
+        )
+
+    stmt = stmt.order_by(offerers_models.Venue.id.asc())
+    return list(db.session.scalars(stmt).unique().all())

@@ -1,0 +1,187 @@
+import { screen } from '@testing-library/dom'
+import userEvent from '@testing-library/user-event'
+import { addDays } from 'date-fns'
+import { useParams } from 'react-router'
+import { axe } from 'vitest-axe'
+
+import { CollectiveOfferDisplayedStatus } from '@/apiClient/v1'
+import { formatDateTimeParts } from '@/commons/utils/date'
+import { buildCollectiveOfferHome } from '@/commons/utils/factories/adageFactories'
+import { renderWithProviders } from '@/commons/utils/renderWithProviders'
+
+import { CollectiveOffersBookableLine } from './CollectiveOffersBookableLine'
+
+describe('<CollectiveOffersBookableLine />', () => {
+  it('should render without accessibility violations', async () => {
+    const { container } = renderWithProviders(
+      <CollectiveOffersBookableLine
+        isReadOnly={false}
+        offer={buildCollectiveOfferHome()}
+      />
+    )
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should display the right content for non expiring offers', () => {
+    const collectiveOfferHome = buildCollectiveOfferHome(
+      10,
+      11,
+      CollectiveOfferDisplayedStatus.BOOKED
+    )
+    renderWithProviders(
+      <CollectiveOffersBookableLine
+        isReadOnly={false}
+        offer={collectiveOfferHome}
+      />
+    )
+
+    const { date: expectedDisplayedDate } = formatDateTimeParts(
+      addDays(new Date(), 11).toISOString()
+    )
+    expect(screen.getByText(collectiveOfferHome.name)).toBeVisible()
+    expect(screen.getByTestId('thumb-icon')).toBeVisible()
+    expect(
+      screen.getByText(`Prévu le ${expectedDisplayedDate} - 105 participants`)
+    ).toBeVisible()
+    expect(screen.getByRole('link', { name: "Voir l'offre" })).toBeVisible()
+    expect(screen.getByText('réservée')).toBeVisible()
+    expect(screen.getByText('Dans 11 jours')).toBeVisible()
+  })
+
+  it('should display the right content for expiring offers', () => {
+    const collectiveOfferHome = buildCollectiveOfferHome(
+      3,
+      11,
+      CollectiveOfferDisplayedStatus.PUBLISHED
+    )
+    renderWithProviders(
+      <CollectiveOffersBookableLine
+        isReadOnly={false}
+        offer={collectiveOfferHome}
+      />
+    )
+
+    const { date: expectedDisplayedDate } = formatDateTimeParts(
+      addDays(new Date(), 11).toISOString()
+    )
+    expect(screen.getByText(collectiveOfferHome.name)).toBeVisible()
+    expect(screen.getByTestId('thumb-icon')).toBeVisible()
+    expect(
+      screen.getByText(`Prévu le ${expectedDisplayedDate} - 105 participants`)
+    ).toBeVisible()
+    expect(
+      screen.getByRole('link', { name: 'Modifier la date limite' })
+    ).toBeVisible()
+    expect(screen.getByText('publiée')).toBeVisible()
+    expect(screen.getByText('Expire dans 3 jours')).toBeVisible()
+  })
+
+  it('should disable the CTA of expiring offers when read-only', () => {
+    const collectiveOfferHome = buildCollectiveOfferHome(
+      3,
+      11,
+      CollectiveOfferDisplayedStatus.PUBLISHED
+    )
+    renderWithProviders(
+      <CollectiveOffersBookableLine
+        isReadOnly={true}
+        offer={collectiveOfferHome}
+      />
+    )
+
+    expect(
+      screen.getByRole('link', { name: 'Modifier la date limite' })
+    ).toHaveAttribute('aria-disabled', 'true')
+  })
+
+  describe('clickable behaviour', () => {
+    const renderCollectiveOffersBookableLineWithRouter = () => {
+      const user = userEvent.setup()
+      const collectiveOfferHome = buildCollectiveOfferHome(1)
+
+      const FakeOfferDetailComponent = () => {
+        const { offerId } = useParams()
+        return <div>Detail de mon offre {offerId}</div>
+      }
+
+      const FakeStockEditionComponent = () => {
+        const { offerId } = useParams()
+        return <div>Modification du stock de mon offre {offerId}</div>
+      }
+
+      return {
+        ...renderWithProviders(null, {
+          routes: [
+            {
+              path: '/',
+              element: (
+                <CollectiveOffersBookableLine
+                  isReadOnly={false}
+                  offer={collectiveOfferHome}
+                />
+              ),
+            },
+            {
+              path: '/offre/:offerId/collectif/recapitulatif',
+              element: <FakeOfferDetailComponent />,
+            },
+            {
+              path: '/offre/:offerId/collectif/stocks/edition',
+              element: <FakeStockEditionComponent />,
+            },
+          ],
+        }),
+        user,
+        collectiveOfferHome,
+      }
+    }
+
+    it('should have the line clickable', async () => {
+      const { user, collectiveOfferHome } =
+        renderCollectiveOffersBookableLineWithRouter()
+      expect(screen.getByTestId('thumb-icon')).toBeVisible()
+
+      const { date: expectedDate } = formatDateTimeParts(
+        addDays(new Date(), 11).toISOString()
+      )
+      await user.click(
+        screen.getByRole('link', {
+          name: `Expire dans 1 jour - ${collectiveOfferHome.name} - Prévu le ${expectedDate} - 105 participants - publiée`,
+        })
+      )
+
+      expect(
+        screen.getByText(`Detail de mon offre ${collectiveOfferHome.id}`)
+      ).toBeVisible()
+    })
+
+    it('should have the content line clickable', async () => {
+      const { user, collectiveOfferHome } =
+        renderCollectiveOffersBookableLineWithRouter()
+      expect(screen.getByText(collectiveOfferHome.name)).toBeVisible()
+
+      await user.click(screen.getByText(collectiveOfferHome.name))
+
+      expect(
+        screen.getByText(`Detail de mon offre ${collectiveOfferHome.id}`)
+      ).toBeVisible()
+    })
+
+    it('the CTA should still redirect to its own link', async () => {
+      const { user, collectiveOfferHome } =
+        renderCollectiveOffersBookableLineWithRouter()
+      expect(screen.getByText(collectiveOfferHome.name)).toBeVisible()
+
+      await user.click(
+        screen.getByRole('link', { name: 'Modifier la date limite' })
+      )
+
+      expect(
+        screen.getByText(
+          `Modification du stock de mon offre ${collectiveOfferHome.id}`
+        )
+      ).toBeVisible()
+    })
+  })
+})

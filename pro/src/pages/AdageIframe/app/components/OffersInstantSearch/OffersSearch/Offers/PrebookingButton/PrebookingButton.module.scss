@@ -1,0 +1,9 @@
+@use "styles/mixins/_fonts.scss" as fonts;
+
+.prebooking-button-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+
+  @include fonts.body-accent-xs;
+}

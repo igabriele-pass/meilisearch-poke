@@ -1,0 +1,109 @@
+import { format } from 'date-fns'
+import type { CastOptions } from 'yup'
+
+import type {
+  GetIndividualOfferResponseModel,
+  GetOfferStockResponseModel,
+  GetVenueResponseModel,
+  PriceCategoryResponseModel,
+} from '@/apiClient/v1'
+import { FORMAT_ISO_DATE_ONLY, isDateValid } from '@/commons/utils/date'
+import { getDepartmentCode } from '@/commons/utils/getDepartmentCode'
+import { getLocalDepartementDateTimeFromUtc } from '@/commons/utils/timezone'
+
+import { DEFAULT_PRICE_TABLE_ENTRY_LABEL_WHEN_SINGLE } from '../constants'
+import {
+  PriceTableEntryValidationSchema,
+  type PriceTableFormValues,
+  PriceTableValidationSchema,
+} from '../schemas'
+import type { PriceTableFormContext } from '../types'
+
+const isGetOfferStockResponseModel = (
+  entry: PriceCategoryResponseModel | GetOfferStockResponseModel
+): entry is GetOfferStockResponseModel => {
+  return 'quantity' in entry
+}
+
+export function toFormValues(
+  offer: GetIndividualOfferResponseModel,
+  priceCategories: PriceCategoryResponseModel[],
+  context: PriceTableFormContext,
+  venue: GetVenueResponseModel
+): PriceTableFormValues
+export function toFormValues(
+  offer: GetIndividualOfferResponseModel,
+  offerStocks: GetOfferStockResponseModel[],
+  context: PriceTableFormContext,
+  venue: GetVenueResponseModel
+): PriceTableFormValues
+export function toFormValues(
+  offer: GetIndividualOfferResponseModel,
+  priceCategoriesOrOfferStocks:
+    | PriceCategoryResponseModel[]
+    | GetOfferStockResponseModel[],
+  context: PriceTableFormContext,
+  venue: GetVenueResponseModel
+): PriceTableFormValues
+
+export function toFormValues(
+  offer: GetIndividualOfferResponseModel,
+  priceCategoriesOrOfferStocks:
+    | PriceCategoryResponseModel[]
+    | GetOfferStockResponseModel[],
+  context: PriceTableFormContext,
+  venue: GetVenueResponseModel
+): PriceTableFormValues {
+  const castOptions: CastOptions = {
+    assert: false,
+    stripUnknown: true,
+    context: {
+      ...context,
+      isCast: true, // TODO (nizac, 22/09/2025): clean after handling price in different currencies in the application with currency attribute
+    },
+  }
+
+  return PriceTableValidationSchema.cast(
+    {
+      ...offer,
+      priceCategories:
+        priceCategoriesOrOfferStocks.length > 0
+          ? priceCategoriesOrOfferStocks.map((entry) => ({
+              ...entry,
+              activationCodesExpirationDatetime:
+                isGetOfferStockResponseModel(entry) &&
+                entry.activationCodesExpirationDatetime &&
+                isDateValid(entry.activationCodesExpirationDatetime)
+                  ? format(
+                      new Date(entry.activationCodesExpirationDatetime),
+                      FORMAT_ISO_DATE_ONLY
+                    )
+                  : null,
+              bookingLimitDatetime:
+                isGetOfferStockResponseModel(entry) &&
+                entry.bookingLimitDatetime
+                  ? format(
+                      getLocalDepartementDateTimeFromUtc(
+                        entry.bookingLimitDatetime,
+                        getDepartmentCode(offer, venue)
+                      ),
+                      FORMAT_ISO_DATE_ONLY
+                    )
+                  : null,
+              offerId: context.offer.id,
+            }))
+          : [
+              PriceTableEntryValidationSchema.cast(
+                {
+                  label: context.offer.isEvent
+                    ? DEFAULT_PRICE_TABLE_ENTRY_LABEL_WHEN_SINGLE
+                    : null,
+                  offerId: context.offer.id,
+                },
+                castOptions
+              ),
+            ],
+    },
+    castOptions
+  )
+}

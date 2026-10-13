@@ -1,0 +1,437 @@
+import cn from 'classnames'
+import { useEffect, useRef, useState } from 'react'
+import type { AvatarEditorRef } from 'react-avatar-editor'
+
+export type CroppedRect = {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+import { getFileFromURL } from '@/apiClient/helpers'
+import { useAnalytics } from '@/app/App/analytics/firebase'
+import { Events } from '@/commons/core/FirebaseEvents/constants'
+import { useGetImageBitmap } from '@/commons/hooks/useGetBitmap'
+import { useSnackBar } from '@/commons/hooks/useSnackBar'
+import {
+  UploaderModeEnum,
+  type UploadImageValues,
+} from '@/commons/utils/imageUploadTypes'
+import { ImageDragAndDrop } from '@/components/ImageDragAndDrop/ImageDragAndDrop'
+import { Banner, BannerVariants } from '@/design-system/Banner/Banner'
+import { Button } from '@/design-system/Button/Button'
+import {
+  ButtonColor,
+  ButtonSize,
+  ButtonVariant,
+} from '@/design-system/Button/types'
+import { Checkbox } from '@/design-system/Checkbox/Checkbox'
+import { DetailedModal } from '@/design-system/DetailedModal/DetailedModal'
+import { TextInput } from '@/design-system/TextInput/TextInput'
+import fullDownloadIcon from '@/icons/full-download.svg'
+import fullTrashIcon from '@/icons/full-trash.svg'
+import { Spinner } from '@/ui-kit/Spinner/Spinner'
+
+import { ImageEditor } from './components/ImageEditor/ImageEditor'
+import {
+  coordonateToPosition,
+  widthCropPercentToScale,
+} from './components/ImageEditor/utils'
+import { AppPreviewOffer } from './components/ImagePreview/components/AppPreviewOffer/AppPreviewOffer'
+import { AppPreviewVenue } from './components/ImagePreview/components/AppPreviewVenue/AppPreviewVenue'
+import style from './ModalImageUpsertOrEdit.module.scss'
+import { getImageEditorConfig } from './utils/getImageEditorConfig'
+
+export interface OnImageUploadArgs {
+  imageFile: File
+  imageCroppedDataUrl?: string
+  cropParams?: CroppedRect
+  credit: string | null
+  alternativeText: string | null
+}
+
+export interface ModalImageUpsertOrEditProps {
+  open: boolean
+  onOpenChange?: (open: boolean) => void
+  mode: UploaderModeEnum
+  onImageUpload: (values: OnImageUploadArgs, successMessage: string) => void
+  onImageDelete?: () => void
+  initialValues?: UploadImageValues
+  refToFocusOnClose?: React.RefObject<HTMLElement | null>
+}
+
+const AppPreviewCollectiveOffer = () => <></>
+
+export const ModalImageUpsertOrEdit = ({
+  open,
+  onOpenChange,
+  mode,
+  onImageUpload,
+  onImageDelete,
+  initialValues = {},
+  refToFocusOnClose,
+}: ModalImageUpsertOrEditProps): JSX.Element => {
+  const { logEvent } = useAnalytics()
+  const { draftImage, ...previouslyUploadedImage } = initialValues
+  const defaultPositions = {
+    x: 0.5,
+    y: 0.5,
+  }
+
+  const {
+    croppedImageUrl: initialCroppedImageUrl,
+    originalImageUrl: initialOriginalImageUrl,
+    credit: initialCredit,
+    cropParams: initialCropParams,
+    alternativeText: initialAlternativeText,
+  } = previouslyUploadedImage
+
+  // Only venue images seem to have both cropped and original image URLs saved.
+  // Offers lose the ability to retrieve the original image URL after the first upload.
+  const previouslyUploadedImageUrl =
+    initialOriginalImageUrl || initialCroppedImageUrl
+
+  const {
+    xCropPercent: initalXCropPercent,
+    yCropPercent: initalYCropPercent,
+    heightCropPercent: initalHeightCropPercent,
+    widthCropPercent: initalWidthCropPercent,
+  } = initialCropParams || {}
+  const xInitialPosition =
+    initalXCropPercent && initalWidthCropPercent
+      ? coordonateToPosition(initalXCropPercent, initalWidthCropPercent)
+      : defaultPositions.x
+  const yInitialPosition =
+    initalYCropPercent && initalHeightCropPercent
+      ? coordonateToPosition(initalYCropPercent, initalHeightCropPercent)
+      : defaultPositions.y
+
+  const editorRef = useRef<AvatarEditorRef>(null)
+  const snackBar = useSnackBar()
+  const [isLoadingImage, setIsLoadingImage] = useState(
+    !draftImage && !!previouslyUploadedImageUrl
+  )
+  const [isPaintingImage, setIsPaintingImage] = useState(true)
+  const [image, setImage] = useState<File | undefined>(draftImage)
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | undefined>(
+    previouslyUploadedImageUrl
+  )
+  const [editorInitialPosition, setEditorInitialPosition] = useState({
+    x: xInitialPosition,
+    y: yInitialPosition,
+  })
+  const [credit, setCredit] = useState<string>(initialCredit ?? '')
+  const [alternativeText, setAlternativeText] = useState<string>(
+    initialAlternativeText ?? ''
+  )
+  const [isInformative, setIsInformative] = useState(Boolean(alternativeText))
+  const initialScale = initalWidthCropPercent
+    ? widthCropPercentToScale(initalWidthCropPercent)
+    : 1
+  const [scale, setScale] = useState<number>(initialScale)
+
+  const { width, height } = useGetImageBitmap(image)
+  const imageEditorConfig = getImageEditorConfig(width, height, mode)
+
+  const shouldDisplayWarningCallout =
+    mode === UploaderModeEnum.OFFER &&
+    ((width && width < 400) || (height && height < 600))
+
+  const AppPreview = {
+    [UploaderModeEnum.VENUE]: AppPreviewVenue,
+    [UploaderModeEnum.OFFER]: AppPreviewOffer,
+    [UploaderModeEnum.OFFER_COLLECTIVE]: AppPreviewCollectiveOffer,
+  }[mode]
+
+  useEffect(() => {
+    async function setImageFromUrl(url: string) {
+      try {
+        setImage(await getFileFromURL(url))
+      } catch {
+        snackBar.error('Erreur lors de la récupération de votre image.')
+      }
+
+      setIsLoadingImage(false)
+    }
+
+    // Waiting the dialog to be opened is a minor optimization to avoid loading an image that
+    // might never be displayed since the dialog is always rendered.
+    if (open && !draftImage && previouslyUploadedImageUrl) {
+      void setImageFromUrl(previouslyUploadedImageUrl)
+    }
+  }, [open, draftImage, previouslyUploadedImageUrl, snackBar])
+
+  useEffect(() => {
+    setImage(draftImage)
+
+    if (draftImage) {
+      setIsLoadingImage(false)
+    }
+  }, [draftImage])
+
+  useEffect(() => {
+    setCredit(initialCredit ?? '')
+  }, [initialCredit])
+
+  useEffect(() => {
+    setAlternativeText(initialAlternativeText ?? '')
+  }, [initialAlternativeText])
+
+  const hardReset = () => {
+    setImage(undefined)
+    setEditorInitialPosition({
+      x: defaultPositions.x,
+      y: defaultPositions.y,
+    })
+    setCredit('')
+    setAlternativeText('')
+    setScale(1)
+  }
+
+  const resetWithInitialValues = () => {
+    // Image needs to be kept, but
+    // everything else can be reset to its initial values.
+    setEditorInitialPosition({
+      x: xInitialPosition,
+      y: yInitialPosition,
+    })
+    setCredit(initialCredit ?? '')
+    setAlternativeText(initialAlternativeText ?? '')
+    setScale(initialScale)
+  }
+  const onImageReplace = () => hardReset()
+
+  const onImageReplacementDropOrSelected = (file: File) => {
+    setIsPaintingImage(true)
+    setImage(file)
+    handleImageChange()
+  }
+
+  const onEditedImageSave = (
+    credit: string | null,
+    imageDataUrl: string,
+    croppedRect: CroppedRect,
+    alternativeText: string | null
+  ) => {
+    if (image) {
+      logEvent(Events.CLICKED_SAVE_IMAGE, {
+        imageType: mode,
+        imageCreationStage: 'save',
+      })
+
+      onImageUpload(
+        {
+          imageFile: image,
+          imageCroppedDataUrl: imageDataUrl,
+          cropParams: croppedRect,
+          credit: credit,
+          alternativeText: isInformative ? alternativeText : null,
+        },
+        previouslyUploadedImageUrl
+          ? 'Vos modifications ont bien été prises en compte'
+          : 'Votre image a bien été importée'
+      )
+    }
+  }
+
+  const onImagePainted = () => {
+    if (editorRef.current) {
+      const canvas = editorRef.current.getImage()
+      setPreviewImageUrl(canvas.toDataURL())
+      setIsPaintingImage(false)
+    }
+  }
+
+  const onImageError = () => {
+    setIsPaintingImage(false)
+    snackBar.error('Erreur lors de la récupération de votre image.')
+  }
+
+  const handleImageChange = (
+    callback?:
+      | ((
+          credit: string | null,
+          url: string,
+          cropping: CroppedRect,
+          alternativeText: string | null
+        ) => void)
+      | undefined
+  ) => {
+    try {
+      if (editorRef.current) {
+        const canvas = editorRef.current.getImage()
+        setPreviewImageUrl(canvas.toDataURL())
+
+        const croppingRect = editorRef.current.getCroppingRect()
+        setEditorInitialPosition({
+          x: coordonateToPosition(croppingRect.x, croppingRect.width),
+          y: coordonateToPosition(croppingRect.y, croppingRect.height),
+        })
+
+        if (callback) {
+          callback(credit, canvas.toDataURL(), croppingRect, alternativeText)
+        }
+      }
+    } catch {
+      snackBar.error('Une erreur est survenue. Merci de réessayer plus tard')
+    }
+  }
+
+  const onImageEditorChange = () => handleImageChange()
+  const onImageSave = () => handleImageChange(onEditedImageSave)
+
+  const handleOpenChange = (open: boolean) => {
+    if (!open) {
+      resetWithInitialValues()
+    }
+
+    onOpenChange?.(open)
+  }
+
+  return (
+    <DetailedModal
+      isOpen={open}
+      onClose={() => handleOpenChange(false)}
+      refToFocusOnClose={refToFocusOnClose}
+      title="Modifier une image"
+      description={
+        'En utilisant ce contenu, je certifie que je suis propriétaire ou que je dispose des autorisations nécessaires pour l’utilisation de celui-ci.'
+      }
+      secondaryAction={
+        <Button
+          variant={ButtonVariant.SECONDARY}
+          color={ButtonColor.NEUTRAL}
+          onClick={() => handleOpenChange(false)}
+          label="Annuler"
+        />
+      }
+      primaryAction={
+        <Button
+          type="button"
+          onClick={onImageSave}
+          disabled={!image}
+          label="Importer"
+        />
+      }
+    >
+      <div className={style['modal-image-crop']}>
+        <div className={style['modal-image-crop-content']}>
+          {isLoadingImage && <Spinner testId="spinner-img-load" />}
+          {!isLoadingImage && image && (
+            <>
+              {isPaintingImage && <Spinner testId="spinner-img-paint" />}
+              <div
+                className={cn(
+                  style['modal-image-crop-subwrapper'],
+                  isPaintingImage && style['modal-image-crop-editor-loading']
+                )}
+              >
+                <div className={style['modal-image-crop-editor']}>
+                  <ImageEditor
+                    ref={editorRef}
+                    {...imageEditorConfig}
+                    image={image}
+                    initialPosition={editorInitialPosition}
+                    initialScale={scale}
+                    onChangeDone={onImageEditorChange}
+                    onImagePainted={onImagePainted}
+                    onImageError={onImageError}
+                  />
+                  <div className={style['modal-image-crop-actions']}>
+                    <Button
+                      icon={fullDownloadIcon}
+                      onClick={onImageReplace}
+                      variant={ButtonVariant.SECONDARY}
+                      color={ButtonColor.NEUTRAL}
+                      size={ButtonSize.SMALL}
+                      label="Remplacer l’image"
+                    />
+
+                    <Button
+                      icon={fullTrashIcon}
+                      onClick={() => {
+                        onImageDelete?.()
+                        handleOpenChange(false)
+                      }}
+                      variant={ButtonVariant.SECONDARY}
+                      color={ButtonColor.NEUTRAL}
+                      size={ButtonSize.SMALL}
+                      label="Supprimer l’image"
+                    />
+                  </div>
+                </div>
+                {previewImageUrl && <AppPreview imageUrl={previewImageUrl} />}
+              </div>
+              {shouldDisplayWarningCallout && (
+                <div className={style['modal-image-crop-callout']}>
+                  <Banner
+                    variant={BannerVariants.WARNING}
+                    title="Image non conforme aux recommandations"
+                    description={
+                      <div>
+                        Le format recommandé :
+                        <ul className={style['modal-image-crop-callout-list']}>
+                          <li>Largeur minimale de l’image : 400 px</li>
+                          <li>Hauteur minimale de l’image : 600 px</li>
+                        </ul>
+                      </div>
+                    }
+                  />
+                </div>
+              )}
+              <div
+                className={cn(
+                  style['modal-image-crop-credit'],
+                  isPaintingImage && style['modal-image-crop-credit-loading']
+                )}
+              >
+                <TextInput
+                  label="Crédit de l’image"
+                  name="credit"
+                  maxCharactersCount={255}
+                  value={credit}
+                  onChange={(e) => setCredit(e.target.value)}
+                />
+                <Checkbox
+                  label="L’image est porteuse d’informations"
+                  description="Si cette image n’apparaît pas dans la page, est-ce qu’une information importante est perdue pour l’utilisateur ?"
+                  variant="detailed"
+                  checked={isInformative}
+                  onChange={(e) => {
+                    setIsInformative(e.target.checked)
+                    if (!e.target.checked) {
+                      setAlternativeText('')
+                    }
+                  }}
+                  collapsed={
+                    <TextInput
+                      label="Texte alternatif de l’image"
+                      name="alternativeText"
+                      maxCharactersCount={150}
+                      value={alternativeText}
+                      onChange={(e) => setAlternativeText(e.target.value)}
+                    />
+                  }
+                />
+              </div>
+            </>
+          )}
+          {open && !isLoadingImage && !image && (
+            <ImageDragAndDrop
+              onDropOrSelected={onImageReplacementDropOrSelected}
+              {...(mode === UploaderModeEnum.OFFER_COLLECTIVE
+                ? {
+                    minSizes: {
+                      width: 400,
+                      height: 600,
+                    },
+                  }
+                : {})}
+            />
+          )}
+        </div>
+      </div>
+    </DetailedModal>
+  )
+}

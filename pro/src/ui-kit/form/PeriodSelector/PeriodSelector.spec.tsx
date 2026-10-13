@@ -1,0 +1,69 @@
+import { render, screen, within } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { axe } from 'vitest-axe'
+
+import { PeriodSelector } from './PeriodSelector'
+
+describe('PeriodSelector', () => {
+  const mockOnBeginningDateChange = vi.fn()
+  const mockOnEndingDateChange = vi.fn()
+
+  const renderPeriodSelector = (props = {}) => {
+    return render(
+      <PeriodSelector
+        onBeginningDateChange={mockOnBeginningDateChange}
+        onEndingDateChange={mockOnEndingDateChange}
+        periodBeginningDate=""
+        periodEndingDate=""
+        {...props}
+      />
+    )
+  }
+
+  it('should render without accessibility violations', async () => {
+    const { container } = renderPeriodSelector()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it.each(['Période', 'Période de l’évènement'])(
+    'should label the date group with the legend "%s"',
+    (legend) => {
+      renderPeriodSelector(legend === 'Période' ? {} : { legend })
+
+      const group = screen.getByRole('group', { name: legend })
+
+      expect(group.querySelector('legend')).toHaveTextContent(legend)
+      expect(within(group).getByLabelText('Date de début')).toBeVisible()
+      expect(within(group).getByLabelText('Date de fin')).toBeVisible()
+    }
+  )
+
+  it('should call onBeginningDateChange and onEndingDateChange', async () => {
+    renderPeriodSelector()
+
+    await userEvent.type(screen.getByLabelText('Date de début'), '2020-10-20')
+    await userEvent.type(screen.getByLabelText('Date de fin'), '2020-12-24')
+
+    expect(mockOnBeginningDateChange).toHaveBeenCalledWith('2020-10-20')
+    expect(mockOnEndingDateChange).toHaveBeenCalledWith('2020-12-24')
+  })
+
+  it('should render error messages and set aria-invalid when errors are provided', () => {
+    renderPeriodSelector({
+      errors: {
+        beginningDate: 'La date de début est obligatoire',
+        endingDate: 'La date de fin est obligatoire',
+      },
+    })
+
+    const beginInput = screen.getByLabelText('Date de début')
+    const endInput = screen.getByLabelText('Date de fin')
+
+    expect(beginInput).toHaveAttribute('aria-invalid', 'true')
+    expect(endInput).toHaveAttribute('aria-invalid', 'true')
+
+    expect(screen.getByText('La date de début est obligatoire')).toBeVisible()
+    expect(screen.getByText('La date de fin est obligatoire')).toBeVisible()
+  })
+})

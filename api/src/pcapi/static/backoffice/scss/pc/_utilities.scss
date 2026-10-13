@@ -1,0 +1,116 @@
+.no-transition {
+  transition: none !important;
+}
+
+.pc-brevo-logo-link{
+  display: inline-block;
+  width: 20px;
+  height: 2.50em;
+}
+
+.pc-app-image-size{
+    max-height: 380px;
+    max-width: 253px;
+}
+
+.pc-mw-50-vw{
+  max-width: 50vw;
+}
+
+.ml-auto{
+  margin-left: auto;
+}
+
+.pc-search-block{
+  background-color: $gray-100;
+  .pc-display-selector{
+    label{
+      background-color:$white;
+      &.pc-display-selector-checked{
+        background-color: $primary-bg-subtle;
+      }
+    }
+    label:hover{
+      background-color: $primary-bg-subtle;
+    }
+
+  }
+}
+
+.pc-batch-action{
+  color: $white;
+  bottom:80px;
+  .counter-container{
+    padding: 10px 80px 10px 8px;
+  }
+  .btn {
+    color: $white;
+    padding: 10px 8px;
+    &:hover {
+      background-color: $old-secondary;
+    }
+  }
+}
+
+tr:has([type="checkbox"]:checked) {
+  background-color: $gray-100;
+}
+
+.pc-offer-table-image-container {
+  height: 100px;
+  width: 74.41px;
+}
+
+.pc-offer-table-image{
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+}
+
+.pc-offer-table-no-image{
+  background-color: $gray-100;
+  padding: 34px 21.205px;
+  i{
+    width:32px;
+    height:32px;
+    display:block;
+    font-size:32px;
+    &::before{
+      color:$gray-600;
+      vertical-align: 1em;
+    }
+  }
+}
+
+.rounded-xs {
+  border-radius: 0.25rem;
+}
+
+.alert {
+    max-width: 680px;
+}
+
+.gap-1px {
+  gap:1px !important;
+}
+
+.ts-control{
+  /* fix for tomselect bug */
+    min-height:2.25em;
+}
+
+.bg-primary-emphasis {
+  background-color: $purple-400;
+}
+
+.bg-secondary-emphasis {
+  background-color: $gray-100;
+}
+
+h1, h2, h3, h4, h5 {
+  color: $gray-900 !important;
+}
+
+.nav-link:not(.active) {
+  border-color: $gray-200 !important;
+}

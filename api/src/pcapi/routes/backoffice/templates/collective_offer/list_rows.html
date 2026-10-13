@@ -1,0 +1,93 @@
+{% import "components/badges.html" as badges with context %}
+{% import "components/links.html" as links with context %}
+{% from "components/connect_as.html" import build_connect_as_link %}
+{% for row in rows %}
+  {% set collective_offer = row.CollectiveOffer %}
+  <tr id="collective-offer-row-{{ collective_offer.id }}">
+    <td>
+      <input type="checkbox"
+             class="form-check-input"
+             name="pc-table-multi-select-check-{{ collective_offer.id }}"
+             data-id="{{ collective_offer.id }}" />
+    </td>
+    <td class="text-center">
+      {% if has_permission("PRO_FRAUD_ACTIONS") %}
+        <div class="dropdown">
+          <button type="button"
+                  data-bs-toggle="dropdown"
+                  aria-expanded="false"
+                  class="btn p-0 btn-outline-primary-subtle-bg border-0 px-2 py-1">
+            <i class="bi bi-three-dots-vertical"></i>
+          </button>
+          <ul class="dropdown-menu">
+            <li class="dropdown-item">
+              <a class="btn btn-sm d-block w-100 text-start px-3"
+                 href="{{ url_for('backoffice.collective_offer.get_collective_offer_details', collective_offer_id=collective_offer.id) }}">Voir le détail de l’offre collective</a>
+            </li>
+            <li class="dropdown-item">
+              <a class="btn btn-sm d-block w-100 text-start px-3"
+                 data-bs-toggle="modal"
+                 data-bs-target="#validate-collective-offer-modal-{{ collective_offer.id }}">Valider l'offre</a>
+            </li>
+            <li class="dropdown-item">
+              <a class="btn btn-sm d-block w-100 text-start px-3"
+                 data-bs-toggle="modal"
+                 data-bs-target="#reject-collective-offer-modal-{{ collective_offer.id }}">Rejeter l'offre</a>
+            </li>
+          </ul>
+        </div>
+      {% endif %}
+    </td>
+    <td>{{ links.build_collective_offer_details_link(collective_offer) }}</td>
+    <td>{{ build_connect_as_link(connect_as[collective_offer.id], collective_offer.name, "link-primary") }}</td>
+    <td>{{ collective_offer.formats | format_collective_offer_formats }}</td>
+    {% if has_permission("PRO_FRAUD_ACTIONS") %}
+      <td>{% if row.rules %}{{ row.rules | join(", ") | escape }}{% endif %}</td>
+    {% endif %}
+    <td>
+      {{ collective_offer.validation | format_offer_validation_status(with_badge=True) }}
+      {% if collective_offer.rejectionReason %}
+        <br />
+        {{ collective_offer.rejectionReason | format_collective_offer_rejection_reason }}
+      {% endif %}
+    </td>
+    <td>{{ collective_offer.displayedStatus | format_collective_offer_displayed_status }}</td>
+    <td>{{ links.build_pro_user_name_to_details_link(collective_offer.authorId, collective_offer.author.full_name) }}</td>
+    <td data-pc-sort-table-value="{{ collective_offer.dateCreated.timestamp() }}">{{ collective_offer.dateCreated | format_date }}</td>
+    <td data-pc-sort-table-value="{% if collective_offer.collectiveStock %}{{ collective_offer.start.timestamp() }}{% else %}{% endif %}">
+      {% if collective_offer.collectiveStock %}
+        {% set start_date = collective_offer.start | format_date %}
+        {% set end_date = collective_offer.end | format_date %}
+        {{ start_date }}
+        {% if end_date and end_date != start_date %}→ {{ end_date }}{% endif %}
+      {% endif %}
+    </td>
+    <td data-pc-sort-table-value="{% if collective_offer.collectiveStock %}{{ collective_offer.collectiveStock.price * 100 }}{% else %}{% endif %}">
+      {% if collective_offer.collectiveStock %}{{ collective_offer.collectiveStock.price | format_amount }}{% endif %}
+    </td>
+    <td data-pc-sort-table-value="{{ collective_offer.venue.managingOfferer.name | lower }}">
+      {{ links.build_offerer_name_to_details_link(collective_offer.venue.managingOfferer) }}
+      {% call badges.badges_container() %}
+        {{ badges.build_offer_offerer_fraud_badges(row.offerer_badges) }}
+      {% endcall %}
+    </td>
+    <td data-pc-sort-table-value="{{ collective_offer.venue.publicName | lower }}">
+      {{ links.build_venue_name_to_details_link(collective_offer.venue) }}
+      {% call badges.badges_container() %}
+        {{ badges.build_offer_venue_fraud_badges(row.venue_badges) }}
+      {% endcall %}
+    </td>
+    <td>{{ links.build_venue_offers_icon_link_advanced(".list_collective_offers", "Offres collectives", collective_offer.venue) }}</td>
+    <td>
+      {{ row.institution_info.ministry | format_ministry }}
+      {% for educational_program in row.institution_info.educational_programs %}
+        {% if educational_program %}
+          <br />
+          {{ educational_program }}
+        {% endif %}
+      {% endfor %}
+    </td>
+    <td>{{ row.institution_info.educational_year | empty_string_if_null }}</td>
+    <td>{% if collective_offer.providerId %}{{ collective_offer.provider.name | format_badge("primary") }}{% endif %}</td>
+  </tr>
+{% endfor %}

@@ -1,0 +1,175 @@
+import { act, screen } from '@testing-library/react'
+import { userEvent } from '@testing-library/user-event'
+import { Route, Routes } from 'react-router'
+import { axe } from 'vitest-axe'
+
+import { api } from '@/apiClient/api'
+import {
+  type RenderWithProvidersOptions,
+  renderWithProviders,
+} from '@/commons/utils/renderWithProviders'
+
+import { ResetPassword } from './ResetPassword'
+
+vi.mock('@/commons/utils/recaptcha', () => ({
+  initReCaptchaScript: vi.fn(() => ({ remove: vi.fn() })),
+  getReCaptchaToken: vi.fn(),
+}))
+
+vi.mock('@/apiClient/api', () => ({
+  api: {
+    getProfile: vi.fn(),
+    postNewPassword: vi.fn(),
+    postCheckToken: vi.fn(),
+  },
+}))
+
+const mockUseNavigate = vi.fn()
+vi.mock('react-router', async () => ({
+  ...(await vi.importActual('react-router')),
+  useNavigate: () => mockUseNavigate,
+}))
+
+const snackBarError = vi.fn()
+const snackBarSuccess = vi.fn()
+vi.mock('@/commons/hooks/useSnackBar', async () => ({
+  ...(await vi.importActual('@/commons/hooks/useSnackBar')),
+  useSnackBar: () => ({
+    error: snackBarError,
+    success: snackBarSuccess,
+  }),
+}))
+
+const renderLostPassword = (
+  url: string,
+  options?: RenderWithProvidersOptions
+) => {
+  return renderWithProviders(
+    <Routes>
+      <Route path="/demande-mot-de-passe/:token" element={<ResetPassword />} />
+    </Routes>,
+    {
+      initialRouterEntries: [url],
+      ...options,
+    }
+  )
+}
+
+describe('ResetPassword', () => {
+  describe('FF WIP_PRE_SIGNUP_SIMULATION', () => {
+    it('should use FullLayout when FF is enabled', async () => {
+      const url = '/demande-mot-de-passe/ABC'
+      const tokenCheck = Promise.resolve()
+
+      vi.spyOn(api, 'postCheckToken').mockReturnValue(tokenCheck)
+
+      renderLostPassword(url, {
+        features: ['WIP_PRE_SIGNUP_SIMULATION'],
+      })
+
+      await act(async () => {
+        await tokenCheck
+      })
+
+      expect(
+        screen.getByTestId('reset-password-full-layout')
+      ).toBeInTheDocument()
+
+      expect(screen.queryByTestId('sign-up-header')).not.toBeInTheDocument()
+    })
+
+    it('should use default layout when FF is disabled', async () => {
+      const url = '/demande-mot-de-passe/ABC'
+      const tokenCheck = Promise.resolve()
+
+      vi.spyOn(api, 'postCheckToken').mockReturnValue(tokenCheck)
+
+      renderLostPassword(url)
+
+      await act(async () => {
+        await tokenCheck
+      })
+
+      expect(
+        screen.queryByTestId('reset-password-full-layout')
+      ).not.toBeInTheDocument()
+      expect(screen.getByTestId('sign-up-header')).toBeInTheDocument()
+    })
+  })
+
+  it('should render without accessibility violations', async () => {
+    const url = '/demande-mot-de-passe/ABC'
+    const tokenCheck = Promise.resolve()
+
+    vi.spyOn(api, 'postCheckToken').mockReturnValue(tokenCheck)
+
+    const { container } = renderLostPassword(url)
+
+    await act(async () => {
+      await tokenCheck
+    })
+
+    expect(
+      await screen.findByRole('heading', {
+        name: 'Réinitialisez votre mot de passe',
+      })
+    ).toBeVisible()
+
+    expect(await axe(container)).toHaveNoViolations()
+  })
+
+  it('should be able to reset the password when token is ok', async () => {
+    const url = '/demande-mot-de-passe/ABC'
+
+    vi.spyOn(api, 'postCheckToken').mockResolvedValue()
+
+    renderLostPassword(url)
+
+    await userEvent.type(
+      await screen.findByLabelText(/Nouveau mot de passe/),
+      'MyN3wP4$$w0rd'
+    )
+    await userEvent.type(
+      await screen.findByLabelText(/Confirmez votre nouveau mot de passe/),
+      'MyN3wP4$$w0rd'
+    )
+    await userEvent.click(screen.getByText('Confirmer'))
+
+    expect(snackBarSuccess).toHaveBeenCalledWith('Mot de passe modifié.')
+    expect(mockUseNavigate).toHaveBeenCalledWith('/connexion')
+  })
+
+  it('should immediately redirect to login page if token is missing', async () => {
+    const url = '/demande-mot-de-passe/toto'
+
+    vi.spyOn(api, 'postCheckToken').mockRejectedValue({
+      token: ['Mauvais token'],
+    })
+
+    renderLostPassword(url)
+
+    await vi.waitFor(() => {
+      expect(snackBarError).toHaveBeenCalledWith(
+        'Le lien est invalide ou a expiré. Veuillez recommencer.'
+      )
+      expect(mockUseNavigate).toHaveBeenCalledWith('/demande-mot-de-passe')
+    })
+  })
+
+  it('should immediately redirect to login page if token is invalid', async () => {
+    const url = '/demande-mot-de-passe/ABC'
+
+    vi.spyOn(api, 'postCheckToken').mockRejectedValue({
+      token: ['Votre lien de changement de mot de passe est invalide.'],
+    })
+
+    renderLostPassword(url)
+
+    await vi.waitFor(() => {
+      expect(snackBarError).toHaveBeenCalledWith(
+        'Le lien est invalide ou a expiré. Veuillez recommencer.'
+      )
+      expect(mockUseNavigate).toHaveBeenCalledWith('/demande-mot-de-passe')
+    })
+  })
+})

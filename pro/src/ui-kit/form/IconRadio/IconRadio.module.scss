@@ -1,0 +1,60 @@
+@use "styles/variables/_forms.scss" as forms;
+@use "styles/mixins/_fonts.scss" as fonts;
+@use "styles/mixins/_rem.scss" as rem;
+@use "styles/mixins/_a11y.scss" as a11y;
+@use "styles/mixins/_outline.scss" as outline;
+
+.icon-radio {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.icon-radio-input {
+  @include fonts.body;
+
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  width: rem.torem(40px);
+  height: rem.torem(40px);
+  border-radius: var(--size-border-radius-pill);
+  border: 1px solid var(--color-border-default);
+  cursor: pointer;
+  margin: 0 auto;
+  justify-content: center;
+
+  &:hover {
+    box-shadow: var(--shadow-overlay);
+  }
+
+  &:focus {
+    @include outline.focus-outline;
+  }
+
+  &:disabled {
+    @include fonts.button;
+
+    background: var(--color-background-disabled);
+    border-color: var(--color-border-disabled);
+    color: var(--color-text-disabled);
+  }
+
+  &-checked {
+    @include fonts.button;
+
+    border: rem.torem(2px) solid var(--color-border-brand-primary);
+    background-color: var(--color-background-brand-primary-selected);
+  }
+}
+
+.icon-radio-icon {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.icon-radio-label {
+  @include a11y.visually-hidden;
+}

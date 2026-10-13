@@ -1,0 +1,16 @@
+import type { StoryObj } from '@storybook/react-vite'
+import { withRouter } from 'storybook-addon-remix-react-router'
+
+import { <% name %> } from './<% name %>'
+
+export default {
+  title: '@/ui-kit/<% name %>',
+  decorators: [withRouter],
+  component: <% name %>,
+}
+
+export const Default: StoryObj<typeof <% name %>> = {
+  args: {
+    /* … */
+  },
+}

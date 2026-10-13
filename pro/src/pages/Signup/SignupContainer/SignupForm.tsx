@@ -1,0 +1,155 @@
+import { useId } from 'react'
+import { useFormContext } from 'react-hook-form'
+
+import type { ProUserCreationBodyV2Model } from '@/apiClient/v1'
+import { useActiveFeature } from '@/commons/hooks/useActiveFeature'
+import { AlreadyHasAccount } from '@/components/AlreadyHasAccount/AlreadyHasAccount'
+import { FormLayout } from '@/components/FormLayout/FormLayout'
+import { LegalInfos } from '@/components/LegalInfos/LegalInfos'
+import { ScrollToFirstHookFormErrorAfterSubmit } from '@/components/ScrollToFirstErrorAfterSubmit/ScrollToFirstErrorAfterSubmit'
+import { SignupStepper } from '@/components/SignupStepper/SignupStepper'
+import { Button } from '@/design-system/Button/Button'
+import { ButtonVariant } from '@/design-system/Button/types'
+import { Checkbox } from '@/design-system/Checkbox/Checkbox'
+import { PasswordInput } from '@/design-system/PasswordInput/PasswordInput'
+import { TextInput } from '@/design-system/TextInput/TextInput'
+import { EmailSpellCheckInput } from '@/ui-kit/form/EmailSpellCheckInput/EmailSpellCheckInput'
+
+import styles from './SignupContainer.module.scss'
+import titleStyles from './SignupForm.module.scss'
+export const SignupForm = (): JSX.Element => {
+  const isSignupSimulationEnabled = useActiveFeature(
+    'WIP_PRE_SIGNUP_SIMULATION'
+  )
+  const formId = useId()
+
+  const {
+    formState: { isSubmitting, errors },
+    register,
+    watch,
+    setValue,
+  } = useFormContext<ProUserCreationBodyV2Model>()
+
+  return (
+    <>
+      {isSignupSimulationEnabled && (
+        <>
+          <SignupStepper />
+          <h1 className={titleStyles['title']}>Créez votre compte</h1>
+          <p className={styles['subheading-description']}>
+            Ces informations vous permettront de vous connecter à pass Culture
+            Pro.
+          </p>
+        </>
+      )}
+
+      <ScrollToFirstHookFormErrorAfterSubmit />
+
+      <FormLayout>
+        <div className={styles['signup-form-row']}>
+          <FormLayout.Row
+            mdSpaceAfter
+            key={`${formId}-firstName`}
+            className={styles['signup-form-group']}
+          >
+            <TextInput
+              label="Prénom"
+              {...register('firstName')}
+              error={errors.firstName?.message}
+              autoComplete="given-name"
+              required
+              requiredIndicator={
+                isSignupSimulationEnabled ? 'explicit' : 'symbol'
+              }
+            />
+          </FormLayout.Row>
+          <FormLayout.Row
+            mdSpaceAfter
+            key={`${formId}-lastName`}
+            className={styles['signup-form-group']}
+          >
+            <TextInput
+              label="Nom"
+              {...register('lastName')}
+              error={errors.lastName?.message}
+              autoComplete="family-name"
+              required
+              requiredIndicator={
+                isSignupSimulationEnabled ? 'explicit' : 'symbol'
+              }
+            />
+          </FormLayout.Row>
+        </div>
+        <FormLayout.Row mdSpaceAfter>
+          <EmailSpellCheckInput
+            {...register('email')}
+            error={errors.email?.message}
+            onApplyTip={(tip) => {
+              setValue('email', tip)
+            }}
+            description="Format : email@exemple.com"
+            label="Adresse email"
+            required
+            requiredIndicator={
+              isSignupSimulationEnabled ? 'explicit' : 'symbol'
+            }
+          />
+        </FormLayout.Row>
+
+        <FormLayout.Row mdSpaceAfter>
+          <PasswordInput
+            {...register('password')}
+            value={watch('password')}
+            label="Mot de passe"
+            autoComplete="new-password"
+            required
+            requiredIndicator={
+              isSignupSimulationEnabled ? 'explicit' : 'symbol'
+            }
+            error={errors.password?.message}
+            displayValidation
+          />
+        </FormLayout.Row>
+
+        <FormLayout.Row>
+          <Checkbox
+            label="J’accepte d’être contacté par email pour recevoir les
+                      nouveautés du pass Culture et contribuer à son
+                      amélioration (facultatif)"
+            {...register('contactOk')}
+            checked={Boolean(watch('contactOk'))}
+          />
+        </FormLayout.Row>
+        <LegalInfos className={styles['sign-up-infos-before-signup']} />
+        <div className={styles['buttons-field']}>
+          {isSignupSimulationEnabled ? (
+            <>
+              <Button
+                as="router-link"
+                to="/inscription/preparation/resultats"
+                isLoading={isSubmitting}
+                disabled={isSubmitting}
+                variant={ButtonVariant.SECONDARY}
+                label="Retour"
+              />
+              <Button
+                type="submit"
+                isLoading={isSubmitting}
+                disabled={isSubmitting}
+                label="Continuer"
+              />
+            </>
+          ) : (
+            <Button
+              type="submit"
+              isLoading={isSubmitting}
+              disabled={isSubmitting}
+              label="S’inscrire"
+            />
+          )}
+        </div>
+        <AlreadyHasAccount />
+      </FormLayout>
+    </>
+  )
+}
