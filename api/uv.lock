@@ -1,9 +1,9 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.13.*"
 
 [options]
-exclude-newer = "2026-09-17T14:39:17.368732Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -2151,7 +2151,7 @@ requires-dist = [
     { name = "libsass", specifier = "==0.23.0" },
     { name = "markupsafe", specifier = "==3.0.3" },
     { name = "openpyxl", specifier = "==3.1.5" },
-    { name = "phonenumberslite", specifier = "==9.0.40" },
+    { name = "phonenumberslite", specifier = "==9.0.43" },
     { name = "pillow", specifier = "==12.3.0" },
     { name = "prometheus-flask-exporter", specifier = "==0.23.2" },
     { name = "psycopg2", specifier = "==2.9.13" },
@@ -2267,11 +2267,11 @@ wheels = [
 
 [[package]]
 name = "phonenumberslite"
-version = "9.0.40"
+version = "9.0.43"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/da/d9/24781f4593a1d3ede8f8bd3847539c80ebeb3cddc687d4c4e8aecd84c11c/phonenumberslite-9.0.40.tar.gz", hash = "sha256:b12d16ae17aae2a0638d11bf10ae23484f01292500a9ceaea203cf5e7bd98a0c", size = 292835, upload-time = "2026-09-24T06:58:23.45Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6b/7f/286d961f333ee8e7bd06b5150e01e90f32b2bf0ff46787239fcf7bc2fb59/phonenumberslite-9.0.43.tar.gz", hash = "sha256:829811eedb170ff8ecc7aefed2d91366e840daeb2811748adbdd15918916e2b1", size = 294673, upload-time = "2026-11-06T11:43:11.137Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/03/08/0adc94b36dc18858e3327f8d52600dca3d301e9cef32a32d64e194901f62/phonenumberslite-9.0.40-py2.py3-none-any.whl", hash = "sha256:e504bb005cc6a94fefedc89dfcad614378848a42b15f7ac03a7639838849b5ca", size = 473080, upload-time = "2026-09-24T06:58:22.075Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/1b/2c7f383af6afe7b9581445e43a545cae738c405d04241e5e485f7d9833c0/phonenumberslite-9.0.43-py2.py3-none-any.whl", hash = "sha256:986de6a460e9f67215b00d5ec68e7b909eb7f7830581e54269d413756033913e", size = 473659, upload-time = "2026-11-06T11:43:09.584Z" },
 ]
 
 [[package]]
