@@ -71,7 +71,7 @@ dependencies = [
   "redis==6.4.0",
   "regex==2026.9.29",
   "requests==2.34.2",
-  "schwifty==2026.7.3",
+  "schwifty==2026.11.3",
   "semver==3.1.0",
   "sentry-sdk[flask,celery]==2.70.0",
   "shapely ==2.1.2",
