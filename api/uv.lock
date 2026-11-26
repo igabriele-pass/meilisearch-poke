@@ -1,9 +1,9 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.13.*"
 
 [options]
-exclude-newer = "2026-09-17T14:39:17.368732Z"
+exclude-newer = "0001-01-01T00:00:00Z" # This has no effect and is included for backwards compatibility when using relative exclude-newer values.
 exclude-newer-span = "P7D"
 
 [manifest]
@@ -86,7 +86,7 @@ wheels = [
 
 [[package]]
 name = "algoliasearch"
-version = "4.47.0"
+version = "4.53.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -96,9 +96,9 @@ dependencies = [
     { name = "requests" },
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bd/d0/94b4c0fa53ed1f619f05d05b1fcf55f0f7031db2276950b4f54aab676157/algoliasearch-4.47.0.tar.gz", hash = "sha256:d83a83aa120237236adb1e20746d53bdd96fcde5f6ae4a36542d4f17dced96e9", size = 472130, upload-time = "2026-09-09T15:25:20.82Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/64/e0/8f35b24de5eccff2bfc510b416273327c7ae29357e65513898c83a72ddf8/algoliasearch-4.53.0.tar.gz", hash = "sha256:d764eb9cf66fcae2a329f4cd6246a62a7a71ae43bd421ceba0f708f416f12bef", size = 508825, upload-time = "2026-11-17T13:47:52.7Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a7/c8/2b23f2465743c63c1d086d204b1d2a78b16443ae0ee5eaf84f6561212ae7/algoliasearch-4.47.0-py3-none-any.whl", hash = "sha256:afae7817de8fd63c56d93b94504ac0e417ef0edf3faea7b718036d00ff907e88", size = 1302608, upload-time = "2026-09-09T15:25:18.962Z" },
+    { url = "https://files.pythonhosted.org/packages/d8/2d/aac7f3ceac6513a204ebb6dbed36116ff5c1cfc9269555016083fcdbbb61/algoliasearch-4.53.0-py3-none-any.whl", hash = "sha256:04973590e016e5214d0cc2f857d894b8d50d10e359cd0591f03437997d9f0ba7", size = 1402840, upload-time = "2026-11-17T13:47:50.995Z" },
 ]
 
 [[package]]
@@ -2112,7 +2112,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = "==1.20.0" },
-    { name = "algoliasearch", specifier = "==4.47.0" },
+    { name = "algoliasearch", specifier = "==4.53.0" },
     { name = "authlib", specifier = "==1.8.0" },
     { name = "babel", specifier = "==2.18.0" },
     { name = "bcrypt", specifier = "==5.0.0" },
